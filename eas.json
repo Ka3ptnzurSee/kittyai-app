@@ -1,0 +1,30 @@
+{
+  "cli": {
+    "version": ">= 5.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal"
+    },
+    "production": {
+      "autoIncrement": true,
+      "credentialsSource": "local"
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6818109107",
+        "appleTeamId": "VW2SBC8228",
+        "ascApiKeyPath": "credentials/AscApiKey_26AXZ5M8UR.p8",
+        "ascApiKeyId": "26AXZ5M8UR",
+        "ascApiKeyIssuerId": "1a64f714-48a7-43dd-9737-f41c424b20ba"
+      }
+    }
+  }
+}
