@@ -1,0 +1,48 @@
+name: iOS Build + TestFlight
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Restore Apple credentials
+        env:
+          APPLE_CREDS: ${{ secrets.APPLE_CREDS }}
+        run: echo "$APPLE_CREDS" | base64 -d | tar xz
+
+      - name: Restore Expo session
+        env:
+          EXPO_STATE: ${{ secrets.EXPO_STATE }}
+        run: |
+          mkdir -p ~/.expo
+          echo "$EXPO_STATE" | base64 -d > ~/.expo/state.json
+
+      - name: Install EAS CLI + deps
+        run: |
+          npm install -g eas-cli
+          npm install
+
+      - name: Build iOS (local, umgeht EAS-Cloud-Kontingent)
+        env:
+          CI: 1
+        run: eas build --platform ios --profile production --non-interactive --local
+
+      - name: Submit to TestFlight
+        env:
+          CI: 1
+        run: |
+          IPA=$(find . -name "*.ipa" -not -path "./node_modules/*" | head -1)
+          echo "IPA gefunden: $IPA"
+          if [ -z "$IPA" ]; then echo "Keine .ipa gefunden"; exit 1; fi
+          eas submit --platform ios --profile production --non-interactive --path "$IPA"
