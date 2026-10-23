@@ -104,10 +104,12 @@ export default function App() {
   const [taskInput, setTaskInput] = useState("");
   const listRef = useRef<FlatList<Msg>>(null);
   const loadedRef = useRef(false);
-  const finalTranscriptRef = useRef("");
   const dictationBaseRef = useRef("");
-  const inputRef = useRef(input);
-  inputRef.current = input;
+  const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
+  const inputRef = useRef("");
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
   const player = useAudioPlayer();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const abortedRef = useRef<Set<string>>(new Set());
@@ -502,33 +504,49 @@ export default function App() {
   // Der Text bleibt stehen und editierbar; der Nutzer schickt manuell mit ➤ ab.
   useSpeechRecognitionEvent("start", () => {
     setListening(true);
-    finalTranscriptRef.current = "";
+    finalSegmentsRef.current = "";
     dictationBaseRef.current = inputRef.current.trim(); // schon Getipptes behalten
   });
   useSpeechRecognitionEvent("result", (event) => {
-    const transcript = event.results[0]?.transcript ?? "";
-    if (event.isFinal) finalTranscriptRef.current = transcript;
+    // event.results sind Alternativen (maxAlternatives) — results[0] ist die beste.
+    const transcript = (event.results[0]?.transcript ?? "").trim();
     const base = dictationBaseRef.current;
-    setInput(base ? `${base} ${transcript}` : transcript);
+    if (event.isFinal) {
+      // iOS 18 liefert Finals segmentweise (mit prependetem Leerzeichen ab dem
+      // 2. Segment), Android ebenso → in beiden Fällen anhängen statt überschreiben.
+      finalSegmentsRef.current = finalSegmentsRef.current
+        ? `${finalSegmentsRef.current} ${transcript}`
+        : transcript;
+      setInput([base, finalSegmentsRef.current].filter(Boolean).join(" "));
+    } else {
+      // Interim live anzeigen: bisherige finale Segmente + aktuelles Partial
+      const interim = [finalSegmentsRef.current, transcript].filter(Boolean).join(" ");
+      setInput([base, interim].filter(Boolean).join(" "));
+    }
   });
   useSpeechRecognitionEvent("end", () => {
     setListening(false);
-    const text = finalTranscriptRef.current.trim();
     const base = dictationBaseRef.current;
+    const text = [base, finalSegmentsRef.current].filter(Boolean).join(" ").trim();
     // Text bleibt im Eingabefeld – Nutzer kann korrigieren und dann ➤ drücken
-    if (text) setInput(base ? `${base} ${text}` : text);
-    finalTranscriptRef.current = "";
+    if (text) setInput(text);
+    finalSegmentsRef.current = "";
     dictationBaseRef.current = "";
   });
   useSpeechRecognitionEvent("error", (event) => {
     setListening(false);
-    finalTranscriptRef.current = "";
-    dictationBaseRef.current = "";
+    const base = dictationBaseRef.current;
+    const recognized = finalSegmentsRef.current;
     if (event.error === "no-speech" || event.error === "aborted") {
-      // nichts erkannt / abgebrochen – einfach zurücksetzen (Text im Feld bleibt)
+      // nichts erkannt / abgebrochen – Text im Feld bleibt unverändert
     } else {
-      setInput(`Spracherkennung: ${event.message || event.error}`);
+      const msg = `Spracherkennung: ${event.message || event.error || "unbekannt"}`;
+      // Erkannte Finals behalten, Meldung anhängen statt Feldinhalt ersetzen
+      const text = [base, recognized].filter(Boolean).join(" ");
+      setInput(text ? `${text}\n${msg}` : msg);
     }
+    finalSegmentsRef.current = "";
+    dictationBaseRef.current = "";
   });
 
   async function toggleMic() {
@@ -539,10 +557,10 @@ export default function App() {
     try {
       const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!perm.granted) {
-        setInput("Bitte Mikrofon & Spracherkennung in den Einstellungen erlauben.");
+        const base = inputRef.current.trim();
+        setInput(base ? `${base}\nBitte Mikrofon & Spracherkennung in den Einstellungen erlauben.` : "Bitte Mikrofon & Spracherkennung in den Einstellungen erlauben.");
         return;
       }
-      finalTranscriptRef.current = "";
       ExpoSpeechRecognitionModule.start({
         lang: "de-DE",
         interimResults: true,
@@ -550,8 +568,11 @@ export default function App() {
         addsPunctuation: true,
         iosTaskHint: "dictation",
       });
-    } catch {
-      // ignorieren
+    } catch (e) {
+      setListening(false);
+      const base = inputRef.current.trim();
+      const msg = `Spracherkennung konnte nicht gestartet werden: ${e instanceof Error ? e.message : String(e)}`;
+      setInput(base ? `${base}\n${msg}` : msg);
     }
   }
 

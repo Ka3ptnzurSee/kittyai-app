@@ -5,7 +5,9 @@ set -u
 export HOME=/root
 
 # git als root auf fremd-eigentümlichen Repos erlauben (sonst "dubious ownership")
-git config --global --add safe.directory /opt/pi-app/app 2>/dev/null || true
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -qx '/opt/pi-app/app'; then
+  git config --global --add safe.directory /opt/pi-app/app 2>/dev/null || true
+fi
 
 cd /opt/pi-app/app || { echo "FEHLER: /opt/pi-app/app nicht gefunden"; exit 1; }
 exec bash scripts/build-and-submit.sh
