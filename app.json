@@ -16,9 +16,11 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.meister.piapp",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSMicrophoneUsageDescription": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
+        "NSSpeechRecognitionUsageDescription": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
       },
-      "buildNumber": "8"
+      "buildNumber": "13"
     },
     "android": {
       "package": "com.meister.piapp",
@@ -40,7 +42,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
+          "speechRecognitionPermission": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
+        }
+      ]
     ],
     "extra": {
       "eas": {
