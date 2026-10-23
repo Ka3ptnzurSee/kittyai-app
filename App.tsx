@@ -179,8 +179,8 @@ export default function App() {
         if (savedToken) {
           setApiToken(savedToken);
         } else {
-          // Auto-Token aus der Build-Konfiguration (app.json extra.apiToken)
-          const cfgToken = Constants.expoConfig?.extra?.apiToken || "";
+          // Auto-Token aus Build-Zeit-Secret (EXPO_PUBLIC_API_TOKEN)
+          const cfgToken = (process.env as any)?.EXPO_PUBLIC_API_TOKEN || "";
           if (cfgToken) {
             savedToken = cfgToken;
             setApiToken(cfgToken);

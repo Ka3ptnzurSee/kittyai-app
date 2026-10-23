@@ -36,6 +36,7 @@ jobs:
       - name: Build iOS (local, umgeht EAS-Cloud-Kontingent)
         env:
           CI: 1
+          EXPO_PUBLIC_API_TOKEN: ${{ secrets.EXPO_PUBLIC_API_TOKEN }}
         run: eas build --platform ios --profile production --non-interactive --local
 
       - name: Submit to TestFlight
