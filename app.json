@@ -44,6 +44,12 @@
     "plugins": [
       "expo-audio",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "KittyAI braucht Zugriff auf deine Fotos, damit du Bilder anhängen kannst."
+        }
+      ],
+      [
         "expo-speech-recognition",
         {
           "microphonePermission": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",

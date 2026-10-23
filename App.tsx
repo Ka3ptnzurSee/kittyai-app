@@ -22,10 +22,12 @@ import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
+import * as ImagePicker from "expo-image-picker";
+import * as DocumentPicker from "expo-document-picker";
 import { Utf8Decoder, argSummary, formatTime, uid } from "./lib";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[] };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[] };
 type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number };
 type Task = {
   id: string;
@@ -92,6 +94,8 @@ export default function App() {
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [listening, setListening] = useState(false);
+  const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [speak, setSpeak] = useState(true);
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -319,16 +323,55 @@ export default function App() {
     Speech.speak(text, { language: "de-DE" });
   }
 
+  async function pickImage() {
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,
+        quality: 0.8,
+      });
+      if (res.canceled || !res.assets?.length) return;
+      const a = res.assets[0];
+      if (a.base64) {
+        setPendingImages((p) => [...p, { data: a.base64 || "", mediaType: a.mimeType || "image/jpeg", uri: a.uri }]);
+      }
+    } catch {
+      // Galerie nicht verfügbar
+    }
+  }
+
+  async function pickFile() {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
+      if (res.canceled || !res.assets?.length) return;
+      const a = res.assets[0];
+      const f = new File(a.uri);
+      const content = await f.text();
+      setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
+    } catch {
+      // Datei nicht lesbar
+    }
+  }
+
   async function send(text?: string) {
     const message = (text ?? input).trim();
-    if (!message) return;
+    if (!message && pendingImages.length === 0 && pendingFiles.length === 0) return;
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
+    let finalMessage = message;
+    if (pendingFiles.length) {
+      const fileText = pendingFiles.map((f) => `### ${f.name}\n${f.content}`).join("\n\n");
+      finalMessage = message ? `${message}\n\n[Angehängte Dateien]\n${fileText}` : `[Angehängte Dateien]\n${fileText}`;
+    }
+    const images = pendingImages.map((im) => ({ data: im.data, mediaType: im.mediaType }));
+    const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
     setChatThinking(chatId, "");
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message };
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : "📎 Datei"), images: imageUris };
     const aiId = uid("a");
+    setPendingImages([]);
+    setPendingFiles([]);
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
     patchChat(chatId, (c) => ({
       ...c,
@@ -340,7 +383,7 @@ export default function App() {
     markBusy(chatId, true);
 
     try {
-      await streamChat(message, chatId, aiId);
+      await streamChat(finalMessage, chatId, aiId, images);
     } catch (e) {
       if (abortedRef.current.has(chatId)) {
         abortedRef.current.delete(chatId);
@@ -354,7 +397,7 @@ export default function App() {
         const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/chat`, {
           method: "POST",
           headers: authHeaders(),
-          body: JSON.stringify({ message, chatId }),
+          body: JSON.stringify({ message: finalMessage, chatId, images }),
           signal: ctrl.signal,
         });
         if (!res.ok) {
@@ -384,7 +427,7 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = []) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
@@ -392,7 +435,7 @@ export default function App() {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ message, chatId }),
+      body: JSON.stringify({ message, chatId, images }),
       signal: controller.signal,
     });
 
@@ -771,6 +814,19 @@ export default function App() {
             />
 
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+              {(pendingImages.length > 0 || pendingFiles.length > 0) && (
+                <View style={styles.attachPreview}>
+                  {pendingImages.map((im, i) => (
+                    <Text key={`img${i}`} style={styles.attachChip}>🖼 Bild</Text>
+                  ))}
+                  {pendingFiles.map((f, i) => (
+                    <Text key={`file${i}`} style={styles.attachChip} numberOfLines={1}>📎 {f.name}</Text>
+                  ))}
+                  <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); }} hitSlop={8}>
+                    <Text style={styles.attachClear}>✕</Text>
+                  </Pressable>
+                </View>
+              )}
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (
                   <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
@@ -781,6 +837,12 @@ export default function App() {
                     <Text style={styles.micText}>🎤</Text>
                   </Pressable>
                 )}
+                <Pressable onPress={pickImage} style={styles.micBtn}>
+                  <Text style={styles.micText}>🖼</Text>
+                </Pressable>
+                <Pressable onPress={pickFile} style={styles.micBtn}>
+                  <Text style={styles.micText}>📎</Text>
+                </Pressable>
                 <TextInput
                   style={styles.input}
                   value={input}
@@ -1026,6 +1088,9 @@ const styles = StyleSheet.create({
   chatDelete: { fontSize: 14, color: colors.danger, fontWeight: "700" },
   micBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   micBtnActive: { backgroundColor: colors.danger },
+  attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
+  attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
+  attachClear: { color: colors.danger, fontSize: 16, fontWeight: "700", paddingHorizontal: 6 },
   stopBtn: { backgroundColor: colors.danger },
   micText: { fontSize: 20 },
   input: {
