@@ -2,6 +2,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -328,12 +329,18 @@ export default function App() {
       const res = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         base64: true,
-        quality: 0.8,
+        quality: 0.7,
+        allowsEditing: true,
       });
       if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
-      if (a.base64) {
-        setPendingImages((p) => [...p, { data: a.base64 || "", mediaType: a.mimeType || "image/jpeg", uri: a.uri }]);
+      if (a.fileSize && a.fileSize > 5 * 1024 * 1024) {
+        Alert.alert("Bild zu groß", "Maximal 5 MB — bitte ein kleineres Bild wählen.");
+        return;
+      }
+      const b64 = a.base64 ?? "";
+      if (b64) {
+        setPendingImages((p) => [...p, { data: b64, mediaType: a.mimeType || "image/jpeg", uri: a.uri }]);
       }
     } catch {
       // Galerie nicht verfügbar
@@ -345,6 +352,10 @@ export default function App() {
       const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
       if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
+      if (a.size && a.size > 2 * 1024 * 1024) {
+        Alert.alert("Datei zu groß", "Maximal 2 MB — bitte eine kleinere Datei wählen.");
+        return;
+      }
       const f = new File(a.uri);
       const content = await f.text();
       setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
