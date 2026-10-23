@@ -22,6 +22,7 @@ import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
+import { Utf8Decoder, argSummary, formatTime, uid } from "./lib";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[] };
@@ -35,70 +36,11 @@ type Task = {
   doneAt?: string;
 };
 
-// Kleiner inkrementeller UTF-8-Decoder (kein globaler TextDecoder nötig).
-class Utf8Decoder {
-  private pending: number[] = [];
-  private expected = 0;
-  decode(bytes: Uint8Array): string {
-    let out = "";
-    for (let i = 0; i < bytes.length; i++) {
-      const b = bytes[i];
-      if (this.expected === 0) {
-        if (b < 0x80) out += String.fromCharCode(b);
-        else if ((b >> 5) === 0b110) { this.pending = [b]; this.expected = 1; }
-        else if ((b >> 4) === 0b1110) { this.pending = [b]; this.expected = 2; }
-        else if ((b >> 3) === 0b11110) { this.pending = [b]; this.expected = 3; }
-        else out += "\uFFFD";
-      } else {
-        this.pending.push(b);
-        this.expected--;
-        if (this.expected === 0) out += this.flush();
-      }
-    }
-    return out;
-  }
-  private flush(): string {
-    const p = this.pending;
-    this.pending = [];
-    let cp: number;
-    if (p.length === 2) cp = ((p[0] & 0x1f) << 6) | (p[1] & 0x3f);
-    else if (p.length === 3) cp = ((p[0] & 0x0f) << 12) | ((p[1] & 0x3f) << 6) | (p[2] & 0x3f);
-    else cp = ((p[0] & 0x07) << 18) | ((p[1] & 0x3f) << 12) | ((p[2] & 0x3f) << 6) | (p[3] & 0x3f);
-    if (cp > 0xffff) {
-      cp -= 0x10000;
-      return String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
-    }
-    return String.fromCharCode(cp);
-  }
-}
-
-function argSummary(args: unknown): string {
-  if (!args || typeof args !== "object") return "";
-  const a = args as Record<string, unknown>;
-  if (typeof a.command === "string") return a.command;
-  if (typeof a.path === "string") return a.path;
-  if (typeof a.url === "string") return a.url;
-  const keys = Object.keys(a);
-  if (keys.length) {
-    const v = a[keys[0]];
-    if (typeof v === "string") return v.slice(0, 60);
-    return keys[0];
-  }
-  return "";
-}
-
-function formatTime(ts: number): string {
-  const d = new Date(ts);
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
-}
-
 const STORAGE_KEY = "pi-server-url";
 const TOKEN_KEY = "pi-api-token";
 const CHATS_KEY = "pi-chats-v2";
 const CWD_KEY = "pi-cwd";
+const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 
 // Dark Theme
 const colors = {
@@ -147,8 +89,8 @@ export default function App() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [thinking, setThinking] = useState("");
+  const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
+  const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [listening, setListening] = useState(false);
   const [speak, setSpeak] = useState(true);
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
@@ -163,12 +105,34 @@ export default function App() {
   const listRef = useRef<FlatList<Msg>>(null);
   const loadedRef = useRef(false);
   const finalTranscriptRef = useRef("");
+  const dictationBaseRef = useRef("");
+  const inputRef = useRef(input);
+  inputRef.current = input;
   const player = useAudioPlayer();
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const abortedRef = useRef<Set<string>>(new Set());
+  const tasksAbortRef = useRef<AbortController | null>(null);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
+  const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
+  const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
+
+  function markBusy(chatId: string, busy: boolean) {
+    setBusyChatIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(chatId);
+      else next.delete(chatId);
+      return next;
+    });
+  }
+  function setChatThinking(chatId: string, value: string) {
+    setThinkingByChat((prev) => ({ ...prev, [chatId]: value }));
+  }
 
   function authHeaders(): Record<string, string> {
-    return { "Content-Type": "application/json", ...(apiToken ? { "X-API-Token": apiToken } : {}) };
+    // Token nur über HTTPS senden – kein Klartext-Token im LAN-/Dev-Modus
+    const secure = serverUrl.startsWith("https://");
+    return { "Content-Type": "application/json", ...(apiToken && secure ? { "X-API-Token": apiToken } : {}) };
   }
 
   function patchChat(chatId: string, fn: (c: Chat) => Chat) {
@@ -203,7 +167,17 @@ export default function App() {
       let savedToken = "";
       try {
         savedToken = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
-        if (savedToken) setApiToken(savedToken);
+        if (savedToken) {
+          setApiToken(savedToken);
+        } else {
+          // Auto-Token aus der Build-Konfiguration (app.json extra.apiToken)
+          const cfgToken = Constants.expoConfig?.extra?.apiToken || "";
+          if (cfgToken) {
+            savedToken = cfgToken;
+            setApiToken(cfgToken);
+            await AsyncStorage.setItem(TOKEN_KEY, cfgToken);
+          }
+        }
       } catch {
         // ignorieren
       }
@@ -247,17 +221,22 @@ export default function App() {
     if (tab !== "tasks") return;
     loadTasks();
     const t = setInterval(loadTasks, 4000);
-    return () => clearInterval(t);
-  }, [tab, serverUrl]);
+    return () => {
+      clearInterval(t);
+      tasksAbortRef.current?.abort();
+    };
+  }, [tab, serverUrl, apiToken]);
 
   async function registerPush(url: string, tok?: string) {
+    // Push-Token (sensibler Geräte-Credential) nur über HTTPS übertragen
+    if (!url.startsWith("https://")) return;
     try {
       const { status } = await Notifications.requestPermissionsAsync();
       if (status !== "granted") return;
       const token = (await Notifications.getExpoPushTokenAsync()).data;
       await fetch(`${url.replace(/\/+$/, "")}/register-push`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(tok ? { "X-API-Token": tok } : {}) },
+        headers: { "Content-Type": "application/json", ...(tok && url.startsWith("https://") ? { "X-API-Token": tok } : {}) },
         body: JSON.stringify({ token }),
       });
     } catch {
@@ -266,7 +245,7 @@ export default function App() {
   }
 
   function newChat(): string {
-    const id = `c${Date.now()}`;
+    const id = uid("c");
     const chat: Chat = { id, title: "Neuer Chat", messages: [], createdAt: Date.now(), updatedAt: Date.now() };
     setChats((cs) => [chat, ...cs]);
     setActiveChatId(id);
@@ -302,12 +281,12 @@ export default function App() {
     // Nur bei tatsächlicher Änderung den Server wechseln (vermeidet unnötigen pi-Neustart)
     if (cwdVal && cwdVal !== cwd) {
       try {
-        await fetch(`${url}/api/set-cwd`, {
+        const r = await fetch(`${url}/api/set-cwd`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...(tok ? { "X-API-Token": tok } : {}) },
+          headers: { "Content-Type": "application/json", ...(tok && url.startsWith("https://") ? { "X-API-Token": tok } : {}) },
           body: JSON.stringify({ cwd: cwdVal }),
         });
-        setCwd(cwdVal);
+        if (r.ok) setCwd(cwdVal);
       } catch {
         // ignorieren
       }
@@ -340,13 +319,14 @@ export default function App() {
 
   async function send(text?: string) {
     const message = (text ?? input).trim();
-    if (!message || busy) return;
+    if (!message) return;
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
+    if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
     setInput("");
-    setThinking("");
-    const userMsg: Msg = { id: `u${Date.now()}`, role: "user", text: message };
-    const aiId = `a${Date.now()}`;
+    setChatThinking(chatId, "");
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message };
+    const aiId = uid("a");
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
     patchChat(chatId, (c) => ({
       ...c,
@@ -354,41 +334,64 @@ export default function App() {
       messages: [...c.messages, userMsg, aiMsg],
       updatedAt: Date.now(),
     }));
-    setBusy(true);
+    abortedRef.current.delete(chatId);
+    markBusy(chatId, true);
 
     try {
       await streamChat(message, chatId, aiId);
     } catch (e) {
-      // Fallback: synchroner /chat
+      if (abortedRef.current.has(chatId)) {
+        abortedRef.current.delete(chatId);
+        return; // Nutzer-Abbruch → kein Fallback
+      }
+      // Fallback: synchroner /chat (mit eigenem Abort-Timeout gegen Busy-Lockup)
+      const ctrl = new AbortController();
+      abortControllersRef.current.set(chatId, ctrl);
+      const timer = setTimeout(() => ctrl.abort(), STREAM_TIMEOUT_MS);
       try {
         const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/chat`, {
           method: "POST",
           headers: authHeaders(),
           body: JSON.stringify({ message, chatId }),
+          signal: ctrl.signal,
         });
+        if (!res.ok) {
+          const ct = res.headers.get("content-type") || "";
+          const body = await res.text().catch(() => "");
+          throw new Error(ct.includes("json") ? body.slice(0, 200) : `Server/Proxy-Fehler (HTTP ${res.status})`);
+        }
         const data = await res.json();
         const reply = (data.reply || data.error || "(keine Antwort)").trim();
         const activity: Activity[] = Array.isArray(data.activity) ? data.activity : [];
         patchMsg(chatId, aiId, (m) => ({ ...m, text: reply, activity }));
         if (speak && data.reply) speakReply(data.reply);
       } catch (e2) {
+        const msg = ctrl.signal.aborted ? "Zeitüberschreitung beim Server" : (e2 instanceof Error ? e2.message : String(e2));
         appendMsg(chatId, {
-          id: `e${Date.now()}`,
+          id: uid("e"),
           role: "assistant",
-          text: `Fehler: ${e2 instanceof Error ? e2.message : String(e2)}\n\nLäuft der Server? Server-URL: ${serverUrl}`,
+          text: `Fehler: ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}`,
         });
+      } finally {
+        clearTimeout(timer);
+        if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
       }
     } finally {
-      setBusy(false);
-      setThinking("");
+      markBusy(chatId, false);
+      setChatThinking(chatId, "");
     }
   }
 
   async function streamChat(message: string, chatId: string, aiId: string) {
+    const controller = new AbortController();
+    abortControllersRef.current.set(chatId, controller);
+    const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
+    try {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({ message, chatId }),
+      signal: controller.signal,
     });
 
     if (!res.ok) {
@@ -413,7 +416,7 @@ export default function App() {
         patchMsg(chatId, aiId, (m) => ({ ...m, text: m.text + delta }));
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
-        setThinking((prev) => (prev + delta).slice(-800));
+        setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-800) }));
       } else if (t === "tool_start") {
         const d = (e.data || {}) as { id?: string; tool?: string; args?: unknown };
         const a: Activity = {
@@ -441,7 +444,7 @@ export default function App() {
         finalActivity = Array.isArray(d.activity) ? d.activity : [];
       } else if (t === "error") {
         const msg2 = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
-        appendMsg(chatId, { id: `e${Date.now()}`, role: "assistant", text: `⚠️ ${msg2}` });
+        appendMsg(chatId, { id: uid("e"), role: "assistant", text: `⚠️ ${msg2}` });
       }
     };
 
@@ -472,37 +475,57 @@ export default function App() {
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
+    } finally {
+      clearTimeout(timer);
+      if (abortControllersRef.current.get(chatId) === controller) abortControllersRef.current.delete(chatId);
+    }
   }
 
-  async function abort() {
+  async function abort(chatId?: string) {
+    if (chatId) {
+      abortedRef.current.add(chatId);
+      abortControllersRef.current.get(chatId)?.abort();
+      abortControllersRef.current.delete(chatId);
+    }
     try {
-      await fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, { method: "POST", headers: authHeaders() });
+      await fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ chatId: chatId || "" }),
+      });
     } catch {
       // ignorieren
     }
   }
 
-  // Native Spracherkennung (Diktieren) — Events registrieren
+  // Native Spracherkennung (Diktieren) — transkribiert ins Eingabefeld.
+  // Der Text bleibt stehen und editierbar; der Nutzer schickt manuell mit ➤ ab.
   useSpeechRecognitionEvent("start", () => {
     setListening(true);
     finalTranscriptRef.current = "";
+    dictationBaseRef.current = inputRef.current.trim(); // schon Getipptes behalten
   });
   useSpeechRecognitionEvent("result", (event) => {
     const transcript = event.results[0]?.transcript ?? "";
-    if (transcript) setInput(transcript);
     if (event.isFinal) finalTranscriptRef.current = transcript;
+    const base = dictationBaseRef.current;
+    setInput(base ? `${base} ${transcript}` : transcript);
   });
   useSpeechRecognitionEvent("end", () => {
     setListening(false);
     const text = finalTranscriptRef.current.trim();
+    const base = dictationBaseRef.current;
+    // Text bleibt im Eingabefeld – Nutzer kann korrigieren und dann ➤ drücken
+    if (text) setInput(base ? `${base} ${text}` : text);
     finalTranscriptRef.current = "";
-    if (text) send(text);
+    dictationBaseRef.current = "";
   });
   useSpeechRecognitionEvent("error", (event) => {
     setListening(false);
     finalTranscriptRef.current = "";
+    dictationBaseRef.current = "";
     if (event.error === "no-speech" || event.error === "aborted") {
-      // nichts erkannt / abgebrochen – einfach zurücksetzen
+      // nichts erkannt / abgebrochen – einfach zurücksetzen (Text im Feld bleibt)
     } else {
       setInput(`Spracherkennung: ${event.message || event.error}`);
     }
@@ -519,12 +542,11 @@ export default function App() {
         setInput("Bitte Mikrofon & Spracherkennung in den Einstellungen erlauben.");
         return;
       }
-      setInput("");
       finalTranscriptRef.current = "";
       ExpoSpeechRecognitionModule.start({
         lang: "de-DE",
         interimResults: true,
-        continuous: false,
+        continuous: true,
         addsPunctuation: true,
         iosTaskHint: "dictation",
       });
@@ -534,12 +556,22 @@ export default function App() {
   }
 
   async function loadTasks() {
+    const ctrl = new AbortController();
+    tasksAbortRef.current = ctrl;
+    const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
-      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/tasks`, { headers: authHeaders() });
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/tasks`, {
+        headers: authHeaders(),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setTaskList(data.tasks || []);
+      setTaskList(Array.isArray(data.tasks) ? data.tasks : []);
     } catch {
       // Server nicht erreichbar – ignorieren
+    } finally {
+      clearTimeout(timer);
+      if (tasksAbortRef.current === ctrl) tasksAbortRef.current = null;
     }
   }
 
@@ -548,14 +580,15 @@ export default function App() {
     if (!message) return;
     setTaskInput("");
     try {
-      await fetch(`${serverUrl.replace(/\/+$/, "")}/task`, {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/task`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ message }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       loadTasks();
     } catch {
-      // ignorieren
+      setTaskInput(message); // Eingabe wiederherstellen – nichts verlieren
     }
   }
 
@@ -705,11 +738,11 @@ export default function App() {
                 </View>
               }
               ListFooterComponent={
-                busy ? (
+                isThisChatBusy ? (
                   <View style={styles.thinking}>
                     <ActivityIndicator color={colors.accent} size="small" />
                     <Text style={styles.thinkingText} numberOfLines={1}>
-                      {thinking ? `💭 ${thinking}` : listening ? "höre zu …" : "denkt nach …"}
+                      {thisThinking ? `💭 ${thisThinking}` : listening ? "höre zu …" : "denkt nach …"}
                     </Text>
                   </View>
                 ) : null
@@ -718,8 +751,8 @@ export default function App() {
 
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
               <View style={styles.inputBar}>
-                {busy ? (
-                  <Pressable onPress={abort} style={[styles.micBtn, styles.stopBtn]}>
+                {isThisChatBusy ? (
+                  <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
                     <Text style={styles.micText}>⏹</Text>
                   </Pressable>
                 ) : (
@@ -739,8 +772,8 @@ export default function App() {
                 />
                 <Pressable
                   onPress={() => send()}
-                  disabled={busy || !input.trim()}
-                  style={[styles.sendBtn, (busy || !input.trim()) && styles.sendBtnDisabled]}
+                  disabled={isThisChatBusy || !input.trim()}
+                  style={[styles.sendBtn, (isThisChatBusy || !input.trim()) && styles.sendBtnDisabled]}
                 >
                   <Text style={styles.sendText}>➤</Text>
                 </Pressable>
