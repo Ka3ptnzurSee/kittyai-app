@@ -419,8 +419,8 @@ export default function App() {
           throw new Error(ct.includes("json") ? body.slice(0, 200) : `Server/Proxy-Fehler (HTTP ${res.status})`);
         }
         const data = await res.json();
-        const reply = (data.reply || data.error || "(keine Antwort)").trim();
-        const activity: Activity[] = Array.isArray(data.activity) ? data.activity : [];
+        const reply = (data.reply || data.error || "(keine Antwort)").trim().slice(0, MAX_REPLY_CHARS);
+        const activity: Activity[] = (Array.isArray(data.activity) ? data.activity : []).map((a: Activity) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         patchMsg(chatId, aiId, (m) => ({ ...m, text: reply, activity }));
         if (speak && data.reply) speakReply(data.reply);
       } catch (e2) {
@@ -498,8 +498,8 @@ export default function App() {
         }));
       } else if (t === "done") {
         const d = (e.data || {}) as { reply?: string; activity?: Activity[] };
-        finalReply = d.reply || "";
-        finalActivity = Array.isArray(d.activity) ? d.activity : [];
+        finalReply = (d.reply || "").slice(0, MAX_REPLY_CHARS);
+        finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
       } else if (t === "error") {
         const msg2 = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
         appendMsg(chatId, { id: uid("e"), role: "assistant", text: `⚠️ ${msg2}` });
