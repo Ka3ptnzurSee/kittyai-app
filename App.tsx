@@ -44,6 +44,8 @@ const TOKEN_KEY = "pi-api-token";
 const CHATS_KEY = "pi-chats-v2";
 const CWD_KEY = "pi-cwd";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
+const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
+const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 
 // Dark Theme
 const colors = {
@@ -469,7 +471,7 @@ export default function App() {
       const t = e?.type;
       if (t === "text") {
         const delta = typeof e.data === "string" ? e.data : "";
-        patchMsg(chatId, aiId, (m) => ({ ...m, text: m.text + delta }));
+        patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(-MAX_REPLY_CHARS) }));
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
         setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-800) }));
@@ -485,7 +487,7 @@ export default function App() {
       } else if (t === "tool_end") {
         const d = (e.data || {}) as { id?: string; tool?: string; error?: boolean; result?: string };
         const err = !!d.error;
-        const result = d.result || "";
+        const result = (d.result || "").slice(0, 4000);
         patchMsg(chatId, aiId, (m) => ({
           ...m,
           activity: (m.activity || []).map((x) =>
@@ -507,7 +509,8 @@ export default function App() {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value as Uint8Array);
+      const chunk = decoder.decode(value as Uint8Array);
+      if (buffer.length < MAX_BUFFER_CHARS) buffer += chunk;
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const raw = buffer.slice(0, idx);
