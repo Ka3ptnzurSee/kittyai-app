@@ -43,7 +43,7 @@ jobs:
         env:
           CI: 1
         run: |
-          IPA=$(find . -name "*.ipa" -not -path "./node_modules/*" | head -1)
+          IPA=$(find . /private/var/folders -name "*.ipa" -not -path "*/node_modules/*" 2>/dev/null | head -1)
           echo "IPA gefunden: $IPA"
           if [ -z "$IPA" ]; then echo "Keine .ipa gefunden"; exit 1; fi
           eas submit --platform ios --profile production --non-interactive --path "$IPA"
