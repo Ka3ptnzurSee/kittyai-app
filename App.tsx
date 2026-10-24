@@ -26,9 +26,10 @@ import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Utf8Decoder, argSummary, formatTime, uid } from "./lib";
+import * as Clipboard from "expo-clipboard";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[] };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string } };
 type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number };
 type Task = {
   id: string;
@@ -103,10 +104,11 @@ export default function App() {
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [listening, setListening] = useState(false);
+  const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
-  const [speak, setSpeak] = useState(true);
+  const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [urlDraft, setUrlDraft] = useState<string>(() => detectBase());
@@ -395,6 +397,10 @@ export default function App() {
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
     let finalMessage = message;
+    const replyTo = replyingTo ? { text: replyingTo.text.replace(/\n+/g, " ").trim().slice(0, 200) } : undefined;
+    if (replyTo) {
+      finalMessage = `[Antwort auf: "${replyTo.text}"]\n${finalMessage}`;
+    }
     if (pendingFiles.length) {
       const fileText = pendingFiles.map((f) => `### ${f.name}\n${f.content}`).join("\n\n");
       finalMessage = message ? `${message}\n\n[Angehängte Dateien]\n${fileText}` : `[Angehängte Dateien]\n${fileText}`;
@@ -407,11 +413,12 @@ export default function App() {
     const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
     setChatThinking(chatId, "");
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : documents.length ? "📄 PDF" : "📎 Datei"), images: imageUris };
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : documents.length ? "📄 PDF" : "📎 Datei"), images: imageUris, replyTo };
     const aiId = uid("a");
     setPendingImages([]);
     setPendingFiles([]);
     setPendingDocuments([]);
+    setReplyingTo(null);
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
     patchChat(chatId, (c) => ({
       ...c,
@@ -712,6 +719,22 @@ export default function App() {
     }
   }
 
+  function copyToClipboard(text: string) {
+    if (!text) return;
+    Clipboard.setStringAsync(text).catch(() => {
+      // ignorieren
+    });
+  }
+
+  function showMessageActions(msg: Msg) {
+    const preview = msg.text.replace(/\n+/g, " ").trim().slice(0, 120) || "(leer)";
+    Alert.alert("Nachricht", preview, [
+      { text: "📋 Kopieren", onPress: () => copyToClipboard(msg.text) },
+      { text: "↩️ Antworten", onPress: () => setReplyingTo(msg) },
+      { text: "Abbrechen", style: "cancel" },
+    ]);
+  }
+
   function renderMessage({ item }: { item: Msg }) {
     const isUser = item.role === "user";
     const activity = !isUser ? item.activity || [] : [];
@@ -725,7 +748,16 @@ export default function App() {
           ? styles.aiBubbleDone
           : styles.aiBubble;
     return (
-      <View style={[styles.bubble, bubbleStyle]}>
+      <Pressable
+        onLongPress={() => showMessageActions(item)}
+        delayLongPress={300}
+        style={[styles.bubble, bubbleStyle]}
+      >
+        {item.replyTo ? (
+          <View style={styles.replyQuote}>
+            <Text style={styles.replyQuoteText} numberOfLines={2}>{item.replyTo.text}</Text>
+          </View>
+        ) : null}
         <Text style={isUser ? styles.userText : styles.aiText}>{item.text || (isUser ? "" : "…")}</Text>
         {activity.length > 0 ? (
           <View style={styles.activityWrap}>
@@ -744,7 +776,7 @@ export default function App() {
             ))}
           </View>
         ) : null}
-      </View>
+      </Pressable>
     );
   }
 
@@ -830,7 +862,7 @@ export default function App() {
             </Pressable>
           )}
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.chip, speak && styles.chipActive]} hitSlop={6}>
-            <Text style={styles.chipText}>{speak ? "🔊" : "🔇"}</Text>
+            <Text style={styles.chipText}>{speak ? "🔊 Gespräch" : "💬 Text"}</Text>
           </Pressable>
           <Pressable onPress={openSettings} style={styles.chip} hitSlop={6}>
             <Text style={styles.chipText}>⚙️</Text>
@@ -879,6 +911,19 @@ export default function App() {
             />
 
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
+              {replyingTo ? (
+                <View style={styles.replyBar}>
+                  <View style={styles.replyBarQuote}>
+                    <Text style={styles.replyBarLabel}>Antwort auf:</Text>
+                    <Text style={styles.replyBarText} numberOfLines={1}>
+                      {replyingTo.text.replace(/\n+/g, " ").trim().slice(0, 120)}
+                    </Text>
+                  </View>
+                  <Pressable onPress={() => setReplyingTo(null)} hitSlop={8}>
+                    <Text style={styles.attachClear}>✕</Text>
+                  </Pressable>
+                </View>
+              ) : null}
               {(pendingImages.length > 0 || pendingFiles.length > 0 || pendingDocuments.length > 0) && (
                 <View style={styles.attachPreview}>
                   {pendingImages.map((im, i) => (
@@ -1161,6 +1206,28 @@ const styles = StyleSheet.create({
   attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
   attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
   attachClear: { color: colors.danger, fontSize: 16, fontWeight: "700", paddingHorizontal: 6 },
+  replyBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    padding: 8,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface2,
+  },
+  replyBarQuote: { flex: 1 },
+  replyBarLabel: { fontSize: 11, color: colors.accent, fontWeight: "700" },
+  replyBarText: { fontSize: 13, color: colors.muted, marginTop: 1 },
+  replyQuote: {
+    backgroundColor: "rgba(255,255,255,0.18)",
+    borderLeftWidth: 3,
+    borderLeftColor: "#ffffff",
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 6,
+  },
+  replyQuoteText: { color: "#ffffff", fontSize: 13, fontStyle: "italic" },
   stopBtn: { backgroundColor: colors.danger },
   micText: { fontSize: 20 },
   input: {
