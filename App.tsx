@@ -238,6 +238,17 @@ export default function App() {
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const abortedRef = useRef<Set<string>>(new Set());
   const tasksAbortRef = useRef<AbortController | null>(null);
+  const listRef = useRef<FlatList<Msg>>(null);
+
+  // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
+  // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
+  useEffect(() => {
+    if (!activeChatId) return;
+    const t = setTimeout(() => {
+      listRef.current?.scrollToEnd({ animated: false });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [activeChatId]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
@@ -1047,6 +1058,7 @@ export default function App() {
         activeChat ? (
           <>
             <FlatList
+              ref={listRef}
               data={activeChat.messages}
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
