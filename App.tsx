@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -390,6 +391,40 @@ export default function App() {
     }
   }
 
+  async function generateImageInChat() {
+    const prompt = input.trim();
+    if (!prompt || isThisChatBusy) return;
+    let chatId = activeChatId;
+    if (!chatId) chatId = newChat();
+    setInput("");
+    const userMsg: Msg = { id: uid("u"), role: "user", text: `🎨 ${prompt}` };
+    const aiId = uid("a");
+    const aiMsg: Msg = { id: aiId, role: "assistant", text: "", images: [] };
+    patchChat(chatId, (c) => ({
+      ...c,
+      title: c.messages.length === 0 ? prompt.slice(0, 40) : c.title,
+      messages: [...c.messages, userMsg, aiMsg],
+      updatedAt: Date.now(),
+    }));
+    markBusy(chatId, true);
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/image`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ prompt }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      const imgUri = `${serverUrl.replace(/\/+$/, "")}${data.url}`;
+      patchMsg(chatId, aiId, (m) => ({ ...m, text: "🖼", images: [{ uri: imgUri }] }));
+      if (speak) speakReply("Hier ist das Bild.");
+    } catch (e) {
+      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      markBusy(chatId, false);
+    }
+  }
+
   async function send(text?: string) {
     const message = (text ?? input).trim();
     if (!message && pendingImages.length === 0 && pendingFiles.length === 0 && pendingDocuments.length === 0) return;
@@ -759,6 +794,11 @@ export default function App() {
           </View>
         ) : null}
         <Text style={isUser ? styles.userText : styles.aiText}>{item.text || (isUser ? "" : "…")}</Text>
+        {item.images && item.images.length > 0 ? (
+          item.images.map((img, i) => (
+            <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="contain" />
+          ))
+        ) : null}
         {activity.length > 0 ? (
           <View style={styles.activityWrap}>
             {activity.map((a) => (
@@ -956,6 +996,9 @@ export default function App() {
                 <Pressable onPress={pickFile} style={styles.micBtn}>
                   <Text style={styles.micText}>📎</Text>
                 </Pressable>
+                <Pressable onPress={generateImageInChat} style={styles.micBtn}>
+                  <Text style={styles.micText}>🎨</Text>
+                </Pressable>
                 <TextInput
                   style={styles.input}
                   value={input}
@@ -1131,6 +1174,7 @@ const styles = StyleSheet.create({
   aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.danger, borderBottomLeftRadius: 5 },
   aiBubbleDone: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.success, borderBottomLeftRadius: 5 },
+  msgImage: { width: "100%", height: 220, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
   userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 3, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 6 },
