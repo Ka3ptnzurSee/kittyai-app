@@ -145,6 +145,14 @@ export default function App() {
     setThinkingByChat((prev) => ({ ...prev, [chatId]: value }));
   }
 
+  // Beim Chat-Wechsel zur letzten Nachricht scrollen
+  useEffect(() => {
+    if (activeChatId) {
+      const t = setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
+      return () => clearTimeout(t);
+    }
+  }, [activeChatId]);
+
   function authHeaders(): Record<string, string> {
     // Token nur über HTTPS senden – kein Klartext-Token im LAN-/Dev-Modus
     const secure = serverUrl.startsWith("https://");
@@ -707,8 +715,17 @@ export default function App() {
   function renderMessage({ item }: { item: Msg }) {
     const isUser = item.role === "user";
     const activity = !isUser ? item.activity || [] : [];
+    const messages = activeChat?.messages || [];
+    const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
+    const bubbleStyle = isUser
+      ? styles.userBubble
+      : isLast && isThisChatBusy && !item.text
+        ? styles.aiBubbleRunning
+        : isLast && !isThisChatBusy && !!item.text
+          ? styles.aiBubbleDone
+          : styles.aiBubble;
     return (
-      <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
+      <View style={[styles.bubble, bubbleStyle]}>
         <Text style={isUser ? styles.userText : styles.aiText}>{item.text || (isUser ? "" : "…")}</Text>
         {activity.length > 0 ? (
           <View style={styles.activityWrap}>
@@ -1052,7 +1069,7 @@ const styles = StyleSheet.create({
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.success },
   headerSub: { fontSize: 12, color: colors.muted },
   headerActions: { flexDirection: "row", gap: 7 },
-  chip: { paddingHorizontal: 9, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface2 },
+  chip: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface2 },
   chipActive: { backgroundColor: colors.accentSoft },
   chipNew: { backgroundColor: colors.accent },
   chipNewText: { fontSize: 13, color: "#fff", fontWeight: "600" },
@@ -1067,6 +1084,8 @@ const styles = StyleSheet.create({
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18 },
   userBubble: { alignSelf: "flex-end", backgroundColor: colors.accent, borderBottomRightRadius: 5 },
   aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
+  aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.danger, borderBottomLeftRadius: 5 },
+  aiBubbleDone: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.success, borderBottomLeftRadius: 5 },
   userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 3, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 6 },
@@ -1137,7 +1156,7 @@ const styles = StyleSheet.create({
   chatRight: { alignItems: "flex-end", gap: 6 },
   chatTime: { fontSize: 11, color: colors.muted },
   chatDelete: { fontSize: 14, color: colors.danger, fontWeight: "700" },
-  micBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
+  micBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   micBtnActive: { backgroundColor: colors.danger },
   attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
   attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
@@ -1150,15 +1169,15 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 21,
-    paddingHorizontal: 14,
+    borderRadius: 999,
+    paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 10,
     fontSize: 16,
     color: colors.text,
-    backgroundColor: colors.surface2,
+    backgroundColor: colors.surface,
   },
-  sendBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
+  sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
   sendText: { color: "#ffffff", fontSize: 18 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
