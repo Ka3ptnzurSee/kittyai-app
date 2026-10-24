@@ -99,6 +99,7 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
+  const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(true);
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -354,13 +355,20 @@ export default function App() {
       const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
       if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
-      if (a.size && a.size > 2 * 1024 * 1024) {
-        Alert.alert("Datei zu groß", "Maximal 2 MB — bitte eine kleinere Datei wählen.");
+      const isPdf = a.mimeType === "application/pdf" || (a.name || "").toLowerCase().endsWith(".pdf");
+      const maxBytes = isPdf ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
+      if (a.size && a.size > maxBytes) {
+        Alert.alert("Datei zu groß", isPdf ? "Maximal 8 MB für PDFs" : "Maximal 2 MB");
         return;
       }
       const f = new File(a.uri);
-      const content = await f.text();
-      setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
+      if (isPdf) {
+        const b64 = await f.base64();
+        setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: "application/pdf" }]);
+      } else {
+        const content = await f.text();
+        setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
+      }
     } catch {
       // Datei nicht lesbar
     }
@@ -368,7 +376,7 @@ export default function App() {
 
   async function send(text?: string) {
     const message = (text ?? input).trim();
-    if (!message && pendingImages.length === 0 && pendingFiles.length === 0) return;
+    if (!message && pendingImages.length === 0 && pendingFiles.length === 0 && pendingDocuments.length === 0) return;
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
@@ -378,13 +386,15 @@ export default function App() {
       finalMessage = message ? `${message}\n\n[Angehängte Dateien]\n${fileText}` : `[Angehängte Dateien]\n${fileText}`;
     }
     const images = pendingImages.map((im) => ({ data: im.data, mediaType: im.mediaType }));
+    const documents = pendingDocuments.map((d) => ({ name: d.name, data: d.data, mimeType: d.mimeType }));
     const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
     setChatThinking(chatId, "");
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : "📎 Datei"), images: imageUris };
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : documents.length ? "📄 PDF" : "📎 Datei"), images: imageUris };
     const aiId = uid("a");
     setPendingImages([]);
     setPendingFiles([]);
+    setPendingDocuments([]);
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
     patchChat(chatId, (c) => ({
       ...c,
@@ -396,7 +406,7 @@ export default function App() {
     markBusy(chatId, true);
 
     try {
-      await streamChat(finalMessage, chatId, aiId, images);
+      await streamChat(finalMessage, chatId, aiId, images, documents);
     } catch (e) {
       if (abortedRef.current.has(chatId)) {
         abortedRef.current.delete(chatId);
@@ -410,7 +420,7 @@ export default function App() {
         const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/chat`, {
           method: "POST",
           headers: authHeaders(),
-          body: JSON.stringify({ message: finalMessage, chatId, images }),
+          body: JSON.stringify({ message: finalMessage, chatId, images, documents }),
           signal: ctrl.signal,
         });
         if (!res.ok) {
@@ -440,7 +450,7 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = []) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = []) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
@@ -448,7 +458,7 @@ export default function App() {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ message, chatId, images }),
+      body: JSON.stringify({ message, chatId, images, documents }),
       signal: controller.signal,
     });
 
@@ -828,15 +838,18 @@ export default function App() {
             />
 
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
-              {(pendingImages.length > 0 || pendingFiles.length > 0) && (
+              {(pendingImages.length > 0 || pendingFiles.length > 0 || pendingDocuments.length > 0) && (
                 <View style={styles.attachPreview}>
                   {pendingImages.map((im, i) => (
                     <Text key={`img${i}`} style={styles.attachChip}>🖼 Bild</Text>
                   ))}
+                  {pendingDocuments.map((d, i) => (
+                    <Text key={`doc${i}`} style={styles.attachChip} numberOfLines={1}>📄 {d.name}</Text>
+                  ))}
                   {pendingFiles.map((f, i) => (
                     <Text key={`file${i}`} style={styles.attachChip} numberOfLines={1}>📎 {f.name}</Text>
                   ))}
-                  <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); }} hitSlop={8}>
+                  <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); setPendingDocuments([]); }} hitSlop={8}>
                     <Text style={styles.attachClear}>✕</Text>
                   </Pressable>
                 </View>
