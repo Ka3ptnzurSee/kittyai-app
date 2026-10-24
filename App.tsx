@@ -193,7 +193,6 @@ export default function App() {
   const [cwd, setCwd] = useState("");
   const [taskList, setTaskList] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
-  const listRef = useRef<FlatList<Msg>>(null);
   const loadedRef = useRef(false);
   const dictationBaseRef = useRef("");
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
@@ -221,14 +220,6 @@ export default function App() {
   function setChatThinking(chatId: string, value: string) {
     setThinkingByChat((prev) => ({ ...prev, [chatId]: value }));
   }
-
-  // Beim Chat-Wechsel zur letzten Nachricht scrollen
-  useEffect(() => {
-    if (activeChatId) {
-      const t = setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 60);
-      return () => clearTimeout(t);
-    }
-  }, [activeChatId]);
 
   function authHeaders(): Record<string, string> {
     // Token nur über HTTPS senden – kein Klartext-Token im LAN-/Dev-Modus
@@ -946,13 +937,11 @@ export default function App() {
         activeChat ? (
           <>
             <FlatList
-              ref={listRef}
               data={activeChat.messages}
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
               style={styles.list}
               contentContainerStyle={styles.listContent}
-              onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
               ListEmptyComponent={
                 <View style={styles.empty}>
                   <Text style={styles.emptyTitle}>Womit kann ich helfen? 👋</Text>
