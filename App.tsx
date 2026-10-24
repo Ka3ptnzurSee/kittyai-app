@@ -421,6 +421,18 @@ export default function App() {
         abortedRef.current.delete(chatId);
         return; // Nutzer-Abbruch → kein Fallback
       }
+      // Einmaliger Retry bei Netzwerk-Fehler (Verbindung verloren / fetch failed)
+      const rawErr = e instanceof Error ? e.message : String(e);
+      if (/network|fetch failed|connection lost|timed out|request failed/i.test(rawErr)) {
+        try {
+          await new Promise((r) => setTimeout(r, 1500));
+          if (abortedRef.current.has(chatId)) return;
+          await streamChat(finalMessage, chatId, aiId, images, documents);
+          return;
+        } catch {
+          // Retry fehlgeschlagen → Fallback unten
+        }
+      }
       // Fallback: synchroner /chat (mit eigenem Abort-Timeout gegen Busy-Lockup)
       const ctrl = new AbortController();
       abortControllersRef.current.set(chatId, ctrl);
@@ -443,7 +455,10 @@ export default function App() {
         patchMsg(chatId, aiId, (m) => ({ ...m, text: reply, activity }));
         if (speak && data.reply) speakReply(data.reply);
       } catch (e2) {
-        const msg = ctrl.signal.aborted ? "Zeitüberschreitung beim Server" : (e2 instanceof Error ? e2.message : String(e2));
+        const rawMsg = ctrl.signal.aborted ? "Zeitüberschreitung beim Server" : (e2 instanceof Error ? e2.message : String(e2));
+        const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
+          ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
+          : rawMsg;
         appendMsg(chatId, {
           id: uid("e"),
           role: "assistant",
