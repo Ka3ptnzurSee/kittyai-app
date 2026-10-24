@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { Utf8Decoder, argSummary, formatTime, presetCron, cronLabel } from "../lib.ts";
+import { Utf8Decoder, argSummary, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -68,4 +68,22 @@ test("cronLabel übersetzt Cron in Deutsch", () => {
 test("cronLabel fällt bei unbekanntem Muster auf rohen Cron zurück", () => {
   assert.strictEqual(cronLabel("*/15 8-17 * * 1-5"), "*/15 8-17 * * 1-5");
   assert.strictEqual(cronLabel("kaputt"), "kaputt");
+});
+
+test("toolMeta übersetzt bekannte pi-Werkzeuge in Deutsch + Icon", () => {
+  assert.deepStrictEqual(toolMeta("bash"), { label: "Befehl", icon: "💻", category: "system" });
+  assert.deepStrictEqual(toolMeta("read"), { label: "Datei lesen", icon: "📄", category: "file" });
+  assert.deepStrictEqual(toolMeta("web_fetch"), { label: "Webseite abrufen", icon: "🌐", category: "web" });
+  assert.strictEqual(toolLabel("bash"), "Befehl");
+});
+
+test("toolMeta fällt über Präfix-Heuristik auf sinnvolle Kategorien zurück", () => {
+  assert.strictEqual(toolMeta("memory_search").category, "memory");
+  assert.strictEqual(toolMeta("calendar_list_events").icon, "📅");
+  assert.strictEqual(toolMeta("github_foo").icon, "🐙");
+  assert.strictEqual(toolMeta("skill_bar").category, "search");
+});
+
+test("toolMeta liefert rohen Namen + 🔧 bei unbekanntem Werkzeug", () => {
+  assert.deepStrictEqual(toolMeta("völlig_unbekannt"), { label: "völlig_unbekannt", icon: "🔧", category: "other" });
 });

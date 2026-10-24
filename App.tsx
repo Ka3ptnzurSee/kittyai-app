@@ -27,7 +27,7 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Utf8Decoder, argSummary, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, type CronPreset } from "./lib";
+import { Utf8Decoder, argSummary, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
 import { Markdown } from "./Markdown";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
@@ -92,6 +92,40 @@ Notifications.setNotificationHandler({
   }),
 });
 
+// Claude-Stil „Tool-Berechtigungskarte“: zeigt pro Werkzeug Icon + deutschen
+// Namen + Status und klappt das Ergebnis bei Tipp auf.
+function ToolCard({ a }: { a: Activity }) {
+  const [expanded, setExpanded] = useState(false);
+  const meta = toolMeta(a.tool);
+  const statusIcon = a.status === "running" ? "⏳" : a.status === "ok" ? "✅" : "❌";
+  const args = argSummary(a.args);
+  return (
+    <View style={[styles.toolCard, a.status === "error" && styles.toolCardErr]}>
+      <View style={styles.toolCardHeader}>
+        <Text style={styles.toolCardIcon}>{meta.icon}</Text>
+        <Text style={styles.toolCardLabel} numberOfLines={1}>
+          {meta.label}
+        </Text>
+        <Text style={styles.toolCardStatus}>{statusIcon}</Text>
+      </View>
+      {args ? (
+        <Text style={styles.toolCardArgs} numberOfLines={1}>
+          {args}
+        </Text>
+      ) : null}
+      {a.result ? (
+        <Text
+          style={styles.activityResult}
+          numberOfLines={expanded ? undefined : 2}
+          onPress={() => setExpanded((v) => !v)}
+        >
+          {a.result}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
 function MessageBubble({
   item,
   isLast,
@@ -151,18 +185,11 @@ function MessageBubble({
       ) : null}
       {activity.length > 0 ? (
         <View style={styles.activityWrap}>
+          <Text style={styles.activitySummary}>
+            🔧 {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} genutzt
+          </Text>
           {activity.map((a) => (
-            <View key={a.id} style={[styles.activityLine, a.status === "error" && styles.activityLineErr]}>
-              <Text style={styles.activityText} numberOfLines={1}>
-                {a.status === "running" ? "⏳" : a.status === "ok" ? "✅" : "❌"} {a.tool}
-                {argSummary(a.args) ? `  ${argSummary(a.args)}` : ""}
-              </Text>
-              {a.result ? (
-                <Text style={styles.activityResult} numberOfLines={3}>
-                  {a.result}
-                </Text>
-              ) : null}
-            </View>
+            <ToolCard key={a.id} a={a} />
           ))}
         </View>
       ) : null}
@@ -1362,18 +1389,24 @@ const styles = StyleSheet.create({
   msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
   userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
-  activityWrap: { gap: 3, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 6 },
-  activityLine: {
-    backgroundColor: colors.surface2,
+  activityWrap: { gap: 6, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },
+  activitySummary: { color: colors.muted, fontSize: 12, fontWeight: "600", marginBottom: 2 },
+  toolCard: {
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 4,
   },
-  activityLineErr: { borderColor: colors.danger },
-  activityText: { color: colors.muted, fontSize: 12 },
-  activityResult: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 2 },
+  toolCardErr: { borderColor: colors.danger, backgroundColor: "#fdf3f1" },
+  toolCardHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  toolCardIcon: { fontSize: 14 },
+  toolCardLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 },
+  toolCardStatus: { fontSize: 13 },
+  toolCardArgs: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 1 },
+  activityResult: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 2, lineHeight: 16 },
   empty: { alignItems: "center", marginTop: 70, paddingHorizontal: 28 },
   emptyTitle: { fontSize: 22, fontWeight: "800", color: colors.text, textAlign: "center" },
   emptyText: { fontSize: 15, color: colors.muted, textAlign: "center", marginTop: 10, lineHeight: 22 },

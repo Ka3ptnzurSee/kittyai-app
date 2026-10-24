@@ -54,6 +54,63 @@ export function argSummary(args: unknown): string {
   return "";
 }
 
+// ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──
+export type ToolCategory = "system" | "file" | "web" | "memory" | "search" | "agent" | "calendar" | "github" | "media" | "other";
+export type ToolMeta = { label: string; icon: string; category: ToolCategory };
+
+const TOOL_META: Record<string, ToolMeta> = {
+  // System / Shell
+  bash: { label: "Befehl", icon: "💻", category: "system" },
+  // Dateien
+  read: { label: "Datei lesen", icon: "📄", category: "file" },
+  write: { label: "Datei schreiben", icon: "✍️", category: "file" },
+  edit: { label: "Datei bearbeiten", icon: "✏️", category: "file" },
+  // Web
+  web_fetch: { label: "Webseite abrufen", icon: "🌐", category: "web" },
+  // GitHub
+  github_read_repo: { label: "Repo ansehen", icon: "🐙", category: "github" },
+  github_create_issue: { label: "Issue anlegen", icon: "🐙", category: "github" },
+  // Gedächtnis
+  memory_add: { label: "Merkzettel", icon: "🧠", category: "memory" },
+  memory_replace: { label: "Merkzettel ändern", icon: "🧠", category: "memory" },
+  memory_remove: { label: "Merkzettel löschen", icon: "🧠", category: "memory" },
+  memory_search: { label: "Gedächtnis durchsuchen", icon: "🧠", category: "memory" },
+  session_search: { label: "Verlauf durchsuchen", icon: "🔍", category: "search" },
+  // Skills
+  skill_search: { label: "Skill suchen", icon: "🧩", category: "search" },
+  skill_load: { label: "Skill laden", icon: "🧩", category: "search" },
+  skill_manage: { label: "Skill verwalten", icon: "🧩", category: "search" },
+  skill_fetch_online: { label: "Skill online suchen", icon: "🧩", category: "search" },
+  // Agenten
+  subagent: { label: "Subagent", icon: "🤖", category: "agent" },
+  codemode: { label: "Codemode-Skript", icon: "⚡", category: "agent" },
+  // Kalender / Zeit
+  time_now: { label: "Uhrzeit", icon: "🕐", category: "calendar" },
+  calendar_list_events: { label: "Kalender lesen", icon: "📅", category: "calendar" },
+  calendar_create_event: { label: "Termin anlegen", icon: "📅", category: "calendar" },
+  // Sonstiges
+  git_status: { label: "Git-Status", icon: "🌿", category: "system" },
+  email_send: { label: "E-Mail senden", icon: "✉️", category: "web" },
+};
+
+/** Menschlich lesbare Beschreibung für ein pi-Werkzeug (mit Fallback). */
+export function toolMeta(tool: string): ToolMeta {
+  const exact = TOOL_META[tool];
+  if (exact) return exact;
+  if (tool.startsWith("memory_")) return { label: "Gedächtnis", icon: "🧠", category: "memory" };
+  if (tool.startsWith("calendar_")) return { label: "Kalender", icon: "📅", category: "calendar" };
+  if (tool.startsWith("github_")) return { label: "GitHub", icon: "🐙", category: "github" };
+  if (tool.startsWith("skill_")) return { label: "Skill", icon: "🧩", category: "search" };
+  if (tool.startsWith("web_") || tool.startsWith("http")) return { label: "Web", icon: "🌐", category: "web" };
+  if (tool.startsWith("image") || tool.startsWith("tts") || tool.startsWith("stt")) return { label: tool, icon: "🎙️", category: "media" };
+  return { label: tool, icon: "🔧", category: "other" };
+}
+
+/** Nur das Label (deutscher Name) für ein Tool – für kompakte Anzeige. */
+export function toolLabel(tool: string): string {
+  return toolMeta(tool).label;
+}
+
 export function formatTime(ts: number): string {
   const d = new Date(ts);
   const now = new Date();
