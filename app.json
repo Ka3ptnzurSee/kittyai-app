@@ -12,6 +12,9 @@
       "bundleIdentifier": "com.meister.piapp",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        },
         "NSMicrophoneUsageDescription": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
         "NSSpeechRecognitionUsageDescription": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
       },

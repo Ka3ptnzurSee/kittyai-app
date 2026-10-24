@@ -145,7 +145,7 @@ function MessageBubble({
       </Text>
       {item.images && item.images.length > 0 ? (
         item.images.map((img, i) => (
-          <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="contain" />
+          <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="cover" />
         ))
       ) : null}
       {activity.length > 0 ? (
@@ -1195,7 +1195,7 @@ const styles = StyleSheet.create({
   aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.danger, borderBottomLeftRadius: 5 },
   aiBubbleDone: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.success, borderBottomLeftRadius: 5 },
-  msgImage: { width: "100%", height: 220, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
+  msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
   userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 3, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 6 },
