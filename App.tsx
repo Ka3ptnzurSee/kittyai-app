@@ -387,6 +387,9 @@ export default function App() {
     }
     const images = pendingImages.map((im) => ({ data: im.data, mediaType: im.mediaType }));
     const documents = pendingDocuments.map((d) => ({ name: d.name, data: d.data, mimeType: d.mimeType }));
+    if (!finalMessage && (images.length || documents.length)) {
+      finalMessage = images.length ? "[Bild angehängt – analysiere es]" : "[PDF-Dokument angehängt – analysiere es]";
+    }
     const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
     setChatThinking(chatId, "");
