@@ -121,13 +121,15 @@ function MessageBubble({
   // Swipe nach rechts → antworten. Nur klare horizontale Wischbewegungen
   // kapern, damit vertikales Scrollen und die native Textauswahl (selectable)
   // weiter normal funktionieren.
+  const itemRef = useRef(item);
+  itemRef.current = item; // patchMsg ersetzt das Objekt beim Streamen → aktuelles item nachführen
   const panResponder = useRef(
     PanResponder.create({
       onMoveShouldSetPanResponder: (_evt, gesture) =>
         Math.abs(gesture.dx) > 24 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5,
       onPanResponderRelease: (_evt, gesture) => {
         if (gesture.dx > 48 && Math.abs(gesture.dx) > Math.abs(gesture.dy)) {
-          onReply(item);
+          onReply(itemRef.current);
         }
       },
     }),
