@@ -7,6 +7,7 @@ import {
   Image,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   SafeAreaView,
@@ -27,7 +28,6 @@ import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Utf8Decoder, argSummary, formatTime, uid } from "./lib";
-import * as Clipboard from "expo-clipboard";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string } };
@@ -96,6 +96,78 @@ Notifications.setNotificationHandler({
     shouldSetBadge: false,
   }),
 });
+
+function MessageBubble({
+  item,
+  isLast,
+  isBusy,
+  onReply,
+}: {
+  item: Msg;
+  isLast: boolean;
+  isBusy: boolean;
+  onReply: (m: Msg) => void;
+}) {
+  const isUser = item.role === "user";
+  const activity = !isUser ? item.activity || [] : [];
+  const bubbleStyle = isUser
+    ? styles.userBubble
+    : isLast && isBusy && !item.text
+      ? styles.aiBubbleRunning
+      : isLast && !isBusy && !!item.text
+        ? styles.aiBubbleDone
+        : styles.aiBubble;
+
+  // Swipe nach rechts → antworten. Nur klare horizontale Wischbewegungen
+  // kapern, damit vertikales Scrollen und die native Textauswahl (selectable)
+  // weiter normal funktionieren.
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_evt, gesture) =>
+        Math.abs(gesture.dx) > 24 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.5,
+      onPanResponderRelease: (_evt, gesture) => {
+        if (gesture.dx > 48 && Math.abs(gesture.dx) > Math.abs(gesture.dy)) {
+          onReply(item);
+        }
+      },
+    }),
+  ).current;
+
+  return (
+    <View style={[styles.bubble, bubbleStyle]} {...panResponder.panHandlers}>
+      {item.replyTo ? (
+        <View style={styles.replyQuote}>
+          <Text style={styles.replyQuoteText} numberOfLines={2}>{item.replyTo.text}</Text>
+        </View>
+      ) : null}
+      <Text selectable style={isUser ? styles.userText : styles.aiText}>
+        {item.text || (isUser ? "" : "…")}
+      </Text>
+      {item.images && item.images.length > 0 ? (
+        item.images.map((img, i) => (
+          <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="contain" />
+        ))
+      ) : null}
+      {activity.length > 0 ? (
+        <View style={styles.activityWrap}>
+          {activity.map((a) => (
+            <View key={a.id} style={[styles.activityLine, a.status === "error" && styles.activityLineErr]}>
+              <Text style={styles.activityText} numberOfLines={1}>
+                {a.status === "running" ? "⏳" : a.status === "ok" ? "✅" : "❌"} {a.tool}
+                {argSummary(a.args) ? `  ${argSummary(a.args)}` : ""}
+              </Text>
+              {a.result ? (
+                <Text style={styles.activityResult} numberOfLines={3}>
+                  {a.result}
+                </Text>
+              ) : null}
+            </View>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState<"chats" | "tasks">("chats");
@@ -761,69 +833,11 @@ export default function App() {
     }
   }
 
-  function copyToClipboard(text: string) {
-    if (!text) return;
-    Clipboard.setStringAsync(text).catch(() => {
-      // ignorieren
-    });
-  }
-
-  function showMessageActions(msg: Msg) {
-    const preview = msg.text.replace(/\n+/g, " ").trim().slice(0, 120) || "(leer)";
-    Alert.alert("Nachricht", preview, [
-      { text: "📋 Kopieren", onPress: () => copyToClipboard(msg.text) },
-      { text: "↩️ Antworten", onPress: () => setReplyingTo(msg) },
-      { text: "Abbrechen", style: "cancel" },
-    ]);
-  }
-
   function renderMessage({ item }: { item: Msg }) {
-    const isUser = item.role === "user";
-    const activity = !isUser ? item.activity || [] : [];
     const messages = activeChat?.messages || [];
     const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
-    const bubbleStyle = isUser
-      ? styles.userBubble
-      : isLast && isThisChatBusy && !item.text
-        ? styles.aiBubbleRunning
-        : isLast && !isThisChatBusy && !!item.text
-          ? styles.aiBubbleDone
-          : styles.aiBubble;
     return (
-      <Pressable
-        onLongPress={() => showMessageActions(item)}
-        delayLongPress={300}
-        style={[styles.bubble, bubbleStyle]}
-      >
-        {item.replyTo ? (
-          <View style={styles.replyQuote}>
-            <Text style={styles.replyQuoteText} numberOfLines={2}>{item.replyTo.text}</Text>
-          </View>
-        ) : null}
-        <Text style={isUser ? styles.userText : styles.aiText}>{item.text || (isUser ? "" : "…")}</Text>
-        {item.images && item.images.length > 0 ? (
-          item.images.map((img, i) => (
-            <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="contain" />
-          ))
-        ) : null}
-        {activity.length > 0 ? (
-          <View style={styles.activityWrap}>
-            {activity.map((a) => (
-              <View key={a.id} style={[styles.activityLine, a.status === "error" && styles.activityLineErr]}>
-                <Text style={styles.activityText} numberOfLines={1}>
-                  {a.status === "running" ? "⏳" : a.status === "ok" ? "✅" : "❌"} {a.tool}
-                  {argSummary(a.args) ? `  ${argSummary(a.args)}` : ""}
-                </Text>
-                {a.result ? (
-                  <Text style={styles.activityResult} numberOfLines={3}>
-                    {a.result}
-                  </Text>
-                ) : null}
-              </View>
-            ))}
-          </View>
-        ) : null}
-      </Pressable>
+      <MessageBubble item={item} isLast={isLast} isBusy={isThisChatBusy} onReply={setReplyingTo} />
     );
   }
 
