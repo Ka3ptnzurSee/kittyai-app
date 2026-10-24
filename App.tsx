@@ -407,11 +407,15 @@ export default function App() {
       updatedAt: Date.now(),
     }));
     markBusy(chatId, true);
+    const ctrl = new AbortController();
+    abortControllersRef.current.set(chatId, ctrl);
+    const timer = setTimeout(() => ctrl.abort(), 180000);
     try {
       const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/image`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ prompt }),
+        signal: ctrl.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -419,8 +423,11 @@ export default function App() {
       patchMsg(chatId, aiId, (m) => ({ ...m, text: "🖼", images: [{ uri: imgUri }] }));
       if (speak) speakReply("Hier ist das Bild.");
     } catch (e) {
-      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${e instanceof Error ? e.message : String(e)}` });
+      const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
+      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${msg}` });
     } finally {
+      clearTimeout(timer);
+      if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
       markBusy(chatId, false);
     }
   }
