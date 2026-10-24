@@ -27,7 +27,9 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Utf8Decoder, argSummary, formatTime, uid } from "./lib";
+import { Utf8Decoder, argSummary, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, type CronPreset } from "./lib";
+import { Markdown } from "./Markdown";
+import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string } };
@@ -40,6 +42,7 @@ type Task = {
   createdAt?: string;
   doneAt?: string;
 };
+type Schedule = { id: string; message: string; cron: string };
 
 const STORAGE_KEY = "pi-server-url";
 const TOKEN_KEY = "pi-api-token";
@@ -49,26 +52,18 @@ const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS 
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 
-// Claude-Design (anthropic Design-Tokens, warmes Hell-Theme)
-// Quelle: https://claude.com (offizielle CSS-Design-Tokens)
-const colors = {
-  bg: "#faf9f5", // --color-gray-050
-  surface: "#ffffff", // --color-gray-000
-  surface2: "#f5f4ed", // --color-gray-100
-  text: "#141413", // --color-gray-950
-  muted: "#87867f", // --color-gray-500
-  accent: "#d97757", // --color-clay
-  accentHover: "#c46849", // --color-clay-dark
-  accentSoft: "#f5f4ed", // --color-gray-100
-  border: "#e8e6dc", // --color-gray-200
-  danger: "#bf4d43", // --color-error
-  success: "#629987", // --color-mineral
-  warning: "#d97757", // --color-clay
-};
+// Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
+const SCHEDULE_PRESETS: { id: CronPreset | "custom"; label: string }[] = [
+  { id: "hourly", label: "Stündlich" },
+  { id: "daily", label: "Täglich" },
+  { id: "weekdays", label: "Wochentags" },
+  { id: "weekend", label: "Wochenende" },
+  { id: "weekly", label: "Wöchentlich" },
+  { id: "monthly", label: "Monatlich" },
+  { id: "custom", label: "Eigene Cron" },
+];
 
-// Claude rendert KI-Antworten in einer Serifenschrift (Markenzeichen).
-// Auf iOS: Georgia, auf Android: systemeigene Serif.
-const aiFontFamily = Platform.select({ ios: "Georgia", android: "serif", default: "serif" });
+
 
 function detectBase(): string {
   try {
@@ -142,9 +137,13 @@ function MessageBubble({
           <Text style={styles.replyQuoteText} numberOfLines={2}>{item.replyTo.text}</Text>
         </View>
       ) : null}
-      <Text selectable style={isUser ? styles.userText : styles.aiText}>
-        {item.text || (isUser ? "" : "…")}
-      </Text>
+      {isUser ? (
+        <Text selectable style={styles.userText}>
+          {item.text}
+        </Text>
+      ) : (
+        <Markdown text={item.text || ""} />
+      )}
       {item.images && item.images.length > 0 ? (
         item.images.map((img, i) => (
           <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="cover" />
@@ -178,6 +177,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
+  const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
   const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
@@ -193,6 +193,13 @@ export default function App() {
   const [cwd, setCwd] = useState("");
   const [taskList, setTaskList] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
+  const [scheduleList, setScheduleList] = useState<Schedule[]>([]);
+  const [schedInput, setSchedInput] = useState("");
+  const [schedPreset, setSchedPreset] = useState<CronPreset | "custom">("daily");
+  const [schedTime, setSchedTime] = useState("09:00");
+  const [schedDay, setSchedDay] = useState(1); // 0=So … 6=Sa
+  const [schedDom, setSchedDom] = useState("1");
+  const [schedCustomCron, setSchedCustomCron] = useState("");
   const loadedRef = useRef(false);
   const dictationBaseRef = useRef("");
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
@@ -208,6 +215,7 @@ export default function App() {
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
   const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
+  const thisStatus = activeChatId ? statusByChat[activeChatId] || "" : "";
 
   function markBusy(chatId: string, busy: boolean) {
     setBusyChatIds((prev) => {
@@ -348,6 +356,21 @@ export default function App() {
   function deleteChat(chatId: string) {
     setChats((cs) => cs.filter((c) => c.id !== chatId));
     if (activeChatId === chatId) setActiveChatId(null);
+    // Server-seitig aufräumen: laufende Antwort abbrechen + Session zurücksetzen,
+    // damit kein toter pi-Prozess/keine tote Session weiterläuft.
+    abortControllersRef.current.get(chatId)?.abort();
+    abortControllersRef.current.delete(chatId);
+    abortedRef.current.add(chatId);
+    fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ chatId }),
+    }).catch(() => {});
+    fetch(`${serverUrl.replace(/\/+$/, "")}/api/new-session`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ chatId }),
+    }).catch(() => {});
   }
 
   function openSettings() {
@@ -520,6 +543,7 @@ export default function App() {
     const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
     setChatThinking(chatId, "");
+    setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
     const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : documents.length ? "📄 PDF" : "📎 Datei"), images: imageUris, replyTo };
     const aiId = uid("a");
     setPendingImages([]);
@@ -652,10 +676,22 @@ export default function App() {
               : x,
           ),
         }));
+      } else if (t === "compaction_start") {
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "kompaktiere Kontext …" }));
+      } else if (t === "compaction_end") {
+        const d = (e.data || {}) as { aborted?: boolean; tokensBefore?: number | null; estimatedTokensAfter?: number | null };
+        setStatusByChat((prev) => ({ ...prev, [chatId]: d.aborted ? "" : `Kontext kompaktiert (${Math.round((d.tokensBefore ?? 0) / 1000)}k → ${Math.round((d.estimatedTokensAfter ?? 0) / 1000)}k Tokens)` }));
+        setTimeout(() => setStatusByChat((prev) => (prev[chatId]?.startsWith("Kontext kompaktiert") ? { ...prev, [chatId]: "" } : prev)), 4000);
+      } else if (t === "auto_retry_start" || t === "summarization_retry_attempt_start") {
+        const d = (e.data || {}) as { attempt?: number; maxAttempts?: number };
+        setStatusByChat((prev) => ({ ...prev, [chatId]: `Retry ${d.attempt ?? 0}/${d.maxAttempts ?? 0} …` }));
+      } else if (t === "auto_retry_end" || t === "summarization_retry_finished") {
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
         const d = (e.data || {}) as { reply?: string; activity?: Activity[] };
         finalReply = (d.reply || "").slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "error") {
         const msg2 = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
         appendMsg(chatId, { id: uid("e"), role: "assistant", text: `⚠️ ${msg2}` });
@@ -801,6 +837,7 @@ export default function App() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setTaskList(Array.isArray(data.tasks) ? data.tasks : []);
+      setScheduleList(Array.isArray(data.schedules) ? data.schedules : []);
     } catch {
       // Server nicht erreichbar – ignorieren
     } finally {
@@ -826,6 +863,47 @@ export default function App() {
     }
   }
 
+  async function addSchedule() {
+    const message = schedInput.trim();
+    if (!message) return;
+    const cron =
+      schedPreset === "custom"
+        ? schedCustomCron.trim()
+        : presetCron(schedPreset, { time: schedTime, day: schedDay, dayOfMonth: Number(schedDom) || 1 });
+    if (!cron) {
+      Alert.alert("Zeitplan fehlerhaft", "Bitte einen gültigen Cron-Ausdruck angeben (5 Felder: Minute Stunde Tag Monat Wochentag).");
+      return;
+    }
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/schedule`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ message, cron }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        Alert.alert("Zeitplan fehlerhaft", (err && err.error) || `HTTP ${res.status}`);
+        return;
+      }
+      setSchedInput("");
+      loadTasks();
+    } catch {
+      // Server nicht erreichbar – Eingabe stehen lassen
+    }
+  }
+
+  async function deleteSchedule(id: string) {
+    try {
+      await fetch(`${serverUrl.replace(/\/+$/, "")}/schedule/${id}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+    } catch {
+      // ignorieren
+    }
+    loadTasks();
+  }
+
   function renderMessage({ item }: { item: Msg }) {
     const messages = activeChat?.messages || [];
     const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
@@ -838,10 +916,15 @@ export default function App() {
     const last = item.messages[item.messages.length - 1];
     const preview = last ? last.text.replace(/\n/g, " ").slice(0, 80) : "Neue Unterhaltung";
     const isActive = item.id === activeChatId;
+    // Status-Ampel: rot = arbeitet (busy), grün = fertig (hat Nachrichten), weiß = unbenutzt (leer)
+    const isBusy = busyChatIds.has(item.id);
+    const hasMessages = item.messages.length > 0;
+    const statusColor = isBusy ? colors.danger : hasMessages ? colors.success : "#ffffff";
     return (
       <Pressable onPress={() => setActiveChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
         <View style={styles.chatAvatar}>
           <Text style={styles.chatAvatarText}>💬</Text>
+          <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
         </View>
         <View style={styles.chatInfo}>
           <Text style={styles.chatTitle} numberOfLines={1}>{item.title}</Text>
@@ -955,7 +1038,7 @@ export default function App() {
                   <View style={styles.thinking}>
                     <ActivityIndicator color={colors.accent} size="small" />
                     <Text style={styles.thinkingText} numberOfLines={1}>
-                      {thisThinking ? `💭 ${thisThinking}` : listening ? "höre zu …" : "denkt nach …"}
+                      {thisStatus ? `⚙️ ${thisStatus}` : thisThinking ? `💭 ${thisThinking}` : listening ? "höre zu …" : "denkt nach …"}
                     </Text>
                   </View>
                 ) : null
@@ -1077,6 +1160,96 @@ export default function App() {
             ) : (
               taskList.map(renderTask)
             )}
+
+            <View style={styles.schedSection}>
+              <Text style={styles.schedHeader}>⏰ Routinen (wiederkehrend)</Text>
+              <TextInput
+                style={styles.schedMessageInput}
+                value={schedInput}
+                onChangeText={setSchedInput}
+                placeholder="Routine, z. B. „Fasse jeden Morgen meine Termine zusammen“"
+                placeholderTextColor={colors.muted}
+                multiline
+              />
+              <View style={styles.schedPresets}>
+                {SCHEDULE_PRESETS.map((p) => (
+                  <Pressable
+                    key={p.id}
+                    onPress={() => setSchedPreset(p.id)}
+                    style={[styles.schedChip, schedPreset === p.id && styles.schedChipActive]}
+                  >
+                    <Text style={[styles.schedChipText, schedPreset === p.id && styles.schedChipTextActive]}>{p.label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {schedPreset !== "hourly" && schedPreset !== "custom" ? (
+                <View style={styles.schedRow}>
+                  <Text style={styles.schedLabel}>Uhrzeit</Text>
+                  <TextInput
+                    style={styles.schedField}
+                    value={schedTime}
+                    onChangeText={setSchedTime}
+                    placeholder="09:00"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  {schedPreset === "weekly" ? (
+                    <View style={styles.schedDays}>
+                      {WEEKDAYS_DE.map((d, i) => (
+                        <Pressable
+                          key={d}
+                          onPress={() => setSchedDay(i)}
+                          style={[styles.dayChip, schedDay === i && styles.dayChipActive]}
+                        >
+                          <Text style={[styles.dayChipText, schedDay === i && styles.dayChipTextActive]}>{d}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+                  {schedPreset === "monthly" ? (
+                    <TextInput
+                      style={styles.schedField}
+                      value={schedDom}
+                      onChangeText={setSchedDom}
+                      placeholder="Tag"
+                      keyboardType="number-pad"
+                    />
+                  ) : null}
+                </View>
+              ) : null}
+              {schedPreset === "custom" ? (
+                <TextInput
+                  style={styles.schedField}
+                  value={schedCustomCron}
+                  onChangeText={setSchedCustomCron}
+                  placeholder="Cron: Minute Stunde Tag Monat Wochentag (z. B. 30 7 * * *)"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
+              ) : null}
+              <Pressable
+                onPress={addSchedule}
+                disabled={!schedInput.trim()}
+                style={[styles.schedAddBtn, !schedInput.trim() && styles.sendBtnDisabled]}
+              >
+                <Text style={styles.schedAddText}>⏰ Routine anlegen</Text>
+              </Pressable>
+              {scheduleList.length > 0 ? (
+                <View style={styles.schedList}>
+                  {scheduleList.map((s) => (
+                    <View key={s.id} style={styles.schedCard}>
+                      <View style={styles.schedCardText}>
+                        <Text style={styles.schedCardLabel}>{cronLabel(s.cron)}</Text>
+                        <Text style={styles.schedCardMsg} numberOfLines={2}>{s.message}</Text>
+                      </View>
+                      <Pressable onPress={() => deleteSchedule(s.id)} hitSlop={8}>
+                        <Text style={styles.chatDelete}>✕</Text>
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+            </View>
           </ScrollView>
         </>
       )}
@@ -1200,7 +1373,7 @@ const styles = StyleSheet.create({
   },
   activityLineErr: { borderColor: colors.danger },
   activityText: { color: colors.muted, fontSize: 12 },
-  activityResult: { color: colors.muted, fontSize: 11, fontFamily: "Courier", marginTop: 2 },
+  activityResult: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 2 },
   empty: { alignItems: "center", marginTop: 70, paddingHorizontal: 28 },
   emptyTitle: { fontSize: 22, fontWeight: "800", color: colors.text, textAlign: "center" },
   emptyText: { fontSize: 15, color: colors.muted, textAlign: "center", marginTop: 10, lineHeight: 22 },
@@ -1238,6 +1411,50 @@ const styles = StyleSheet.create({
   taskBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999 },
   taskBadgeText: { color: "#ffffff", fontSize: 11, fontWeight: "700" },
   taskResult: { fontSize: 14, color: colors.muted, lineHeight: 20 },
+  schedSection: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12, marginTop: 8, gap: 8 },
+  schedHeader: { fontSize: 15, fontWeight: "700", color: colors.text },
+  schedMessageInput: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: colors.text,
+    backgroundColor: colors.surface,
+    minHeight: 44,
+  },
+  schedPresets: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  schedChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  schedChipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  schedChipText: { fontSize: 12, color: colors.text },
+  schedChipTextActive: { color: "#ffffff", fontWeight: "700" },
+  schedRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  schedLabel: { fontSize: 13, color: colors.muted },
+  schedField: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: colors.text,
+    backgroundColor: colors.surface2,
+    minWidth: 72,
+    textAlign: "center",
+  },
+  schedDays: { flexDirection: "row", gap: 4 },
+  dayChip: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  dayChipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  dayChipText: { fontSize: 12, color: colors.text },
+  dayChipTextActive: { color: "#ffffff", fontWeight: "700" },
+  schedAddBtn: { alignSelf: "flex-start", backgroundColor: colors.accent, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 999 },
+  schedAddText: { color: "#ffffff", fontSize: 14, fontWeight: "700" },
+  schedList: { gap: 6, marginTop: 4 },
+  schedCard: { flexDirection: "row", alignItems: "center", gap: 8, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 10 },
+  schedCardText: { flex: 1 },
+  schedCardLabel: { fontSize: 12, color: colors.accent, fontWeight: "700" },
+  schedCardMsg: { fontSize: 14, color: colors.text, marginTop: 2 },
   chatItem: {
     flexDirection: "row",
     alignItems: "center",
@@ -1249,7 +1466,8 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   chatItemActive: { borderColor: colors.accent },
-  chatAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.accentSoft, alignItems: "center", justifyContent: "center" },
+  chatAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.accentSoft, alignItems: "center", justifyContent: "center", position: "relative" },
+  chatStatusDot: { position: "absolute", top: -1, right: -1, width: 13, height: 13, borderRadius: 7, borderWidth: 2, borderColor: colors.surface },
   chatAvatarText: { fontSize: 18 },
   chatInfo: { flex: 1 },
   chatTitle: { fontSize: 16, fontWeight: "700", color: colors.text },

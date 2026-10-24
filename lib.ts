@@ -67,3 +67,59 @@ export function formatTime(ts: number): string {
 export function uid(prefix: string): string {
   return `${prefix}${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
+
+// ---------------------------------------------------------------------------
+// Routinen/Zeitpläne – Claude-iOS-Pendant („Routines“): 5-Feld-Cron
+// (Minute Stunde TagImMonat Monat Wochentag; 0=Sonntag)
+// ---------------------------------------------------------------------------
+
+export type CronPreset = "hourly" | "daily" | "weekdays" | "weekend" | "weekly" | "monthly";
+
+export const WEEKDAYS_DE = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+
+/** Cron-Ausdruck aus einem Preset bauen. `time` = "HH:MM", `day` = 0..6 (0=So). */
+export function presetCron(
+  preset: CronPreset,
+  opts?: { time?: string; day?: number; dayOfMonth?: number },
+): string {
+  const [h, m] = (opts?.time || "09:00").split(":").map((x) => Number(x) || 0);
+  const hour = Math.min(23, Math.max(0, h));
+  const minute = Math.min(59, Math.max(0, m));
+  const day = Math.min(6, Math.max(0, opts?.day ?? 1));
+  const dayOfMonth = Math.min(31, Math.max(1, opts?.dayOfMonth ?? 1));
+  switch (preset) {
+    case "hourly":
+      return "0 * * * *";
+    case "daily":
+      return `${minute} ${hour} * * *`;
+    case "weekdays":
+      return `${minute} ${hour} * * 1-5`;
+    case "weekend":
+      return `${minute} ${hour} * * 0,6`;
+    case "weekly":
+      return `${minute} ${hour} * * ${day}`;
+    case "monthly":
+      return `${minute} ${hour} ${dayOfMonth} * *`;
+    default:
+      return `${minute} ${hour} * * *`;
+  }
+}
+
+/** Lesbare deutsche Beschriftung für einen 5-Feld-Cron-Ausdruck. */
+export function cronLabel(cron: string): string {
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return cron;
+  const [min, hour, dom, month, dow] = parts;
+  const hh = hour.padStart(2, "0");
+  const mm = min.padStart(2, "0");
+  const time = `${hh}:${mm}`;
+  const simple = /^\d+$/.test(min) && /^\d+$/.test(hour);
+  if (min === "0" && hour === "*" && dom === "*" && month === "*" && dow === "*") return "stündlich";
+  if (!simple) return cron;
+  if (dom === "*" && month === "*" && dow === "*") return `täglich um ${time}`;
+  if (dom === "*" && month === "*" && dow === "1-5") return `wochentags um ${time}`;
+  if (dom === "*" && month === "*" && (dow === "0,6" || dow === "6,0")) return `am Wochenende um ${time}`;
+  if (dom === "*" && month === "*" && /^[0-6]$/.test(dow)) return `jeden ${WEEKDAYS_DE[Number(dow)]} um ${time}`;
+  if (dom !== "*" && month === "*" && dow === "*" && /^\d+$/.test(dom)) return `monatlich am ${dom}. um ${time}`;
+  return cron;
+}
