@@ -7,11 +7,6 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0b0d12",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0b0d12"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.meister.piapp",
@@ -55,7 +50,8 @@
           "microphonePermission": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
           "speechRecognitionPermission": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "extra": {
       "eas": {

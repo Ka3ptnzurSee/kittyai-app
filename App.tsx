@@ -47,20 +47,26 @@ const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS 
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 
-// Dark Theme
+// Claude-Design (anthropic Design-Tokens, warmes Hell-Theme)
+// Quelle: https://claude.com (offizielle CSS-Design-Tokens)
 const colors = {
-  bg: "#0b0e14",
-  surface: "#141926",
-  surface2: "#1c2333",
-  text: "#eef2f8",
-  muted: "#8a93a6",
-  accent: "#5b7cfa",
-  accentSoft: "#26304d",
-  border: "#232b3d",
-  danger: "#ff5c6a",
-  success: "#34d399",
-  warning: "#f5a623",
+  bg: "#faf9f5", // --color-gray-050
+  surface: "#ffffff", // --color-gray-000
+  surface2: "#f5f4ed", // --color-gray-100
+  text: "#141413", // --color-gray-950
+  muted: "#87867f", // --color-gray-500
+  accent: "#d97757", // --color-clay
+  accentHover: "#c46849", // --color-clay-dark
+  accentSoft: "#f5f4ed", // --color-gray-100
+  border: "#e8e6dc", // --color-gray-200
+  danger: "#bf4d43", // --color-error
+  success: "#629987", // --color-mineral
+  warning: "#d97757", // --color-clay
 };
+
+// Claude rendert KI-Antworten in einer Serifenschrift (Markenzeichen).
+// Auf iOS: Georgia, auf Android: systemeigene Serif.
+const aiFontFamily = Platform.select({ ios: "Georgia", android: "serif", default: "serif" });
 
 function detectBase(): string {
   try {
@@ -735,10 +741,10 @@ export default function App() {
 
   function renderTask(task: Task) {
     const statusInfo: Record<string, { label: string; color: string }> = {
-      pending: { label: "wartet", color: "#94a3b8" },
-      running: { label: "läuft…", color: "#f59e0b" },
-      done: { label: "fertig", color: "#22c55e" },
-      error: { label: "fehler", color: "#ef4444" },
+      pending: { label: "wartet", color: colors.muted },
+      running: { label: "läuft…", color: colors.accent },
+      done: { label: "fertig", color: colors.success },
+      error: { label: "fehler", color: colors.danger },
     };
     const s = statusInfo[task.status] || statusInfo.pending;
     return (
@@ -760,7 +766,7 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
 
       <View style={styles.header}>
         {activeChatId && tab === "chats" ? (
@@ -1046,8 +1052,8 @@ const styles = StyleSheet.create({
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18 },
   userBubble: { alignSelf: "flex-end", backgroundColor: colors.accent, borderBottomRightRadius: 5 },
   aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
-  userText: { color: "#ffffff", fontSize: 16, lineHeight: 22 },
-  aiText: { color: colors.text, fontSize: 16, lineHeight: 22 },
+  userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
+  aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 3, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 6 },
   activityLine: {
     backgroundColor: colors.surface2,
@@ -1138,9 +1144,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface2,
   },
   sendBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
-  sendBtnDisabled: { backgroundColor: "#3a4150" },
+  sendBtnDisabled: { backgroundColor: colors.muted },
   sendText: { color: "#ffffff", fontSize: 18 },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(8,11,18,0.7)", justifyContent: "center", padding: 24 },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: colors.border },
   modalTitle: { fontSize: 18, fontWeight: "700", color: colors.text },
   modalHint: { fontSize: 13, color: colors.muted, marginTop: 12, lineHeight: 18 },
