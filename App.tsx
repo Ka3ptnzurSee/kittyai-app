@@ -582,6 +582,8 @@ export default function App() {
     }));
     abortedRef.current.delete(chatId);
     markBusy(chatId, true);
+    // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
+    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
 
     try {
       await streamChat(finalMessage, chatId, aiId, images, documents);
@@ -1042,7 +1044,6 @@ export default function App() {
             <FlatList
               ref={listRef}
               data={activeChat.messages}
-              onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
               style={styles.list}
