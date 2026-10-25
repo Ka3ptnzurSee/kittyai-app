@@ -305,16 +305,16 @@ export default function App() {
       let savedToken = "";
       try {
         savedToken = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
-        if (savedToken) {
+        // Auto-Token aus Build-Zeit-Secret (EXPO_PUBLIC_API_TOKEN) hat VORRANG:
+        // nach einer Server-Token-Rotation übernimmt die App den neuen Token,
+        // auch wenn noch ein alter Token im Speicher liegt.
+        const cfgToken = (process.env as any)?.EXPO_PUBLIC_API_TOKEN || "";
+        if (cfgToken && cfgToken !== savedToken) {
+          savedToken = cfgToken;
+          setApiToken(cfgToken);
+          await AsyncStorage.setItem(TOKEN_KEY, cfgToken);
+        } else if (savedToken) {
           setApiToken(savedToken);
-        } else {
-          // Auto-Token aus Build-Zeit-Secret (EXPO_PUBLIC_API_TOKEN)
-          const cfgToken = (process.env as any)?.EXPO_PUBLIC_API_TOKEN || "";
-          if (cfgToken) {
-            savedToken = cfgToken;
-            setApiToken(cfgToken);
-            await AsyncStorage.setItem(TOKEN_KEY, cfgToken);
-          }
         }
       } catch {
         // ignorieren
