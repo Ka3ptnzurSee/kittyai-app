@@ -308,7 +308,7 @@ export default function App() {
         // Auto-Token aus Build-Zeit-Secret (EXPO_PUBLIC_API_TOKEN) hat VORRANG:
         // nach einer Server-Token-Rotation übernimmt die App den neuen Token,
         // auch wenn noch ein alter Token im Speicher liegt.
-        const cfgToken = (process.env as any)?.EXPO_PUBLIC_API_TOKEN || "";
+        const cfgToken = ((process.env as any)?.EXPO_PUBLIC_API_TOKEN || "").trim();
         if (cfgToken && cfgToken !== savedToken) {
           savedToken = cfgToken;
           setApiToken(cfgToken);
