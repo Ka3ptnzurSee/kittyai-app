@@ -87,6 +87,7 @@ const CWD_KEY = "pi-cwd";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
+const MAX_TITLE_CHARS = 48;
 
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
 const SCHEDULE_PRESETS: { id: CronPreset | "custom"; label: string }[] = [
@@ -233,6 +234,19 @@ function MessageBubble({
   );
 }
 
+function deriveTitle(raw: string): string {
+  const cleaned = raw
+    .replace(/^🎨\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= MAX_TITLE_CHARS) return cleaned;
+  const cut = cleaned.slice(0, MAX_TITLE_CHARS);
+  const lastSpace = cut.lastIndexOf(" ");
+  const truncated = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+  return truncated ? `${truncated}…` : "";
+}
+
 export default function App() {
   const [tab, setTab] = useState<"chats" | "tasks">("chats");
   const [chats, setChats] = useState<Chat[]>([]);
@@ -271,11 +285,13 @@ export default function App() {
   const abortedRef = useRef<Set<string>>(new Set());
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
+  const nearBottomRef = useRef(true); // ob der Nutzer am Listenende ist (für Auto-Scroll)
 
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
   useEffect(() => {
     if (!activeChatId) return;
+    nearBottomRef.current = true; // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
     const t = setTimeout(() => {
       listRef.current?.scrollToEnd({ animated: false });
     }, 60);
@@ -354,7 +370,20 @@ export default function App() {
         const savedChats = await AsyncStorage.getItem(CHATS_KEY);
         if (savedChats) {
           const parsed = JSON.parse(savedChats);
-          if (Array.isArray(parsed)) setChats((prev) => (prev.length ? prev : parsed));
+          if (Array.isArray(parsed)) {
+            // Verwaiste leere KI-Nachrichten entfernen (weiße Balken aus abgebrochenen Streams)
+            const cleaned = parsed.map((c: any) => ({
+              ...c,
+              messages: (Array.isArray(c.messages) ? c.messages : []).filter(
+                (m: any) =>
+                  m.role !== "assistant" ||
+                  (m.text && String(m.text).trim()) ||
+                  (m.activity && m.activity.length) ||
+                  (m.images && m.images.length),
+              ),
+            }));
+            setChats((prev) => (prev.length ? prev : cleaned));
+          }
         }
       } catch {
         // ignorieren
@@ -513,7 +542,7 @@ export default function App() {
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", images: [] };
     patchChat(chatId, (c) => ({
       ...c,
-      title: c.messages.length === 0 ? prompt.slice(0, 40) : c.title,
+      title: c.messages.length === 0 ? (deriveTitle(prompt) || c.title) : c.title,
       messages: [...c.messages, userMsg, aiMsg],
       updatedAt: Date.now(),
     }));
@@ -576,7 +605,7 @@ export default function App() {
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
     patchChat(chatId, (c) => ({
       ...c,
-      title: c.messages.length === 0 ? message.slice(0, 40) : c.title,
+      title: c.messages.length === 0 ? (deriveTitle(message) || c.title) : c.title,
       messages: [...c.messages, userMsg, aiMsg],
       updatedAt: Date.now(),
     }));
@@ -676,7 +705,7 @@ export default function App() {
       const t = e?.type;
       if (t === "text") {
         const delta = typeof e.data === "string" ? e.data : "";
-        patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(-MAX_REPLY_CHARS) }));
+        patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(0, MAX_REPLY_CHARS) }));
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
         setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-800) }));
@@ -719,7 +748,11 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "error") {
         const msg2 = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
-        appendMsg(chatId, { id: uid("e"), role: "assistant", text: `⚠️ ${msg2}` });
+        patchMsg(chatId, aiId, (m) =>
+          m.text && m.text.trim()
+            ? { ...m, text: `${m.text}\n\n⚠️ ${msg2}` }
+            : { ...m, text: `⚠️ ${msg2}` },
+        );
       }
     };
 
@@ -751,6 +784,40 @@ export default function App() {
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
+    } catch (e) {
+      // Nutzer-Abbruch (Stop gedrückt): nur WIRKLICH leere KI-Nachricht entfernen,
+      // bereits gestreamten Teilext behalten.
+      if (abortedRef.current.has(chatId)) {
+        abortedRef.current.delete(chatId); // Cleanup nicht vom return/throw-Flow abhängig machen
+        setChats((cs) =>
+          cs.map((c) =>
+            c.id === chatId
+              ? {
+                  ...c,
+                  messages: c.messages.filter(
+                    (m) =>
+                      m.id !== aiId ||
+                      (m.text && m.text.trim()) ||
+                      (m.activity && m.activity.length) ||
+                      (m.images && m.images.length),
+                  ),
+                }
+              : c,
+          ),
+        );
+        return;
+      }
+      // Timeout (30 min): partiell gestreamten Text behalten + Meldung anhängen.
+      if (controller.signal.aborted) {
+        patchMsg(chatId, aiId, (m) =>
+          m.text && m.text.trim()
+            ? { ...m, text: `${m.text}\n\n⚠️ Zeitüberschreitung — bitte erneut senden.` }
+            : { ...m, text: "⚠️ Zeitüberschreitung — bitte erneut senden." },
+        );
+        return;
+      }
+      // Netzwerk-/HTTP-Fehler: nicht verschlucken → sendChat-Retry + /chat-Fallback greifen.
+      throw e;
     } finally {
       clearTimeout(timer);
       if (abortControllersRef.current.get(chatId) === controller) abortControllersRef.current.delete(chatId);
@@ -1048,6 +1115,15 @@ export default function App() {
               renderItem={renderMessage}
               style={styles.list}
               contentContainerStyle={styles.listContent}
+              onScroll={(e) => {
+                const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+                const dist = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+                nearBottomRef.current = dist < 80;
+              }}
+              onContentSizeChange={() => {
+                if (nearBottomRef.current) listRef.current?.scrollToEnd({ animated: false });
+              }}
+              scrollEventThrottle={32}
               ListEmptyComponent={
                 <View style={styles.empty}>
                   <Text style={styles.emptyTitle}>Womit kann ich helfen? 👋</Text>
@@ -1329,8 +1405,8 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 15, color: colors.muted },
   tabTextActive: { color: colors.accent, fontWeight: "700" },
   list: { flex: 1 },
-  listContent: { padding: 12, gap: 8 },
-  bubble: { maxWidth: "86%", padding: 12, borderRadius: 18 },
+  listContent: { padding: 12, paddingBottom: 16 },
+  bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
   userBubble: { alignSelf: "flex-end", backgroundColor: colors.accent, borderBottomRightRadius: 5 },
   aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.danger, borderBottomLeftRadius: 5 },
