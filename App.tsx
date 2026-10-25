@@ -116,7 +116,7 @@ function detectBase(): string {
   } catch {
     // ignorieren
   }
-  return "https://lawnware.uk:8446";
+  return "https://hashtagweinboehla.de/kittyai";
 }
 
 Notifications.setNotificationHandler({
@@ -1349,7 +1349,7 @@ export default function App() {
               style={styles.urlInput}
               value={urlDraft}
               onChangeText={setUrlDraft}
-              placeholder="https://lawnware.uk:8446"
+              placeholder="https://hashtagweinboehla.de/kittyai"
               autoCapitalize="none"
               autoCorrect={false}
               keyboardType="url"
