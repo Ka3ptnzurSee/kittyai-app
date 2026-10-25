@@ -56,7 +56,8 @@ function CompactionBar() {
     const iv = setInterval(() => setSec((s) => s + 1), 1000);
     return () => clearInterval(iv);
   }, []);
-  const EST = 120;
+  // Schätzung basiert auf echter Messung: Kompaktierung dauert typisch 5–17s (Ausreißer ~37s).
+  const EST = 20;
   const pct = Math.min(95, Math.round((sec / EST) * 100));
   const remaining = Math.max(0, EST - sec);
   return (
