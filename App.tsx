@@ -203,6 +203,16 @@ export default function App() {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
+  // Timer: solange ein Chat beschäftigt ist, zählt die Zeit hoch (sonst wirkt „denkt nach …" eingefroren).
+  const [busyElapsedSec, setBusyElapsedSec] = useState(0);
+  useEffect(() => {
+    if (busyChatIds.size === 0) {
+      setBusyElapsedSec(0);
+      return;
+    }
+    const iv = setInterval(() => setBusyElapsedSec((s) => s + 1), 1000);
+    return () => clearInterval(iv);
+  }, [busyChatIds]);
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
@@ -1077,7 +1087,7 @@ export default function App() {
                   <View style={styles.thinking}>
                     <ActivityIndicator color={colors.accent} size="small" />
                     <Text style={styles.thinkingText} numberOfLines={1}>
-                      {thisStatus ? `⚙️ ${thisStatus}` : thisThinking ? `💭 ${thisThinking}` : listening ? "höre zu …" : "denkt nach …"}
+                      {thisStatus ? `⚙️ ${thisStatus}` : thisThinking ? `💭 ${thisThinking}` : listening ? "höre zu …" : `denkt nach · ${busyElapsedSec < 60 ? `${busyElapsedSec}s` : `${Math.floor(busyElapsedSec / 60)}m ${busyElapsedSec % 60}s`}`}
                     </Text>
                   </View>
                 ) : null
