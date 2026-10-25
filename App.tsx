@@ -6,7 +6,6 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
-  Modal,
   PanResponder,
   Platform,
   Pressable,
@@ -248,10 +247,7 @@ export default function App() {
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [apiToken, setApiToken] = useState("");
-  const [tokenDraft, setTokenDraft] = useState("");
-  const [cwdDraft, setCwdDraft] = useState("");
   const [cwd, setCwd] = useState("");
   const [taskList, setTaskList] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
@@ -348,7 +344,6 @@ export default function App() {
       try {
         const savedCwd = await AsyncStorage.getItem(CWD_KEY);
         if (savedCwd) {
-          setCwdDraft(savedCwd);
           setCwd(savedCwd);
         }
       } catch {
@@ -435,39 +430,6 @@ export default function App() {
       headers: authHeaders(),
       body: JSON.stringify({ chatId }),
     }).catch(() => {});
-  }
-
-  function openSettings() {
-    setTokenDraft(apiToken);
-    setSettingsOpen(true);
-  }
-
-  async function saveSettings() {
-    const tok = tokenDraft.trim();
-    const cwdVal = cwdDraft.trim();
-    setApiToken(tok);
-    try {
-      if (tok) await AsyncStorage.setItem(TOKEN_KEY, tok);
-      else await AsyncStorage.removeItem(TOKEN_KEY);
-      if (cwdVal) await AsyncStorage.setItem(CWD_KEY, cwdVal);
-    } catch {
-      // ignorieren
-    }
-    // Nur bei tatsächlicher Änderung den Server wechseln (vermeidet unnötigen pi-Neustart)
-    if (cwdVal && cwdVal !== cwd) {
-      try {
-        const r = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/set-cwd`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...(tok && serverUrl.startsWith("https://") ? { "X-API-Token": tok } : {}) },
-          body: JSON.stringify({ cwd: cwdVal }),
-        });
-        if (r.ok) setCwd(cwdVal);
-      } catch {
-        // ignorieren
-      }
-    }
-    setSettingsOpen(false);
-    registerPush(serverUrl, tok);
   }
 
   async function speakReply(text: string) {
@@ -1061,9 +1023,6 @@ export default function App() {
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.chip, speak && styles.chipActive]} hitSlop={6}>
             <Text style={styles.chipText}>{speak ? "🔊 Gespräch" : "💬 Text"}</Text>
           </Pressable>
-          <Pressable onPress={openSettings} style={styles.chip} hitSlop={6}>
-            <Text style={styles.chipText}>⚙️</Text>
-          </Pressable>
         </View>
       </View>
 
@@ -1324,41 +1283,6 @@ export default function App() {
           </ScrollView>
         </>
       )}
-
-      <Modal visible={settingsOpen} transparent animationType="slide">
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Server-Einstellungen</Text>
-            <Text style={styles.modalHint}>API-Token (aus /etc/pi-app-secrets.env):</Text>
-            <TextInput
-              style={styles.urlInput}
-              value={tokenDraft}
-              onChangeText={setTokenDraft}
-              placeholder="API-Token"
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-            />
-            <Text style={styles.modalHint}>Arbeitsverzeichnis (wo pi arbeitet, z. B. /opt/pi-app):</Text>
-            <TextInput
-              style={styles.urlInput}
-              value={cwdDraft}
-              onChangeText={setCwdDraft}
-              placeholder="/opt/pi-app/memory"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <View style={styles.modalButtons}>
-              <Pressable onPress={() => setSettingsOpen(false)} style={styles.modalCancel}>
-                <Text style={styles.modalCancelText}>Abbrechen</Text>
-              </Pressable>
-              <Pressable onPress={saveSettings} style={styles.modalSave}>
-                <Text style={styles.modalSaveText}>Speichern</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
