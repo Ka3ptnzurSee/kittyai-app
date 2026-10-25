@@ -49,6 +49,28 @@ function ElapsedLabel({ style }: { style?: TextStyle }) {
     </Text>
   );
 }
+
+// Fortschrittsbalken für die Kontext-Kompaktierung (Schätzung: ~120s Server-Timeout).
+function CompactionBar() {
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    const iv = setInterval(() => setSec((s) => s + 1), 1000);
+    return () => clearInterval(iv);
+  }, []);
+  const EST = 120;
+  const pct = Math.min(95, Math.round((sec / EST) * 100));
+  const remaining = Math.max(0, EST - sec);
+  return (
+    <View style={styles.compactionWrap}>
+      <View style={styles.compactionTrack}>
+        <View style={[styles.compactionFill, { width: `${pct}%` }]} />
+      </View>
+      <Text style={styles.thinkingText} numberOfLines={1}>
+        kompaktiere Kontext · {pct}% · noch ca. {remaining}s
+      </Text>
+    </View>
+  );
+}
 type Task = {
   id: string;
   message: string;
@@ -1092,7 +1114,11 @@ export default function App() {
                   <View style={styles.thinking}>
                     <ActivityIndicator color={colors.accent} size="small" />
                     {thisStatus ? (
-                      <Text style={styles.thinkingText} numberOfLines={1}>⚙️ {thisStatus}</Text>
+                      thisStatus.startsWith("kompaktiere Kontext") ? (
+                        <CompactionBar />
+                      ) : (
+                        <Text style={styles.thinkingText} numberOfLines={1}>⚙️ {thisStatus}</Text>
+                      )
                     ) : thisThinking ? (
                       <Text style={styles.thinkingText} numberOfLines={1}>💭 {thisThinking}</Text>
                     ) : listening ? (
@@ -1445,6 +1471,9 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 15, color: colors.muted, textAlign: "center", marginTop: 10, lineHeight: 22 },
   thinking: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 4 },
   thinkingText: { color: colors.muted, fontSize: 13, flex: 1 },
+  compactionWrap: { alignItems: "center", gap: 6, flex: 1 },
+  compactionTrack: { width: "100%", height: 4, borderRadius: 2, backgroundColor: colors.border },
+  compactionFill: { height: "100%", borderRadius: 2, backgroundColor: colors.accent },
   inputBar: {
     flexDirection: "row",
     alignItems: "flex-end",
