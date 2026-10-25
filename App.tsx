@@ -81,7 +81,6 @@ type Task = {
 };
 type Schedule = { id: string; message: string; cron: string };
 
-const STORAGE_KEY = "pi-server-url";
 const TOKEN_KEY = "pi-api-token";
 const CHATS_KEY = "pi-chats-v2";
 const CWD_KEY = "pi-cwd";
@@ -250,7 +249,6 @@ export default function App() {
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [urlDraft, setUrlDraft] = useState<string>(() => detectBase());
   const [apiToken, setApiToken] = useState("");
   const [tokenDraft, setTokenDraft] = useState("");
   const [cwdDraft, setCwdDraft] = useState("");
@@ -328,17 +326,8 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      let url = serverUrl;
-      try {
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          url = saved;
-          setServerUrl(saved);
-          setUrlDraft(saved);
-        }
-      } catch {
-        // ignorieren
-      }
+      // Server-URL ist fest verdrahtet (detectBase) — keine gespeicherte/manuelle URL mehr.
+      const url = serverUrl;
       let savedToken = "";
       try {
         savedToken = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
@@ -449,19 +438,15 @@ export default function App() {
   }
 
   function openSettings() {
-    setUrlDraft(serverUrl);
     setTokenDraft(apiToken);
     setSettingsOpen(true);
   }
 
   async function saveSettings() {
-    const url = urlDraft.trim().replace(/\/+$/, "");
     const tok = tokenDraft.trim();
     const cwdVal = cwdDraft.trim();
-    setServerUrl(url);
     setApiToken(tok);
     try {
-      await AsyncStorage.setItem(STORAGE_KEY, url);
       if (tok) await AsyncStorage.setItem(TOKEN_KEY, tok);
       else await AsyncStorage.removeItem(TOKEN_KEY);
       if (cwdVal) await AsyncStorage.setItem(CWD_KEY, cwdVal);
@@ -471,9 +456,9 @@ export default function App() {
     // Nur bei tatsächlicher Änderung den Server wechseln (vermeidet unnötigen pi-Neustart)
     if (cwdVal && cwdVal !== cwd) {
       try {
-        const r = await fetch(`${url}/api/set-cwd`, {
+        const r = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/set-cwd`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...(tok && url.startsWith("https://") ? { "X-API-Token": tok } : {}) },
+          headers: { "Content-Type": "application/json", ...(tok && serverUrl.startsWith("https://") ? { "X-API-Token": tok } : {}) },
           body: JSON.stringify({ cwd: cwdVal }),
         });
         if (r.ok) setCwd(cwdVal);
@@ -482,7 +467,7 @@ export default function App() {
       }
     }
     setSettingsOpen(false);
-    registerPush(url, tok);
+    registerPush(serverUrl, tok);
   }
 
   async function speakReply(text: string) {
@@ -1344,16 +1329,6 @@ export default function App() {
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Server-Einstellungen</Text>
-            <Text style={styles.modalHint}>Server-Adresse (normalerweise automatisch erkannt):</Text>
-            <TextInput
-              style={styles.urlInput}
-              value={urlDraft}
-              onChangeText={setUrlDraft}
-              placeholder="https://hashtagweinboehla.de/kittyai"
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
             <Text style={styles.modalHint}>API-Token (aus /etc/pi-app-secrets.env):</Text>
             <TextInput
               style={styles.urlInput}
@@ -1374,18 +1349,6 @@ export default function App() {
               autoCorrect={false}
             />
             <View style={styles.modalButtons}>
-              <Pressable
-                onPress={() => {
-                  const auto = detectBase();
-                  setUrlDraft(auto);
-                  setServerUrl(auto);
-                  AsyncStorage.removeItem(STORAGE_KEY).catch(() => {});
-                  setSettingsOpen(false);
-                }}
-                style={styles.modalCancel}
-              >
-                <Text style={styles.modalCancelText}>Auto</Text>
-              </Pressable>
               <Pressable onPress={() => setSettingsOpen(false)} style={styles.modalCancel}>
                 <Text style={styles.modalCancelText}>Abbrechen</Text>
               </Pressable>
