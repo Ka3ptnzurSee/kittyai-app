@@ -1042,6 +1042,7 @@ export default function App() {
             <FlatList
               ref={listRef}
               data={activeChat.messages}
+              onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
               style={styles.list}
