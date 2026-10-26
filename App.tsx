@@ -86,19 +86,24 @@ function ThinkingBlock({ text }: { text: string }) {
 }
 
 // Fehler in menschenlesbare Kategorie übersetzen (statt rohem ⚠️-Text).
+const AUTH_PATTERN = /401|403|unauthor|forbidden|invalid api key|invalid token|expired token|bad token/i;
+
 function classifyError(raw: string): string {
   const s = raw.toLowerCase();
-  if (/rate.?limit|429|too many|limit reached|fenster|window/i.test(s)) return "Limit erreicht";
+  if (/rate.?limit|429|too many|limit reached|fenster/i.test(s)) return "Limit erreicht";
   if (/quota|credits|billing|zahlung|payment|out of credits/i.test(s)) return "Konto/Guthaben";
-  if (/401|403|auth|token|api key|unauthor|forbidden/i.test(s)) return "Zugriff verweigert";
+  if (AUTH_PATTERN.test(s)) return "Zugriff verweigert";
   if (/timeout|timed out|zeitüberschreitung/i.test(s)) return "Zeitüberschreitung";
   if (/overload|busy|capacity|ausgelastet|überlast/i.test(s)) return "Server ausgelastet";
-  if (/network|fetch failed|connection|econnreset|socket|dns/i.test(s)) return "Netzwerk unterbrochen";
+  if (/context length|maximum context|token limit/i.test(s)) return "Kontext zu lang";
+  if (/network|fetch failed|connection|econnreset|socket|dns|netzwerk|verbindung/i.test(s)) return "Netzwerk unterbrochen";
   return "Fehler";
 }
 
 function isRetryable(raw: string): boolean {
-  return !/401|403|quota|credits|billing|zahlung|payment|api key|unauthor|forbidden/i.test(raw);
+  return !AUTH_PATTERN.test(raw)
+    && !/quota|credits|billing|zahlung|payment/i.test(raw)
+    && !/context length|maximum context|token limit/i.test(raw);
 }
 
 type Task = {
@@ -117,7 +122,7 @@ const CWD_KEY = "pi-cwd";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
-const MAX_TITLE_CHARS = 48;
+const MAX_TITLE_CHARS = 30;
 
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
 const SCHEDULE_PRESETS: { id: CronPreset | "custom"; label: string }[] = [
@@ -364,6 +369,7 @@ export default function App() {
   const player = useAudioPlayer();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const abortedRef = useRef<Set<string>>(new Set());
+  const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number }>>({});
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
   const nearBottomRef = useRef(true); // ob der Nutzer am Listenende ist (für Auto-Scroll)
@@ -488,7 +494,7 @@ export default function App() {
   useEffect(() => {
     if (!loadedRef.current) return;
     const t = setTimeout(() => {
-      const trimmed = chats.slice(0, 50).map((c) => ({ ...c, messages: c.messages.slice(-200) }));
+      const trimmed = chats.slice(0, 50).map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-200) }));
       AsyncStorage.setItem(CHATS_KEY, JSON.stringify(trimmed)).catch(() => {
         // ignorieren
       });
@@ -655,7 +661,7 @@ export default function App() {
       if (speak) speakReply("Hier ist das Bild.");
     } catch (e) {
       const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
-      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${msg}` });
+      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${classifyError(msg)}` });
     } finally {
       clearTimeout(timer);
       if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
@@ -701,6 +707,7 @@ export default function App() {
       updatedAt: Date.now(),
     }));
     abortedRef.current.delete(chatId);
+    delete streamStateRef.current[chatId];
     markBusy(chatId, true);
     // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
@@ -715,24 +722,33 @@ export default function App() {
       // Auto-Wiederherstellung: bei Stream-Abbruch (Server-Neustart/Netz) mehrfach
       // retryen, damit sich der Chat von selbst fängt statt abzubrechen.
       const rawErr = e instanceof Error ? e.message : String(e);
-      const retriable = /network|fetch failed|connection lost|timed out|request failed|prematurely closed|aborted|econnreset|socket hang up/i.test(rawErr);
+      const retriable = /network|fetch failed|connection lost|timed out|request failed|prematurely closed|aborted|econnreset|socket hang up|bad gateway|502|503|504|5[0-9][0-9]/i.test(rawErr);
       if (retriable) {
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
             setStatusByChat((prev) => ({ ...prev, [chatId]: `Verbindung verloren — neuer Versuch ${attempt}/3…` }));
             await new Promise((r) => setTimeout(r, 1500 * attempt)); // 1.5s, 3s, 4.5s
-            if (abortedRef.current.has(chatId)) return;
-            // Zustand zurücksetzen, sonst hängt der neue Text an den Teiltext des abgebrochenen Versuchs an.
-            patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
+            if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
+            const st = streamStateRef.current[chatId];
             setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
-            await streamChat(finalMessage, chatId, aiId, images, documents);
+            if (st && st.turnId && st.lastSeq > 0) {
+              // Resumable: an der Abbruchstelle fortsetzen statt von vorn zu streamen.
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq });
+            } else {
+              // Kein Resume möglich → Voll-Replay (Text zurücksetzen, sonst doppelt).
+              patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
+              await streamChat(finalMessage, chatId, aiId, images, documents);
+            }
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
           } catch {
-            // nächster Versuch
+            // Resume war evtl. nicht möglich (Turn bereits aufgeräumt) → nächster
+            // Versuch ohne Resume als Voll-Replay.
+            delete streamStateRef.current[chatId];
           }
         }
       }
+      setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); // Status nach fehlgeschlagenem Retry löschen (Fallback übernimmt)
       // Fallback: synchroner /chat (mit eigenem Abort-Timeout gegen Busy-Lockup)
       const ctrl = new AbortController();
       abortControllersRef.current.set(chatId, ctrl);
@@ -791,15 +807,17 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = []) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number }) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
+    let lastSeq = resume?.lastSeq ?? 0;
+    let turnId = resume?.turnId ?? "";
     try {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ message, chatId, images, documents }),
+      body: JSON.stringify(resume ? { chatId, resume } : { message, chatId, images, documents }),
       signal: controller.signal,
     });
 
@@ -863,6 +881,9 @@ export default function App() {
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+      } else if (t === "resume_unavailable") {
+        // Turn ist auf dem Server nicht mehr vorhanden → Voll-Replay erzwingen.
+        throw new Error("resume_unavailable");
       } else if (t === "error") {
         const raw = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
@@ -886,6 +907,10 @@ export default function App() {
         } catch {
           continue;
         }
+        const e0 = evt as { type?: string; data?: { turnId?: string }; seq?: number };
+        if (typeof e0.seq === "number" && e0.seq > lastSeq) lastSeq = e0.seq;
+        if (e0.type === "turn_start" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
+        streamStateRef.current[chatId] = { turnId, lastSeq };
         apply(evt);
       }
     }
@@ -1113,14 +1138,17 @@ export default function App() {
     const idx = chat.messages.findIndex((m) => m.id === aiMsg.id);
     const userMsg = [...chat.messages.slice(0, idx)].reverse().find((m) => m.role === "user");
     if (!userMsg) return;
-    const text = userMsg.text.replace(/^\[Antwort auf:.*?\]\n?/s, "").trim();
-    if (!text) return;
+    const text = userMsg.text.trim();
+    // Reine Anhang-Nachrichten ("🖼 Bild"/"📄 PDF"/"📎 Datei") können ohne
+    // die Base64-Anhänge nicht korrekt wiederholt werden → Retry unterdrücken.
+    if (!text || /^(🖼 Bild|📄 PDF|📎 Datei)$/.test(text)) return;
     patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "", activity: [], error: undefined }));
     markBusy(chat.id, true);
     setChatThinking(chat.id, "");
     abortedRef.current.delete(chat.id);
-    streamChat(text, chat.id, aiMsg.id).catch(() => {
-      patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Netzwerk unterbrochen", retryable: true } }));
+    streamChat(text, chat.id, aiMsg.id).catch((e) => {
+      const raw = e instanceof Error ? e.message : String(e);
+      patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
     }).finally(() => {
       markBusy(chat.id, false);
       setChatThinking(chat.id, "");
