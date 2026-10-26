@@ -7,6 +7,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Modal,
   PanResponder,
   Platform,
   Pressable,
@@ -76,13 +77,11 @@ function CompactionBar() {
 
 // Denk-Text als aufklappbarer Block (Volllänge) statt 1-Zeilen-Marquee.
 function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
   if (!text.trim()) return null;
   return (
-    <Pressable onPress={() => setOpen((o) => !o)} style={styles.thinkingBlock}>
-      <Text style={styles.thinkingText} numberOfLines={open ? undefined : 3}>{text}</Text>
-      <Text style={styles.thinkingHint}>{open ? "▴ einklappen" : "▾ ausklappen"}</Text>
-    </Pressable>
+    <View style={styles.thinking}>
+      <Text style={styles.thinkingText} numberOfLines={1}>⚙️ pi denkt …</Text>
+    </View>
   );
 }
 
@@ -123,6 +122,7 @@ const CWD_KEY = "pi-cwd";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
+const MAX_THINKING_CHARS = 16000; // Denk-Text deckeln (vorher 800 → schnitt Reasoning sichtbar ab)
 const MAX_TITLE_CHARS = 22;
 
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
@@ -310,9 +310,6 @@ function MessageBubble({
 
   return (
     <View style={[styles.bubble, bubbleStyle]} {...panResponder.panHandlers}>
-      <Text style={[styles.senderLabel, isUser ? styles.senderLabelUser : styles.senderLabelAi]}>
-        {isUser ? "Du" : "KittyAI"}
-      </Text>
       {item.replyTo ? (
         <View style={styles.replyQuote}>
           <Text style={styles.replyQuoteText} numberOfLines={2}>{breakUnbreakable(item.replyTo.text)}</Text>
@@ -405,7 +402,6 @@ export default function App() {
   const [listening, setListening] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
   const micPulse = useRef(new Animated.Value(1)).current;
-  const attachAnim = useRef(new Animated.Value(0)).current;
   const sendScale = useRef(new Animated.Value(1)).current;
   const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
@@ -455,16 +451,6 @@ export default function App() {
     loop.start();
     return () => loop.stop();
   }, [listening, micPulse]);
-
-  // Anhang-Reihe: beim Öffnen kurz einspringen (Slide+Fade) statt hart aufzutauchen.
-  useEffect(() => {
-    if (attachOpen) {
-      attachAnim.setValue(0);
-      Animated.spring(attachAnim, { toValue: 1, useNativeDriver: true, friction: 8, tension: 120 }).start();
-    } else {
-      attachAnim.setValue(0);
-    }
-  }, [attachOpen, attachAnim]);
 
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
@@ -937,7 +923,7 @@ export default function App() {
         patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(0, MAX_REPLY_CHARS) }));
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
-        setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-800) }));
+        setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-MAX_THINKING_CHARS) }));
       } else if (t === "status") {
         const msg = typeof e.data === "string" ? e.data : "";
         setStatusByChat((prev) => ({ ...prev, [chatId]: msg }));
@@ -1356,7 +1342,7 @@ export default function App() {
       <View style={styles.header}>
         {activeChatId && tab === "chats" ? (
           <Pressable onPress={() => setActiveChatId(null)} style={styles.backBtn} hitSlop={8}>
-            <Text style={styles.backText}>‹</Text>
+            <Ionicons name="chevron-back" size={24} color={colors.accent} />
           </Pressable>
         ) : (
           <View style={styles.logo}>
@@ -1381,11 +1367,8 @@ export default function App() {
               </View>
             </Pressable>
           )}
-          <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.chip, speak && styles.chipActive]} hitSlop={6}>
-            <View style={styles.chipRow}>
-              <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={15} color={colors.text} />
-              <Text style={styles.chipText}>{speak ? "Gespräch" : "Text"}</Text>
-            </View>
+          <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
+            <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
         </View>
       </View>
@@ -1499,25 +1482,36 @@ export default function App() {
                   </Pressable>
                 </View>
               )}
-              {attachOpen && (
-                <Animated.View style={[styles.attachRow, {
-                  opacity: attachAnim,
-                  transform: [{ translateY: attachAnim.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] }) }],
-                }]}>
-                  <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Ionicons name="image-outline" size={20} color={colors.accent} />
-                    <Text style={styles.attachActionLabel}>Bild</Text>
+              <Modal
+                visible={attachOpen}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setAttachOpen(false)}
+              >
+                <Pressable style={styles.sheetBackdrop} onPress={() => setAttachOpen(false)}>
+                  <Pressable style={styles.attachSheet} onPress={() => {}}>
+                    <View style={styles.attachSheetHandle} />
+                    <Text style={styles.attachSheetTitle}>Anhang hinzufügen</Text>
+                    <View style={styles.attachSheetRow}>
+                      <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                        <View style={styles.attachSheetIcon}><Ionicons name="image-outline" size={22} color={colors.accent} /></View>
+                        <Text style={styles.attachSheetLabel}>Bild</Text>
+                      </Pressable>
+                      <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                        <View style={styles.attachSheetIcon}><Ionicons name="attach-outline" size={22} color={colors.accent} /></View>
+                        <Text style={styles.attachSheetLabel}>Datei</Text>
+                      </Pressable>
+                      <Pressable onPress={() => { generateImageInChat(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                        <View style={styles.attachSheetIcon}><Ionicons name="color-palette-outline" size={22} color={colors.accent} /></View>
+                        <Text style={styles.attachSheetLabel}>Bild erstellen</Text>
+                      </Pressable>
+                    </View>
+                    <Pressable onPress={() => setAttachOpen(false)} style={styles.attachSheetCancel}>
+                      <Text style={styles.attachSheetCancelText}>Abbrechen</Text>
+                    </Pressable>
                   </Pressable>
-                  <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Ionicons name="attach-outline" size={20} color={colors.accent} />
-                    <Text style={styles.attachActionLabel}>Datei</Text>
-                  </Pressable>
-                  <Pressable onPress={() => { generateImageInChat(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Ionicons name="color-palette-outline" size={20} color={colors.accent} />
-                    <Text style={styles.attachActionLabel}>Bild erstellen</Text>
-                  </Pressable>
-                </Animated.View>
-              )}
+                </Pressable>
+              </Modal>
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (
                   <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
@@ -1540,6 +1534,10 @@ export default function App() {
                   placeholder="Nachricht an KittyAI …"
                   placeholderTextColor={colors.muted}
                   multiline
+                  textAlignVertical="top"
+                  autoCapitalize="sentences"
+                  autoCorrect
+                  spellCheck
                   onSubmitEditing={() => send()}
                   returnKeyType="send"
                 />
@@ -1722,7 +1720,6 @@ const styles = StyleSheet.create({
   },
   logoText: { color: "#fff", fontWeight: "800", fontSize: 18 },
   backBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
-  backText: { color: colors.accent, fontSize: 32, lineHeight: 34, fontWeight: "600" },
   headerTitles: { flex: 1, marginLeft: 10 },
   headerTitle: { fontSize: 17, fontWeight: "700", color: colors.text },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 2 },
@@ -1733,8 +1730,8 @@ const styles = StyleSheet.create({
   chipActive: { backgroundColor: colors.accentSoft },
   chipNew: { backgroundColor: colors.accent },
   chipNewText: { fontSize: 13, color: "#fff", fontWeight: "600" },
-  chipText: { fontSize: 13, color: colors.text },
   chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  iconBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface2 },
   tabs: { flexDirection: "row", backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
   tab: { flex: 1, alignItems: "center", paddingVertical: 11 },
   tabActive: { borderBottomWidth: 2, borderBottomColor: colors.accent },
@@ -1744,11 +1741,8 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { padding: 12, paddingBottom: 16 },
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
-  senderLabel: { fontSize: 11, fontWeight: "600", color: colors.muted, marginBottom: 4 },
-  senderLabelUser: { textAlign: "right" },
-  senderLabelAi: { textAlign: "left" },
   // Claude-Look: User rechts in warmer heller Blase, KI flach (kein Kasten/Rahmen).
-  userBubble: { alignSelf: "flex-end", backgroundColor: "#f0eee6", borderBottomRightRadius: 5 },
+  userBubble: { alignSelf: "flex-end", backgroundColor: colors.surface2 },
   aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: "transparent" },
   aiBubbleDone: { alignSelf: "flex-start", backgroundColor: "transparent" },
@@ -1917,9 +1911,16 @@ const styles = StyleSheet.create({
   micBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   micBtnActive: { backgroundColor: colors.danger },
   attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
-  attachRow: { flexDirection: "row", gap: 8, paddingHorizontal: 10, paddingBottom: 8, backgroundColor: colors.surface },
-  attachAction: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
-  attachActionLabel: { fontSize: 13, color: colors.text, fontWeight: "600" },
+  sheetBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.4)", justifyContent: "flex-end" },
+  attachSheet: { backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingTop: 10, paddingBottom: 30, paddingHorizontal: 20 },
+  attachSheetHandle: { alignSelf: "center", width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 14 },
+  attachSheetTitle: { fontSize: 13, fontWeight: "600", color: colors.muted, textAlign: "center", marginBottom: 18 },
+  attachSheetRow: { flexDirection: "row", justifyContent: "space-around", marginBottom: 18 },
+  attachSheetItem: { alignItems: "center", gap: 8 },
+  attachSheetIcon: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
+  attachSheetLabel: { fontSize: 13, color: colors.text },
+  attachSheetCancel: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 14, alignItems: "center" },
+  attachSheetCancelText: { fontSize: 16, color: colors.danger },
   attachChip: { color: colors.text, fontSize: 13, maxWidth: 200 },
   attachChipWrap: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, maxWidth: 220 },
   attachThumb: { width: 46, height: 46, borderRadius: 8 },
