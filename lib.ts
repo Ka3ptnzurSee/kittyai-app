@@ -151,6 +151,69 @@ export function toolLabel(tool: string): string {
   return toolMeta(tool).label;
 }
 
+// ── Permission-Engine: Freigabe-Karten für Tool-Aufrufe ──
+
+export type PermissionStatus = "pending" | "allowed" | "denied";
+export type PermissionRequest = {
+  permissionId: string;
+  turnId: string;
+  tool: string;
+  title: string;
+  description: string;
+  status: PermissionStatus;
+};
+
+type PermissionEventData = {
+  permissionId?: string;
+  turnId?: string;
+  tool?: string;
+  title?: string;
+  description?: string;
+  decision?: string;
+};
+
+/**
+ * Wendet ein permission_required- bzw. permission_resolved-Event auf die
+ * Freigabe-Liste einer Nachricht an. Rein & testbar (kein React, keine Seiteneffekte).
+ *
+ * - permission_required: fügt eine neue Karte hinzu (dedupliziert per permissionId).
+ * - permission_resolved: setzt den Status auf "allowed"/"denied".
+ * - alles andere: unverändert zurück.
+ */
+export function applyPermission(
+  perms: PermissionRequest[] | undefined,
+  type: string,
+  data: unknown,
+): PermissionRequest[] | undefined {
+  const d = (data || {}) as PermissionEventData;
+  if (type === "permission_required") {
+    const permissionId = d.permissionId || "";
+    if (!permissionId) return perms;
+    const existing = perms || [];
+    if (existing.some((p) => p.permissionId === permissionId)) return perms;
+    return [
+      ...existing,
+      {
+        permissionId,
+        turnId: d.turnId || "",
+        tool: d.tool || "?",
+        title: d.title || "",
+        description: d.description || "",
+        status: "pending",
+      },
+    ];
+  }
+  if (type === "permission_resolved") {
+    const permissionId = d.permissionId || "";
+    const decision = d.decision === "allow" ? "allowed" : d.decision === "deny" || d.decision === "timeout" ? "denied" : null;
+    if (!permissionId || !decision) return perms;
+    const existing = perms || [];
+    if (!existing.some((p) => p.permissionId === permissionId)) return perms;
+    return existing.map((p) => (p.permissionId === permissionId ? { ...p, status: decision } : p));
+  }
+  return perms;
+}
+
 export function formatTime(ts: number): string {
   const d = new Date(ts);
   const now = new Date();
