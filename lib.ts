@@ -42,9 +42,9 @@ export class Utf8Decoder {
 export function argSummary(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const a = args as Record<string, unknown>;
-  if (typeof a.command === "string") return a.command;
-  if (typeof a.path === "string") return a.path;
-  if (typeof a.url === "string") return a.url;
+  if (typeof a.command === "string") return breakLongLines(a.command.slice(0, 400)).split("\n")[0];
+  if (typeof a.path === "string") return breakLongLines(a.path.slice(0, 400)).split("\n")[0];
+  if (typeof a.url === "string") return a.url.slice(0, 200);
   const keys = Object.keys(a);
   if (keys.length) {
     const v = a[keys[0]];
@@ -52,6 +52,25 @@ export function argSummary(args: unknown): string {
     return keys[0];
   }
   return "";
+}
+
+// Überlange Zeilen OHNE Umbruch (minifiziertes JS, Roh-Binärdumps, Base64,
+// Zahlen-Arrays aus RE-Ausgaben) brechen iOS-Layout: Eine einzige Zeile mit
+// 4000+ Zeichen erzeugt eine intrinsische Breite von ~25.000pt und lässt die
+// FlatList-Zelle als „unendlich langen weißen Balken" aufplatzen. Deshalb:
+// Steuerzeichen entfernen + lange Läufe in Blöcke zerlegen.
+export function breakLongLines(s: string, max = 120): string {
+  return s
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .split("\n")
+    .map((line) => {
+      if (line.length <= max) return line;
+      const parts: string[] = [];
+      for (let i = 0; i < line.length; i += max) parts.push(line.slice(i, i + max));
+      return parts.join("\n");
+    })
+    .join("\n");
 }
 
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──

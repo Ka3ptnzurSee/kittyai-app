@@ -27,7 +27,7 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Utf8Decoder, argSummary, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
+import { Utf8Decoder, argSummary, breakLongLines, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
 import { Markdown } from "./Markdown";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
@@ -156,7 +156,7 @@ function ToolCard({ a }: { a: Activity }) {
           numberOfLines={expanded ? undefined : 2}
           onPress={() => setExpanded((v) => !v)}
         >
-          {a.result}
+          {breakLongLines(a.result)}
         </Text>
       ) : null}
     </View>
@@ -247,6 +247,16 @@ function deriveTitle(raw: string): string {
   return truncated ? `${truncated}…` : "";
 }
 
+// Leere KI-Nachricht (kein Text, keine Tools, keine Bilder) = „weißer Balken".
+function isEmptyAi(m: Msg): boolean {
+  return (
+    m.role === "assistant" &&
+    !(m.text && m.text.trim()) &&
+    !(m.activity && m.activity.length) &&
+    !(m.images && m.images.length)
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState<"chats" | "tasks">("chats");
   const [chats, setChats] = useState<Chat[]>([]);
@@ -291,6 +301,15 @@ export default function App() {
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
   useEffect(() => {
     if (!activeChatId) return;
+    // Leere KI-Bubbles („weiße Balken“) beim Öffnen entfernen — auch aus bestehenden Chats.
+    // ABER nie, während der Chat streamt: die Live-Bubble ist anfangs leer und würde sonst
+    // entfernt, bevor das erste Text-Delta eintrifft (Antwort ginge verloren).
+    if (!busyChatIds.has(activeChatId)) {
+      patchChat(activeChatId, (c) => {
+        const next = c.messages.filter((m) => !isEmptyAi(m));
+        return next.length === c.messages.length ? c : { ...c, messages: next };
+      });
+    }
     nearBottomRef.current = true; // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
     const t = setTimeout(() => {
       listRef.current?.scrollToEnd({ animated: false });
@@ -659,11 +678,12 @@ export default function App() {
         const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
           ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
           : rawMsg;
-        appendMsg(chatId, {
-          id: uid("e"),
-          role: "assistant",
-          text: `Fehler: ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}`,
-        });
+        // Leere KI-Bubble füllen statt eine zweite Nachricht anzuhängen (sonst weißer Balken).
+        patchMsg(chatId, aiId, (m) =>
+          m.text && m.text.trim()
+            ? { ...m, text: `${m.text}\n\n⚠️ ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}` }
+            : { ...m, text: `Fehler: ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}` },
+        );
       } finally {
         clearTimeout(timer);
         if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);

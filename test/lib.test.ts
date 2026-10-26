@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { Utf8Decoder, argSummary, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
+import { Utf8Decoder, argSummary, breakLongLines, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -33,6 +33,13 @@ test("argSummary extrahiert command/path/url", () => {
 test("argSummary kürzt lange Strings und fällt auf Key zurück", () => {
   assert.strictEqual(argSummary({ foo: "x".repeat(100) }), "x".repeat(60));
   assert.strictEqual(argSummary({ foo: 42 }), "foo");
+});
+
+test("breakLongLines entfernt Steuerzeichen und wrappt lange Zeilen", () => {
+  assert.strictEqual(breakLongLines("a\u0007b\u007fc"), "abc");
+  assert.strictEqual(breakLongLines("x".repeat(250)).split("\n").length, 3); // 120+120+10
+  assert.strictEqual(breakLongLines("kurz\nzeile"), "kurz\nzeile");
+  assert.strictEqual(breakLongLines("ä😀中"), "ä😀中"); // Umlaute/Emoji/CJK bleiben
 });
 
 test("formatTime liefert Uhrzeit für heute", () => {

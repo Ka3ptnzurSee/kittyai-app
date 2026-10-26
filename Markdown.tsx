@@ -26,6 +26,7 @@ import ini from "highlight.js/lib/languages/ini";
 import diff from "highlight.js/lib/languages/diff";
 import plaintext from "highlight.js/lib/languages/plaintext";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
+import { breakLongLines } from "./lib";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
 
@@ -244,7 +245,12 @@ function renderInline(tokens: Token[], keyPrefix: string): ReactNode {
 
 function CodeBlock({ code, lang }: { code: string; lang: string }) {
   const [copied, setCopied] = useState(false);
-  const highlighted = useMemo(() => highlightCode(code, lang), [code, lang]);
+  // Überlange Zeilen (> 500) vor dem Rendern brechen: verhindert den iOS-Bug,
+  // bei dem eine einzige kilometerlange Zeile im horizontalen ScrollView die
+  // Zellenhöhe aufbläst („unendlicher weißer Balken“). Copy nutzt weiter den
+  // unveränderten Original-String.
+  const displayCode = useMemo(() => breakLongLines(code, 500), [code]);
+  const highlighted = useMemo(() => highlightCode(displayCode, lang), [displayCode, lang]);
   const copy = () => {
     Clipboard.setStringAsync(code).catch(() => {});
     setCopied(true);
