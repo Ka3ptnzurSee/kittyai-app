@@ -33,7 +33,7 @@ import { DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string } };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
 type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number };
 
 // Eigenständige Komponente: tickt jede Sekunde, OHNE den ganzen App-Baum neu zu rendern.
@@ -72,6 +72,35 @@ function CompactionBar() {
     </View>
   );
 }
+
+// Denk-Text als aufklappbarer Block (Volllänge) statt 1-Zeilen-Marquee.
+function ThinkingBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  if (!text.trim()) return null;
+  return (
+    <Pressable onPress={() => setOpen((o) => !o)} style={styles.thinkingBlock}>
+      <Text style={styles.thinkingText} numberOfLines={open ? undefined : 3}>{text}</Text>
+      <Text style={styles.thinkingHint}>{open ? "▴ einklappen" : "▾ ausklappen"}</Text>
+    </Pressable>
+  );
+}
+
+// Fehler in menschenlesbare Kategorie übersetzen (statt rohem ⚠️-Text).
+function classifyError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (/rate.?limit|429|too many|limit reached|fenster|window/i.test(s)) return "Limit erreicht";
+  if (/quota|credits|billing|zahlung|payment|out of credits/i.test(s)) return "Konto/Guthaben";
+  if (/401|403|auth|token|api key|unauthor|forbidden/i.test(s)) return "Zugriff verweigert";
+  if (/timeout|timed out|zeitüberschreitung/i.test(s)) return "Zeitüberschreitung";
+  if (/overload|busy|capacity|ausgelastet|überlast/i.test(s)) return "Server ausgelastet";
+  if (/network|fetch failed|connection|econnreset|socket|dns/i.test(s)) return "Netzwerk unterbrochen";
+  return "Fehler";
+}
+
+function isRetryable(raw: string): boolean {
+  return !/401|403|quota|credits|billing|zahlung|payment|api key|unauthor|forbidden/i.test(raw);
+}
+
 type Task = {
   id: string;
   message: string;
@@ -190,11 +219,13 @@ function MessageBubble({
   isLast,
   isBusy,
   onReply,
+  onRetry,
 }: {
   item: Msg;
   isLast: boolean;
   isBusy: boolean;
   onReply: (m: Msg) => void;
+  onRetry?: (m: Msg) => void;
 }) {
   const isUser = item.role === "user";
   const activity = !isUser ? item.activity || [] : [];
@@ -241,6 +272,16 @@ function MessageBubble({
         <>
           <DilRichText text={item.text || ""} />
           {isLast && isBusy && item.text ? <StreamingCursor /> : null}
+          {item.error ? (
+            <View style={styles.errorCard}>
+              <Text style={styles.errorCardText}>⚠️ {item.error.type}</Text>
+              {item.error.retryable && onRetry ? (
+                <Pressable onPress={() => onRetry(item)} style={styles.errorRetryBtn}>
+                  <Text style={styles.errorRetryText}>↻ Erneut versuchen</Text>
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
         </>
       )}
       {item.images && item.images.length > 0 ? (
@@ -281,7 +322,8 @@ function isEmptyAi(m: Msg): boolean {
     m.role === "assistant" &&
     !(m.text && m.text.trim()) &&
     !(m.activity && m.activity.length) &&
-    !(m.images && m.images.length)
+    !(m.images && m.images.length) &&
+    !m.error
   );
 }
 
@@ -427,7 +469,8 @@ export default function App() {
                   m.role !== "assistant" ||
                   (m.text && String(m.text).trim()) ||
                   (m.activity && m.activity.length) ||
-                  (m.images && m.images.length),
+                  (m.images && m.images.length) ||
+                  m.error,
               ),
             }));
             setChats((prev) => (prev.length ? prev : cleaned));
@@ -676,9 +719,14 @@ export default function App() {
       if (retriable) {
         for (let attempt = 1; attempt <= 3; attempt++) {
           try {
+            setStatusByChat((prev) => ({ ...prev, [chatId]: `Verbindung verloren — neuer Versuch ${attempt}/3…` }));
             await new Promise((r) => setTimeout(r, 1500 * attempt)); // 1.5s, 3s, 4.5s
             if (abortedRef.current.has(chatId)) return;
+            // Zustand zurücksetzen, sonst hängt der neue Text an den Teiltext des abgebrochenen Versuchs an.
+            patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
+            setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
             await streamChat(finalMessage, chatId, aiId, images, documents);
+            setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
           } catch {
             // nächster Versuch
@@ -711,12 +759,8 @@ export default function App() {
         const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
           ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
           : rawMsg;
-        // Leere KI-Bubble füllen statt eine zweite Nachricht anzuhängen (sonst weißer Balken).
-        patchMsg(chatId, aiId, (m) =>
-          m.text && m.text.trim()
-            ? { ...m, text: `${m.text}\n\n⚠️ ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}` }
-            : { ...m, text: `Fehler: ${msg}\n\nLäuft der Server? Server-URL: ${serverUrl}` },
-        );
+        // Fehler als eigene Karte statt als Text-Suffix in die Antwort.
+        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(msg), retryable: isRetryable(msg) } }));
       } finally {
         clearTimeout(timer);
         if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
@@ -737,7 +781,8 @@ export default function App() {
                     m.role !== "assistant" ||
                     (m.text && m.text.trim()) ||
                     (m.activity && m.activity.length) ||
-                    (m.images && m.images.length),
+                    (m.images && m.images.length) ||
+                    m.error,
                 ),
               }
             : c,
@@ -819,12 +864,8 @@ export default function App() {
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "error") {
-        const msg2 = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
-        patchMsg(chatId, aiId, (m) =>
-          m.text && m.text.trim()
-            ? { ...m, text: `${m.text}\n\n⚠️ ${msg2}` }
-            : { ...m, text: `⚠️ ${msg2}` },
-        );
+        const raw = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
+        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
       }
     };
 
@@ -871,7 +912,8 @@ export default function App() {
                       m.id !== aiId ||
                       (m.text && m.text.trim()) ||
                       (m.activity && m.activity.length) ||
-                      (m.images && m.images.length),
+                      (m.images && m.images.length) ||
+                      m.error,
                   ),
                 }
               : c,
@@ -881,11 +923,7 @@ export default function App() {
       }
       // Timeout (30 min): partiell gestreamten Text behalten + Meldung anhängen.
       if (controller.signal.aborted) {
-        patchMsg(chatId, aiId, (m) =>
-          m.text && m.text.trim()
-            ? { ...m, text: `${m.text}\n\n⚠️ Zeitüberschreitung — bitte erneut senden.` }
-            : { ...m, text: "⚠️ Zeitüberschreitung — bitte erneut senden." },
-        );
+        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: "Zeitüberschreitung", retryable: true } }));
         return;
       }
       // Netzwerk-/HTTP-Fehler: nicht verschlucken → sendChat-Retry + /chat-Fallback greifen.
@@ -1068,11 +1106,32 @@ export default function App() {
     loadTasks();
   }
 
+  // Fehlgeschlagene KI-Antwort erneut anstoßen: gleiche Bubble wiederverwenden (kein Duplikat).
+  function retryMessage(aiMsg: Msg) {
+    const chat = chats.find((c) => c.id === activeChatId);
+    if (!chat || busyChatIds.has(chat.id)) return;
+    const idx = chat.messages.findIndex((m) => m.id === aiMsg.id);
+    const userMsg = [...chat.messages.slice(0, idx)].reverse().find((m) => m.role === "user");
+    if (!userMsg) return;
+    const text = userMsg.text.replace(/^\[Antwort auf:.*?\]\n?/s, "").trim();
+    if (!text) return;
+    patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "", activity: [], error: undefined }));
+    markBusy(chat.id, true);
+    setChatThinking(chat.id, "");
+    abortedRef.current.delete(chat.id);
+    streamChat(text, chat.id, aiMsg.id).catch(() => {
+      patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Netzwerk unterbrochen", retryable: true } }));
+    }).finally(() => {
+      markBusy(chat.id, false);
+      setChatThinking(chat.id, "");
+    });
+  }
+
   function renderMessage({ item }: { item: Msg }) {
     const messages = activeChat?.messages || [];
     const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
     return (
-      <MessageBubble item={item} isLast={isLast} isBusy={isThisChatBusy} onReply={setReplyingTo} />
+      <MessageBubble item={item} isLast={isLast} isBusy={isThisChatBusy} onReply={setReplyingTo} onRetry={retryMessage} />
     );
   }
 
@@ -1207,22 +1266,24 @@ export default function App() {
               }
               ListFooterComponent={
                 isThisChatBusy ? (
-                  <View style={styles.thinking}>
-                    <ActivityIndicator color={colors.accent} size="small" />
-                    {thisStatus ? (
-                      thisStatus.startsWith("kompaktiere Kontext") ? (
-                        <CompactionBar />
+                  thisThinking ? (
+                    <ThinkingBlock text={thisThinking} />
+                  ) : (
+                    <View style={styles.thinking}>
+                      <ActivityIndicator color={colors.accent} size="small" />
+                      {thisStatus ? (
+                        thisStatus.startsWith("kompaktiere Kontext") ? (
+                          <CompactionBar />
+                        ) : (
+                          <Text style={styles.thinkingText} numberOfLines={1}>⚙️ {thisStatus}</Text>
+                        )
+                      ) : listening ? (
+                        <Text style={styles.thinkingText} numberOfLines={1}>höre zu …</Text>
                       ) : (
-                        <Text style={styles.thinkingText} numberOfLines={1}>⚙️ {thisStatus}</Text>
-                      )
-                    ) : thisThinking ? (
-                      <Text style={styles.thinkingText} numberOfLines={1}>💭 {thisThinking}</Text>
-                    ) : listening ? (
-                      <Text style={styles.thinkingText} numberOfLines={1}>höre zu …</Text>
-                    ) : (
-                      <ElapsedLabel style={styles.thinkingText} />
-                    )}
-                  </View>
+                        <ElapsedLabel style={styles.thinkingText} />
+                      )}
+                    </View>
+                  )
                 ) : null
               }
             />
@@ -1244,13 +1305,19 @@ export default function App() {
               {(pendingImages.length > 0 || pendingFiles.length > 0 || pendingDocuments.length > 0) && (
                 <View style={styles.attachPreview}>
                   {pendingImages.map((im, i) => (
-                    <Text key={`img${i}`} style={styles.attachChip}>🖼 Bild</Text>
+                    <View key={`img${i}`} style={styles.attachChipWrap}>
+                      <Image source={{ uri: im.uri }} style={styles.attachThumb} resizeMode="cover" />
+                    </View>
                   ))}
                   {pendingDocuments.map((d, i) => (
-                    <Text key={`doc${i}`} style={styles.attachChip} numberOfLines={1}>📄 {d.name}</Text>
+                    <View key={`doc${i}`} style={styles.attachChipWrap}>
+                      <Text style={styles.attachChip} numberOfLines={1}>📄 {d.name}</Text>
+                    </View>
                   ))}
                   {pendingFiles.map((f, i) => (
-                    <Text key={`file${i}`} style={styles.attachChip} numberOfLines={1}>📎 {f.name}</Text>
+                    <View key={`file${i}`} style={styles.attachChipWrap}>
+                      <Text style={styles.attachChip} numberOfLines={1}>📎 {f.name}</Text>
+                    </View>
                   ))}
                   <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); setPendingDocuments([]); }} hitSlop={8}>
                     <Text style={styles.attachClear}>✕</Text>
@@ -1529,6 +1596,12 @@ const styles = StyleSheet.create({
   suggestionChipText: { fontSize: 14, color: colors.text },
   thinking: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 4 },
   thinkingText: { color: colors.muted, fontSize: 13, flex: 1 },
+  thinkingBlock: { paddingVertical: 8, paddingHorizontal: 4, gap: 4 },
+  thinkingHint: { color: colors.accent, fontSize: 12, fontWeight: "600" },
+  errorCard: { marginTop: 8, padding: 12, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, gap: 8 },
+  errorCardText: { color: colors.danger, fontSize: 13, fontWeight: "600" },
+  errorRetryBtn: { alignSelf: "flex-start", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.accent },
+  errorRetryText: { color: "#ffffff", fontSize: 13, fontWeight: "700" },
   compactionWrap: { alignItems: "center", gap: 6, flex: 1 },
   compactionTrack: { width: "100%", height: 4, borderRadius: 2, backgroundColor: colors.border },
   compactionFill: { height: "100%", borderRadius: 2, backgroundColor: colors.accent },
@@ -1637,6 +1710,8 @@ const styles = StyleSheet.create({
   attachActionLabel: { fontSize: 13, color: colors.text, fontWeight: "600" },
   attachToggle: { fontSize: 26, lineHeight: 30, color: colors.accent, fontWeight: "700" },
   attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
+  attachChipWrap: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 4, paddingVertical: 3, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, maxWidth: 220 },
+  attachThumb: { width: 46, height: 46, borderRadius: 8 },
   attachClear: { color: colors.danger, fontSize: 16, fontWeight: "700", paddingHorizontal: 6 },
   replyBar: {
     flexDirection: "row",
