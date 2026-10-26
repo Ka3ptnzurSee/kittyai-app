@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -28,7 +29,7 @@ import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
-import { Markdown } from "./Markdown";
+import { DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
@@ -163,6 +164,27 @@ function ToolCard({ a }: { a: Activity }) {
   );
 }
 
+// Blinkender Cursor am Ende einer laufenden Antwort — zeigt live, dass noch gestreamt wird
+// (verhindert das Gefühl eines „weißen Blocks“, während pi denkt/arbeitet).
+function StreamingCursor() {
+  const opacity = useRef(new Animated.Value(0.3)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 1, duration: 450, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.15, duration: 450, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+  return (
+    <Animated.Text style={{ opacity, color: colors.accent, fontSize: 17, lineHeight: 22, fontWeight: "600" }}>
+      ▍
+    </Animated.Text>
+  );
+}
+
 function MessageBubble({
   item,
   isLast,
@@ -216,7 +238,10 @@ function MessageBubble({
           {breakUnbreakable(item.text)}
         </Text>
       ) : (
-        <Markdown text={item.text || ""} />
+        <>
+          <DilRichText text={item.text || ""} />
+          {isLast && isBusy && item.text ? <StreamingCursor /> : null}
+        </>
       )}
       {item.images && item.images.length > 0 ? (
         item.images.map((img, i) => (
@@ -644,16 +669,20 @@ export default function App() {
         abortedRef.current.delete(chatId);
         return; // Nutzer-Abbruch → kein Fallback
       }
-      // Einmaliger Retry bei Netzwerk-Fehler (Verbindung verloren / fetch failed)
+      // Auto-Wiederherstellung: bei Stream-Abbruch (Server-Neustart/Netz) mehrfach
+      // retryen, damit sich der Chat von selbst fängt statt abzubrechen.
       const rawErr = e instanceof Error ? e.message : String(e);
-      if (/network|fetch failed|connection lost|timed out|request failed/i.test(rawErr)) {
-        try {
-          await new Promise((r) => setTimeout(r, 1500));
-          if (abortedRef.current.has(chatId)) return;
-          await streamChat(finalMessage, chatId, aiId, images, documents);
-          return;
-        } catch {
-          // Retry fehlgeschlagen → Fallback unten
+      const retriable = /network|fetch failed|connection lost|timed out|request failed|prematurely closed|aborted|econnreset|socket hang up/i.test(rawErr);
+      if (retriable) {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await new Promise((r) => setTimeout(r, 1500 * attempt)); // 1.5s, 3s, 4.5s
+            if (abortedRef.current.has(chatId)) return;
+            await streamChat(finalMessage, chatId, aiId, images, documents);
+            return;
+          } catch {
+            // nächster Versuch
+          }
         }
       }
       // Fallback: synchroner /chat (mit eigenem Abort-Timeout gegen Busy-Lockup)
