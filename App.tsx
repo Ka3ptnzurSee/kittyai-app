@@ -28,12 +28,13 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
+import { Ionicons } from "@expo/vector-icons";
+import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
 import { DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
 type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number };
 
 // Eigenständige Komponente: tickt jede Sekunde, OHNE den ganzen App-Baum neu zu rendern.
@@ -198,6 +199,52 @@ function ToolCard({ a }: { a: Activity }) {
   );
 }
 
+// Freigabe-Karte: erscheint unter einer laufenden Assistant-Message, wenn ein
+// Tool-Aufruf auf die Zustimmung des Nutzers wartet (Claude-iOS-Gefühl).
+function PermissionCard({ p, onDecision }: { p: PermissionRequest; onDecision?: (p: PermissionRequest, decision: "allow" | "deny") => void }) {
+  const [busy, setBusy] = useState(false);
+  const pending = p.status === "pending";
+  const statusLabel = p.status === "allowed" ? "erlaubt" : p.status === "denied" ? "verweigert" : "warte auf Freigabe …";
+  const decide = async (decision: "allow" | "deny") => {
+    if (!onDecision || busy) return;
+    setBusy(true);
+    try {
+      await onDecision(p, decision);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={styles.permissionCard}>
+      <View style={styles.permissionHeader}>
+        <Ionicons name="key-outline" size={16} color={colors.accent} />
+        <Text style={styles.permissionTitle} numberOfLines={2}>
+          {breakUnbreakable(p.title || `Claude möchte ${p.tool} ausführen`)}
+        </Text>
+      </View>
+      {p.description ? (
+        <Text style={styles.permissionDesc} numberOfLines={3}>
+          {breakLongLines(p.description)}
+        </Text>
+      ) : null}
+      {pending ? (
+        <View style={styles.permissionActions}>
+          <Pressable onPress={() => decide("allow")} disabled={busy} style={[styles.permissionBtn, styles.permissionAllow, busy && styles.permissionBtnDisabled]}>
+            <Ionicons name="checkmark-circle-outline" size={16} color="#fff" />
+            <Text style={styles.permissionBtnText}>Erlauben</Text>
+          </Pressable>
+          <Pressable onPress={() => decide("deny")} disabled={busy} style={[styles.permissionBtn, styles.permissionDeny, busy && styles.permissionBtnDisabled]}>
+            <Ionicons name="close-circle-outline" size={16} color="#fff" />
+            <Text style={styles.permissionBtnText}>Verweigern</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <Text style={styles.permissionStatus}>{statusLabel}</Text>
+      )}
+    </View>
+  );
+}
+
 // Blinkender Cursor am Ende einer laufenden Antwort — zeigt live, dass noch gestreamt wird
 // (verhindert das Gefühl eines „weißen Blocks“, während pi denkt/arbeitet).
 function StreamingCursor() {
@@ -225,12 +272,14 @@ function MessageBubble({
   isBusy,
   onReply,
   onRetry,
+  onPermission,
 }: {
   item: Msg;
   isLast: boolean;
   isBusy: boolean;
   onReply: (m: Msg) => void;
   onRetry?: (m: Msg) => void;
+  onPermission?: (p: PermissionRequest, decision: "allow" | "deny") => void;
 }) {
   const isUser = item.role === "user";
   const activity = !isUser ? item.activity || [] : [];
@@ -279,10 +328,16 @@ function MessageBubble({
           {isLast && isBusy && item.text ? <StreamingCursor /> : null}
           {item.error ? (
             <View style={styles.errorCard}>
-              <Text style={styles.errorCardText}>⚠️ {item.error.type}</Text>
+              <View style={styles.errorCardTitleRow}>
+                <Ionicons name="alert-circle-outline" size={15} color={colors.danger} />
+                <Text style={styles.errorCardText}>{item.error.type}</Text>
+              </View>
               {item.error.retryable && onRetry ? (
                 <Pressable onPress={() => onRetry(item)} style={styles.errorRetryBtn}>
-                  <Text style={styles.errorRetryText}>↻ Erneut versuchen</Text>
+                  <View style={styles.errorRetryRow}>
+                    <Ionicons name="refresh" size={13} color="#ffffff" />
+                    <Text style={styles.errorRetryText}>Erneut versuchen</Text>
+                  </View>
                 </Pressable>
               ) : null}
             </View>
@@ -304,13 +359,19 @@ function MessageBubble({
           ))}
         </View>
       ) : null}
+      {item.permissions && item.permissions.length > 0 ? (
+        <View style={styles.permissionWrap}>
+          {item.permissions.map((p) => (
+            <PermissionCard key={p.permissionId} p={p} onDecision={onPermission} />
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }
 
 function deriveTitle(raw: string): string {
   const cleaned = raw
-    .replace(/^🎨\s*/, "")
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned) return "";
@@ -327,6 +388,7 @@ function isEmptyAi(m: Msg): boolean {
     m.role === "assistant" &&
     !(m.text && m.text.trim()) &&
     !(m.activity && m.activity.length) &&
+    !(m.permissions && m.permissions.length) &&
     !(m.images && m.images.length) &&
     !m.error
   );
@@ -342,6 +404,9 @@ export default function App() {
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
+  const micPulse = useRef(new Animated.Value(1)).current;
+  const attachAnim = useRef(new Animated.Value(0)).current;
+  const sendScale = useRef(new Animated.Value(1)).current;
   const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
@@ -373,6 +438,33 @@ export default function App() {
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
   const nearBottomRef = useRef(true); // ob der Nutzer am Listenende ist (für Auto-Scroll)
+
+  // Mikro-Puls während Diktieren: sanfter Loop, der das „höre zu“-Gefühl sichtbar macht.
+  useEffect(() => {
+    if (!listening) {
+      micPulse.stopAnimation();
+      micPulse.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(micPulse, { toValue: 1.15, duration: 480, useNativeDriver: true }),
+        Animated.timing(micPulse, { toValue: 1, duration: 480, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [listening, micPulse]);
+
+  // Anhang-Reihe: beim Öffnen kurz einspringen (Slide+Fade) statt hart aufzutauchen.
+  useEffect(() => {
+    if (attachOpen) {
+      attachAnim.setValue(0);
+      Animated.spring(attachAnim, { toValue: 1, useNativeDriver: true, friction: 8, tension: 120 }).start();
+    } else {
+      attachAnim.setValue(0);
+    }
+  }, [attachOpen, attachAnim]);
 
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
@@ -475,6 +567,7 @@ export default function App() {
                   m.role !== "assistant" ||
                   (m.text && String(m.text).trim()) ||
                   (m.activity && m.activity.length) ||
+                  (m.permissions && m.permissions.length) ||
                   (m.images && m.images.length) ||
                   m.error,
               ),
@@ -634,7 +727,7 @@ export default function App() {
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     setInput("");
-    const userMsg: Msg = { id: uid("u"), role: "user", text: `🎨 ${prompt}` };
+    const userMsg: Msg = { id: uid("u"), role: "user", text: prompt };
     const aiId = uid("a");
     const aiMsg: Msg = { id: aiId, role: "assistant", text: "", images: [] };
     patchChat(chatId, (c) => ({
@@ -657,7 +750,7 @@ export default function App() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const imgUri = `${serverUrl.replace(/\/+$/, "")}${data.url}`;
-      patchMsg(chatId, aiId, (m) => ({ ...m, text: "🖼", images: [{ uri: imgUri }] }));
+      patchMsg(chatId, aiId, (m) => ({ ...m, text: "", images: [{ uri: imgUri }] }));
       if (speak) speakReply("Hier ist das Bild.");
     } catch (e) {
       const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
@@ -797,6 +890,7 @@ export default function App() {
                     m.role !== "assistant" ||
                     (m.text && m.text.trim()) ||
                     (m.activity && m.activity.length) ||
+                    (m.permissions && m.permissions.length) ||
                     (m.images && m.images.length) ||
                     m.error,
                 ),
@@ -844,6 +938,9 @@ export default function App() {
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
         setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-800) }));
+      } else if (t === "status") {
+        const msg = typeof e.data === "string" ? e.data : "";
+        setStatusByChat((prev) => ({ ...prev, [chatId]: msg }));
       } else if (t === "tool_start") {
         const d = (e.data || {}) as { id?: string; tool?: string; args?: unknown };
         const a: Activity = {
@@ -865,6 +962,8 @@ export default function App() {
               : x,
           ),
         }));
+      } else if (t === "permission_required" || t === "permission_resolved") {
+        patchMsg(chatId, aiId, (m) => ({ ...m, permissions: applyPermission(m.permissions, t, e.data) }));
       } else if (t === "compaction_start") {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "kompaktiere Kontext …" }));
       } else if (t === "compaction_end") {
@@ -937,6 +1036,7 @@ export default function App() {
                       m.id !== aiId ||
                       (m.text && m.text.trim()) ||
                       (m.activity && m.activity.length) ||
+                      (m.permissions && m.permissions.length) ||
                       (m.images && m.images.length) ||
                       m.error,
                   ),
@@ -956,6 +1056,41 @@ export default function App() {
     } finally {
       clearTimeout(timer);
       if (abortControllersRef.current.get(chatId) === controller) abortControllersRef.current.delete(chatId);
+    }
+  }
+
+  // Freigabe-Entscheidung des Nutzers an den Server senden (Tool allow/deny).
+  async function decidePermission(chatId: string, turnId: string, permissionId: string, decision: "allow" | "deny") {
+    const nextStatus: PermissionRequest["status"] = decision === "allow" ? "allowed" : "denied";
+    // Optimistisch markieren, damit die Karte sofort reagiert.
+    patchChat(chatId, (c) => ({
+      ...c,
+      messages: c.messages.map((m) => ({
+        ...m,
+        permissions: (m.permissions || []).map((p) =>
+          p.permissionId === permissionId ? { ...p, status: nextStatus } : p,
+        ),
+      })),
+    }));
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/permission`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ chatId, turnId, permissionId, decision }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      // POST fehlgeschlagen → optimistische Markierung zurücknehmen, damit der
+      // Nutzer es erneut versuchen kann (Server-Timeout → deny).
+      patchChat(chatId, (c) => ({
+        ...c,
+        messages: c.messages.map((m) => ({
+          ...m,
+          permissions: (m.permissions || []).map((p) =>
+            p.permissionId === permissionId ? { ...p, status: "pending" } : p,
+          ),
+        })),
+      }));
     }
   }
 
@@ -1159,7 +1294,14 @@ export default function App() {
     const messages = activeChat?.messages || [];
     const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
     return (
-      <MessageBubble item={item} isLast={isLast} isBusy={isThisChatBusy} onReply={setReplyingTo} onRetry={retryMessage} />
+      <MessageBubble
+        item={item}
+        isLast={isLast}
+        isBusy={isThisChatBusy}
+        onReply={setReplyingTo}
+        onRetry={retryMessage}
+        onPermission={(p, decision) => decidePermission(activeChat?.id || "", p.turnId, p.permissionId, decision)}
+      />
     );
   }
 
@@ -1174,7 +1316,7 @@ export default function App() {
     return (
       <Pressable onPress={() => setActiveChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
         <View style={styles.chatAvatar}>
-          <Text style={styles.chatAvatarText}>💬</Text>
+          <Ionicons name="chatbubbles-outline" size={20} color={colors.accent} />
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
         </View>
         <View style={styles.chatInfo}>
@@ -1184,7 +1326,7 @@ export default function App() {
         <View style={styles.chatRight}>
           <Text style={styles.chatTime}>{formatTime(item.updatedAt)}</Text>
           <Pressable onPress={() => deleteChat(item.id)} hitSlop={8}>
-            <Text style={styles.chatDelete}>✕</Text>
+            <Ionicons name="close" size={14} color={colors.danger} />
           </Pressable>
         </View>
       </Pressable>
@@ -1238,25 +1380,37 @@ export default function App() {
         <View style={styles.headerActions}>
           {activeChatId && tab === "chats" ? (
             <Pressable onPress={() => deleteChat(activeChatId)} style={styles.chip} hitSlop={6}>
-              <Text style={styles.chipText}>🗑️</Text>
+              <Ionicons name="trash-outline" size={16} color={colors.danger} />
             </Pressable>
           ) : (
             <Pressable onPress={() => newChat()} style={[styles.chip, styles.chipNew]} hitSlop={6}>
-              <Text style={styles.chipNewText}>✚ Neu</Text>
+              <View style={styles.chipRow}>
+                <Ionicons name="add" size={15} color="#fff" />
+                <Text style={styles.chipNewText}>Neu</Text>
+              </View>
             </Pressable>
           )}
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.chip, speak && styles.chipActive]} hitSlop={6}>
-            <Text style={styles.chipText}>{speak ? "🔊 Gespräch" : "💬 Text"}</Text>
+            <View style={styles.chipRow}>
+              <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={15} color={colors.text} />
+              <Text style={styles.chipText}>{speak ? "Gespräch" : "Text"}</Text>
+            </View>
           </Pressable>
         </View>
       </View>
 
       <View style={styles.tabs}>
         <Pressable onPress={() => setTab("chats")} style={[styles.tab, tab === "chats" && styles.tabActive]}>
-          <Text style={[styles.tabText, tab === "chats" && styles.tabTextActive]}>💬 Chats</Text>
+          <View style={styles.tabRow}>
+            <Ionicons name="chatbubbles-outline" size={16} color={tab === "chats" ? colors.accent : colors.muted} />
+            <Text style={[styles.tabText, tab === "chats" && styles.tabTextActive]}>Chats</Text>
+          </View>
         </Pressable>
         <Pressable onPress={() => setTab("tasks")} style={[styles.tab, tab === "tasks" && styles.tabActive]}>
-          <Text style={[styles.tabText, tab === "tasks" && styles.tabTextActive]}>📋 Aufgaben</Text>
+          <View style={styles.tabRow}>
+            <Ionicons name="clipboard-outline" size={16} color={tab === "tasks" ? colors.accent : colors.muted} />
+            <Text style={[styles.tabText, tab === "tasks" && styles.tabTextActive]}>Aufgaben</Text>
+          </View>
         </Pressable>
       </View>
 
@@ -1326,7 +1480,7 @@ export default function App() {
                     </Text>
                   </View>
                   <Pressable onPress={() => setReplyingTo(null)} hitSlop={8}>
-                    <Text style={styles.attachClear}>✕</Text>
+                    <Ionicons name="close" size={16} color={colors.danger} />
                   </Pressable>
                 </View>
               ) : null}
@@ -1339,47 +1493,54 @@ export default function App() {
                   ))}
                   {pendingDocuments.map((d, i) => (
                     <View key={`doc${i}`} style={styles.attachChipWrap}>
-                      <Text style={styles.attachChip} numberOfLines={1}>📄 {d.name}</Text>
+                      <Ionicons name="document-text-outline" size={15} color={colors.accent} />
+                      <Text style={styles.attachChip} numberOfLines={1}>{d.name}</Text>
                     </View>
                   ))}
                   {pendingFiles.map((f, i) => (
                     <View key={`file${i}`} style={styles.attachChipWrap}>
-                      <Text style={styles.attachChip} numberOfLines={1}>📎 {f.name}</Text>
+                      <Ionicons name="attach-outline" size={15} color={colors.accent} />
+                      <Text style={styles.attachChip} numberOfLines={1}>{f.name}</Text>
                     </View>
                   ))}
                   <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); setPendingDocuments([]); }} hitSlop={8}>
-                    <Text style={styles.attachClear}>✕</Text>
+                    <Ionicons name="close" size={16} color={colors.danger} />
                   </Pressable>
                 </View>
               )}
               {attachOpen && (
-                <View style={styles.attachRow}>
+                <Animated.View style={[styles.attachRow, {
+                  opacity: attachAnim,
+                  transform: [{ translateY: attachAnim.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] }) }],
+                }]}>
                   <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Text style={styles.attachActionIcon}>🖼</Text>
+                    <Ionicons name="image-outline" size={20} color={colors.accent} />
                     <Text style={styles.attachActionLabel}>Bild</Text>
                   </Pressable>
                   <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Text style={styles.attachActionIcon}>📎</Text>
+                    <Ionicons name="attach-outline" size={20} color={colors.accent} />
                     <Text style={styles.attachActionLabel}>Datei</Text>
                   </Pressable>
                   <Pressable onPress={() => { generateImageInChat(); setAttachOpen(false); }} style={styles.attachAction}>
-                    <Text style={styles.attachActionIcon}>🎨</Text>
+                    <Ionicons name="color-palette-outline" size={20} color={colors.accent} />
                     <Text style={styles.attachActionLabel}>Bild erstellen</Text>
                   </Pressable>
-                </View>
+                </Animated.View>
               )}
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (
                   <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
-                    <Text style={styles.micText}>⏹</Text>
+                    <Ionicons name="stop" size={16} color="#ffffff" />
                   </Pressable>
                 ) : (
-                  <Pressable onPress={toggleMic} style={[styles.micBtn, listening && styles.micBtnActive]}>
-                    <Text style={styles.micText}>🎤</Text>
-                  </Pressable>
+                  <Animated.View style={{ transform: [{ scale: micPulse }] }}>
+                    <Pressable onPress={toggleMic} style={[styles.micBtn, listening && styles.micBtnActive]}>
+                      <Ionicons name="mic" size={18} color={listening ? "#ffffff" : colors.text} />
+                    </Pressable>
+                  </Animated.View>
                 )}
                 <Pressable onPress={() => setAttachOpen((o) => !o)} style={styles.micBtn}>
-                  <Text style={styles.attachToggle}>{attachOpen ? "✕" : "+"}</Text>
+                  <Ionicons name={attachOpen ? "close" : "add"} size={22} color={colors.accent} />
                 </Pressable>
                 <TextInput
                   style={styles.input}
@@ -1391,13 +1552,17 @@ export default function App() {
                   onSubmitEditing={() => send()}
                   returnKeyType="send"
                 />
-                <Pressable
-                  onPress={() => send()}
-                  disabled={isThisChatBusy || !input.trim()}
-                  style={[styles.sendBtn, (isThisChatBusy || !input.trim()) && styles.sendBtnDisabled]}
-                >
-                  <Text style={styles.sendText}>➤</Text>
-                </Pressable>
+                <Animated.View style={{ transform: [{ scale: sendScale }] }}>
+                  <Pressable
+                    onPress={() => send()}
+                    onPressIn={() => Animated.spring(sendScale, { toValue: 0.88, useNativeDriver: true, friction: 6 }).start()}
+                    onPressOut={() => Animated.spring(sendScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start()}
+                    disabled={isThisChatBusy || !input.trim()}
+                    style={[styles.sendBtn, (isThisChatBusy || !input.trim()) && styles.sendBtnDisabled]}
+                  >
+                    <Ionicons name="arrow-up" size={20} color="#ffffff" />
+                  </Pressable>
+                </Animated.View>
               </View>
               <Text style={styles.disclaimer}>KittyAI kann Fehler machen — wichtige Informationen prüfen.</Text>
             </KeyboardAvoidingView>
@@ -1433,7 +1598,7 @@ export default function App() {
               multiline
             />
             <Pressable onPress={addTask} disabled={!taskInput.trim()} style={[styles.sendBtn, !taskInput.trim() && styles.sendBtnDisabled]}>
-              <Text style={styles.sendText}>➤</Text>
+              <Ionicons name="arrow-up" size={20} color="#ffffff" />
             </Pressable>
           </View>
 
@@ -1531,7 +1696,7 @@ export default function App() {
                         <Text style={styles.schedCardMsg} numberOfLines={2}>{s.message}</Text>
                       </View>
                       <Pressable onPress={() => deleteSchedule(s.id)} hitSlop={8}>
-                        <Text style={styles.chatDelete}>✕</Text>
+                        <Ionicons name="close" size={14} color={colors.danger} />
                       </Pressable>
                     </View>
                   ))}
@@ -1578,11 +1743,13 @@ const styles = StyleSheet.create({
   chipNew: { backgroundColor: colors.accent },
   chipNewText: { fontSize: 13, color: "#fff", fontWeight: "600" },
   chipText: { fontSize: 13, color: colors.text },
+  chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   tabs: { flexDirection: "row", backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
   tab: { flex: 1, alignItems: "center", paddingVertical: 11 },
   tabActive: { borderBottomWidth: 2, borderBottomColor: colors.accent },
   tabText: { fontSize: 15, color: colors.muted },
   tabTextActive: { color: colors.accent, fontWeight: "700" },
+  tabRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   list: { flex: 1 },
   listContent: { padding: 12, paddingBottom: 16 },
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
@@ -1616,6 +1783,33 @@ const styles = StyleSheet.create({
   toolDot: { width: 8, height: 8, borderRadius: 4 },
   toolCardArgs: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 1 },
   activityResult: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 2, lineHeight: 16 },
+  permissionWrap: { gap: 6, marginTop: 8 },
+  permissionCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 6,
+  },
+  permissionHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  permissionTitle: { color: colors.text, fontSize: 14, fontWeight: "600", flex: 1 },
+  permissionDesc: { color: colors.muted, fontSize: 12, fontFamily: monoFontFamily, lineHeight: 17 },
+  permissionActions: { flexDirection: "row", gap: 8, marginTop: 2 },
+  permissionBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+  },
+  permissionAllow: { backgroundColor: colors.success },
+  permissionDeny: { backgroundColor: colors.danger },
+  permissionBtnDisabled: { opacity: 0.5 },
+  permissionBtnText: { color: "#ffffff", fontSize: 13, fontWeight: "700" },
+  permissionStatus: { color: colors.muted, fontSize: 12, fontWeight: "600" },
   empty: { alignItems: "center", marginTop: 70, paddingHorizontal: 28 },
   emptyTitle: { fontSize: 22, fontWeight: "800", color: colors.text, textAlign: "center" },
   emptyText: { fontSize: 15, color: colors.muted, textAlign: "center", marginTop: 10, lineHeight: 22 },
@@ -1628,8 +1822,10 @@ const styles = StyleSheet.create({
   thinkingHint: { color: colors.accent, fontSize: 12, fontWeight: "600" },
   errorCard: { marginTop: 8, padding: 12, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, gap: 8 },
   errorCardText: { color: colors.danger, fontSize: 13, fontWeight: "600" },
+  errorCardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   errorRetryBtn: { alignSelf: "flex-start", paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.accent },
   errorRetryText: { color: "#ffffff", fontSize: 13, fontWeight: "700" },
+  errorRetryRow: { flexDirection: "row", alignItems: "center", gap: 5 },
   compactionWrap: { alignItems: "center", gap: 6, flex: 1 },
   compactionTrack: { width: "100%", height: 4, borderRadius: 2, backgroundColor: colors.border },
   compactionFill: { height: "100%", borderRadius: 2, backgroundColor: colors.accent },
@@ -1722,25 +1918,20 @@ const styles = StyleSheet.create({
   chatItemActive: { borderColor: colors.accent },
   chatAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.accentSoft, alignItems: "center", justifyContent: "center", position: "relative" },
   chatStatusDot: { position: "absolute", top: -1, right: -1, width: 13, height: 13, borderRadius: 7, borderWidth: 2, borderColor: colors.surface },
-  chatAvatarText: { fontSize: 18 },
   chatInfo: { flex: 1 },
   chatTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
   chatPreview: { fontSize: 13, color: colors.muted, marginTop: 2 },
   chatRight: { alignItems: "flex-end", gap: 6 },
   chatTime: { fontSize: 11, color: colors.muted },
-  chatDelete: { fontSize: 14, color: colors.danger, fontWeight: "700" },
   micBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   micBtnActive: { backgroundColor: colors.danger },
   attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
   attachRow: { flexDirection: "row", gap: 8, paddingHorizontal: 10, paddingBottom: 8, backgroundColor: colors.surface },
   attachAction: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
-  attachActionIcon: { fontSize: 18 },
   attachActionLabel: { fontSize: 13, color: colors.text, fontWeight: "600" },
-  attachToggle: { fontSize: 26, lineHeight: 30, color: colors.accent, fontWeight: "700" },
-  attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
-  attachChipWrap: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 4, paddingVertical: 3, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, maxWidth: 220 },
+  attachChip: { color: colors.text, fontSize: 13, maxWidth: 200 },
+  attachChipWrap: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, maxWidth: 220 },
   attachThumb: { width: 46, height: 46, borderRadius: 8 },
-  attachClear: { color: colors.danger, fontSize: 16, fontWeight: "700", paddingHorizontal: 6 },
   replyBar: {
     flexDirection: "row",
     alignItems: "center",
@@ -1764,7 +1955,6 @@ const styles = StyleSheet.create({
   },
   replyQuoteText: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
   stopBtn: { backgroundColor: colors.danger },
-  micText: { fontSize: 20 },
   input: {
     flex: 1,
     minHeight: 42,
@@ -1781,7 +1971,6 @@ const styles = StyleSheet.create({
   },
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
-  sendText: { color: "#ffffff", fontSize: 18 },
   disclaimer: { textAlign: "center", color: colors.muted, fontSize: 11, paddingTop: 2, paddingBottom: 6 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: colors.border },
