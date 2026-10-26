@@ -134,7 +134,7 @@ Notifications.setNotificationHandler({
 function ToolCard({ a }: { a: Activity }) {
   const [expanded, setExpanded] = useState(false);
   const meta = toolMeta(a.tool);
-  const statusIcon = a.status === "running" ? "⏳" : a.status === "ok" ? "✅" : "❌";
+  const statusColor = a.status === "running" ? colors.accent : a.status === "ok" ? colors.success : colors.danger;
   const args = argSummary(a.args);
   return (
     <View style={[styles.toolCard, a.status === "error" && styles.toolCardErr]}>
@@ -143,7 +143,7 @@ function ToolCard({ a }: { a: Activity }) {
         <Text style={styles.toolCardLabel} numberOfLines={1}>
           {breakUnbreakable(meta.label)}
         </Text>
-        <Text style={styles.toolCardStatus}>{statusIcon}</Text>
+        <View style={[styles.toolDot, { backgroundColor: statusColor }]} />
       </View>
       {args ? (
         <Text style={styles.toolCardArgs} numberOfLines={1}>
@@ -226,7 +226,7 @@ function MessageBubble({
       {activity.length > 0 ? (
         <View style={styles.activityWrap}>
           <Text style={styles.activitySummary}>
-            🔧 {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} genutzt
+            {activity.length} Werkzeug{activity.length === 1 ? "" : "e"}
           </Text>
           {activity.map((a) => (
             <ToolCard key={a.id} a={a} />
@@ -786,7 +786,7 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
         const d = (e.data || {}) as { reply?: string; activity?: Activity[] };
-        finalReply = (d.reply || "").slice(0, MAX_REPLY_CHARS);
+        finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "error") {
@@ -1118,10 +1118,6 @@ export default function App() {
           <Text style={styles.headerTitle} numberOfLines={1}>
             {activeChatId && tab === "chats" ? activeChat?.title || "Chat" : "KittyAI"}
           </Text>
-          <View style={styles.statusRow}>
-            <View style={styles.dot} />
-            <Text style={styles.headerSub}>verbunden</Text>
-          </View>
         </View>
         <View style={styles.headerActions}>
           {activeChatId && tab === "chats" ? (
@@ -1493,6 +1489,7 @@ const styles = StyleSheet.create({
   toolCardIcon: { fontSize: 14 },
   toolCardLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 },
   toolCardStatus: { fontSize: 13 },
+  toolDot: { width: 8, height: 8, borderRadius: 4 },
   toolCardArgs: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 1 },
   activityResult: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily, marginTop: 2, lineHeight: 16 },
   empty: { alignItems: "center", marginTop: 70, paddingHorizontal: 28 },
