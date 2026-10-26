@@ -29,7 +29,7 @@ import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons } from "./icons";
-import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
 import { DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
@@ -123,7 +123,7 @@ const CWD_KEY = "pi-cwd";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
-const MAX_TITLE_CHARS = 30;
+const MAX_TITLE_CHARS = 22;
 
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
 const SCHEDULE_PRESETS: { id: CronPreset | "custom"; label: string }[] = [
@@ -925,7 +925,7 @@ export default function App() {
 
     const reader = body.getReader();
     const decoder = new Utf8Decoder();
-    let buffer = "";
+    const parser = new SseParser(MAX_BUFFER_CHARS);
     let finalReply = "";
     let finalActivity: Activity[] = [];
 
@@ -989,30 +989,21 @@ export default function App() {
       }
     };
 
+    const handle = (evt: unknown) => {
+      const e0 = evt as { type?: string; data?: { turnId?: string }; seq?: number };
+      if (typeof e0.seq === "number" && e0.seq > lastSeq) lastSeq = e0.seq;
+      if (e0.type === "turn_start" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
+      streamStateRef.current[chatId] = { turnId, lastSeq };
+      apply(evt);
+    };
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const chunk = decoder.decode(value as Uint8Array);
-      if (buffer.length < MAX_BUFFER_CHARS) buffer += chunk;
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) !== -1) {
-        const raw = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        const dataLine = raw.split("\n").find((l) => l.startsWith("data: "));
-        if (!dataLine) continue;
-        let evt: unknown;
-        try {
-          evt = JSON.parse(dataLine.slice(6));
-        } catch {
-          continue;
-        }
-        const e0 = evt as { type?: string; data?: { turnId?: string }; seq?: number };
-        if (typeof e0.seq === "number" && e0.seq > lastSeq) lastSeq = e0.seq;
-        if (e0.type === "turn_start" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
-        streamStateRef.current[chatId] = { turnId, lastSeq };
-        apply(evt);
-      }
+      for (const evt of parser.push(decoder.decode(value as Uint8Array))) handle(evt);
     }
+    // Stream zu Ende: Rest im Puffer noch verarbeiten (Event ohne finales \n\n).
+    for (const evt of parser.flush()) handle(evt);
 
     const finalText = finalReply.trim() || "(keine Antwort)";
     patchMsg(chatId, aiId, (m) => ({
