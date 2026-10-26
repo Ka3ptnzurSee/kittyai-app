@@ -26,7 +26,7 @@ import ini from "highlight.js/lib/languages/ini";
 import diff from "highlight.js/lib/languages/diff";
 import plaintext from "highlight.js/lib/languages/plaintext";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
-import { breakLongLines } from "./lib";
+import { breakLongLines, breakUnbreakable } from "./lib";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
 
@@ -189,13 +189,13 @@ function renderInline(tokens: Token[], keyPrefix: string): ReactNode {
     const t = tokens[i];
     const key = `${keyPrefix}-i${i}`;
     if (t.type === "text") {
-      children.push(t.content);
+      children.push(breakUnbreakable(t.content));
     } else if (t.type === "softbreak" || t.type === "hardbreak") {
       children.push("\n");
     } else if (t.type === "code_inline") {
       children.push(
         <Text key={key} style={styles.inlineCode}>
-          {t.content}
+          {breakUnbreakable(t.content)}
         </Text>,
       );
     } else if (t.type === "strong_open" || t.type === "em_open" || t.type === "s_open") {
@@ -407,7 +407,7 @@ export function Markdown({ text }: { text: string }) {
       // Fallback: roher Text
       return (
         <Text selectable style={styles.paragraph}>
-          {text}
+          {breakUnbreakable(text)}
         </Text>
       );
     }

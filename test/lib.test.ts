@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { Utf8Decoder, argSummary, breakLongLines, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
+import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -40,6 +40,26 @@ test("breakLongLines entfernt Steuerzeichen und wrappt lange Zeilen", () => {
   assert.strictEqual(breakLongLines("x".repeat(250)).split("\n").length, 3); // 120+120+10
   assert.strictEqual(breakLongLines("kurz\nzeile"), "kurz\nzeile");
   assert.strictEqual(breakLongLines("ä😀中"), "ä😀中"); // Umlaute/Emoji/CJK bleiben
+});
+
+test("breakLongLines strippt ANSI CSI- und OSC-Sequenzen", () => {
+  assert.strictEqual(breakLongLines("\u001b[31mrot\u001b[0m"), "rot");
+  assert.strictEqual(breakLongLines("\u001b]9;4;#16a34a\u0007text"), "text");
+});
+
+test("breakUnbreakable lässt normale Prosa unangetastet", () => {
+  const prose = "kurzer Text mit Leerzeichen bleibt unverändert";
+  assert.strictEqual(breakUnbreakable(prose), prose);
+});
+
+test("breakUnbreakable bricht nur unbrechbare Läufe", () => {
+  assert.strictEqual(breakUnbreakable("x".repeat(250)).split("\n").length, 3); // 120+120+10
+});
+
+test("breakUnbreakable strippt ANSI und bricht danach", () => {
+  const out = breakUnbreakable("a\u001b[32m".repeat(200));
+  assert.ok(!out.includes("\u001b"), "kein ESC mehr im Ergebnis");
+  assert.strictEqual(out.split("\n").length, 2); // 200 'a' → 120+80
 });
 
 test("formatTime liefert Uhrzeit für heute", () => {

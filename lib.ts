@@ -58,19 +58,40 @@ export function argSummary(args: unknown): string {
 // Zahlen-Arrays aus RE-Ausgaben) brechen iOS-Layout: Eine einzige Zeile mit
 // 4000+ Zeichen erzeugt eine intrinsische Breite von ~25.000pt und lässt die
 // FlatList-Zelle als „unendlich langen weißen Balken" aufplatzen. Deshalb:
-// Steuerzeichen entfernen + lange Läufe in Blöcke zerlegen.
-export function breakLongLines(s: string, max = 120): string {
+// Steuerzeichen + ANSI-Sequenzen entfernen, lange Läufe in Blöcke zerlegen.
+
+// Entfernt Steuerzeichen UND ANSI-Escape-Sequenzen (CSI-Farben/Cursor + OSC-Terminal-Reports/Hyperlinks).
+function stripControl(s: string): string {
   return s
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    // OSC: ESC ] … BEL bzw. ST (iTerm2-Reports wie ]9;4;…#16a34a, Hyperlinks, Terminal-Titel)
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "")
+    // CSI: ESC [ params Abschlussbuchstabe (SGR-Farben, Cursor)
+    .replace(/\u001b\[[0-9;:?]*[a-zA-Z]/g, "")
+    // verbleibende Steuerzeichen
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
+
+function breakRun(run: string, max: number): string {
+  const parts: string[] = [];
+  for (let i = 0; i < run.length; i += max) parts.push(run.slice(i, i + max));
+  return parts.join("\n");
+}
+
+// Harte Variante (für vorformatierten Text: Tool-Ergebnisse, Code-Blöcke):
+// bricht JEDE Zeile ab `max` Zeichen.
+export function breakLongLines(s: string, max = 120): string {
+  return stripControl(s)
     .split("\n")
-    .map((line) => {
-      if (line.length <= max) return line;
-      const parts: string[] = [];
-      for (let i = 0; i < line.length; i += max) parts.push(line.slice(i, i + max));
-      return parts.join("\n");
-    })
+    .map((line) => (line.length <= max ? line : breakRun(line, max)))
     .join("\n");
+}
+
+// Weiche Variante (für Fließtext): bricht NUR unbrechbare Läufe (ohne Whitespace)
+// ab `max` Zeichen; normale Prosa mit Leerzeichen bleibt unangetastet.
+export function breakUnbreakable(s: string, max = 120): string {
+  const clean = stripControl(s);
+  const re = new RegExp(`[^\\s]{${max + 1},}`, "g");
+  return clean.replace(re, (run) => breakRun(run, max));
 }
 
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──

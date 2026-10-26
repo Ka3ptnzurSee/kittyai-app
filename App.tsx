@@ -27,7 +27,7 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Utf8Decoder, argSummary, breakLongLines, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
+import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, type CronPreset } from "./lib";
 import { Markdown } from "./Markdown";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 
@@ -141,13 +141,13 @@ function ToolCard({ a }: { a: Activity }) {
       <View style={styles.toolCardHeader}>
         <Text style={styles.toolCardIcon}>{meta.icon}</Text>
         <Text style={styles.toolCardLabel} numberOfLines={1}>
-          {meta.label}
+          {breakUnbreakable(meta.label)}
         </Text>
         <Text style={styles.toolCardStatus}>{statusIcon}</Text>
       </View>
       {args ? (
         <Text style={styles.toolCardArgs} numberOfLines={1}>
-          {args}
+          {breakLongLines(args)}
         </Text>
       ) : null}
       {a.result ? (
@@ -205,12 +205,12 @@ function MessageBubble({
     <View style={[styles.bubble, bubbleStyle]} {...panResponder.panHandlers}>
       {item.replyTo ? (
         <View style={styles.replyQuote}>
-          <Text style={styles.replyQuoteText} numberOfLines={2}>{item.replyTo.text}</Text>
+          <Text style={styles.replyQuoteText} numberOfLines={2}>{breakUnbreakable(item.replyTo.text)}</Text>
         </View>
       ) : null}
       {isUser ? (
         <Text selectable style={styles.userText}>
-          {item.text}
+          {breakUnbreakable(item.text)}
         </Text>
       ) : (
         <Markdown text={item.text || ""} />
