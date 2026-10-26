@@ -203,6 +203,9 @@ function MessageBubble({
 
   return (
     <View style={[styles.bubble, bubbleStyle]} {...panResponder.panHandlers}>
+      <Text style={[styles.senderLabel, isUser ? styles.senderLabelUser : styles.senderLabelAi]}>
+        {isUser ? "Du" : "KittyAI"}
+      </Text>
       {item.replyTo ? (
         <View style={styles.replyQuote}>
           <Text style={styles.replyQuoteText} numberOfLines={2}>{breakUnbreakable(item.replyTo.text)}</Text>
@@ -266,6 +269,7 @@ export default function App() {
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
+  const [attachOpen, setAttachOpen] = useState(false);
   const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
   const [pendingImages, setPendingImages] = useState<{ data: string; mediaType: string; uri: string }[]>([]);
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
@@ -691,6 +695,25 @@ export default function App() {
     } finally {
       markBusy(chatId, false);
       setChatThinking(chatId, "");
+      // Weißen Balken vermeiden: nach JEDEM Turn (normal, Fehler, Abbruch, Timeout)
+      // verwaiste leere KI-Bubbles entfernen — Nachrichten ohne Text/Tool/Anhang
+      // bleiben sonst als leerer weißer Block stehen, auch bei neuen Nachrichten.
+      setChats((cs) =>
+        cs.map((c) =>
+          c.id === chatId
+            ? {
+                ...c,
+                messages: c.messages.filter(
+                  (m) =>
+                    m.role !== "assistant" ||
+                    (m.text && m.text.trim()) ||
+                    (m.activity && m.activity.length) ||
+                    (m.images && m.images.length),
+                ),
+              }
+            : c,
+        ),
+      );
     }
   }
 
@@ -1146,10 +1169,15 @@ export default function App() {
               scrollEventThrottle={32}
               ListEmptyComponent={
                 <View style={styles.empty}>
-                  <Text style={styles.emptyTitle}>Womit kann ich helfen? 👋</Text>
-                  <Text style={styles.emptyText}>
-                    Schreib mir oder tippe auf 🎤 und sprich.{"\n"}Ich kann Dateien ändern, Code ausführen und recherchieren.
-                  </Text>
+                  <Text style={styles.emptyTitle}>Hallo 👋</Text>
+                  <Text style={styles.emptyText}>Wie kann ich dir heute helfen?</Text>
+                  <View style={styles.suggestionRow}>
+                    {["Fasse den Tag zusammen", "Recherchiere etwas für mich", "Schreibe mir eine Nachricht", "Erkläre mir ein Thema"].map((s) => (
+                      <Pressable key={s} onPress={() => send(s)} style={styles.suggestionChip}>
+                        <Text style={styles.suggestionChipText}>{s}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
                 </View>
               }
               ListFooterComponent={
@@ -1204,6 +1232,22 @@ export default function App() {
                   </Pressable>
                 </View>
               )}
+              {attachOpen && (
+                <View style={styles.attachRow}>
+                  <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachAction}>
+                    <Text style={styles.attachActionIcon}>🖼</Text>
+                    <Text style={styles.attachActionLabel}>Bild</Text>
+                  </Pressable>
+                  <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachAction}>
+                    <Text style={styles.attachActionIcon}>📎</Text>
+                    <Text style={styles.attachActionLabel}>Datei</Text>
+                  </Pressable>
+                  <Pressable onPress={() => { generateImageInChat(); setAttachOpen(false); }} style={styles.attachAction}>
+                    <Text style={styles.attachActionIcon}>🎨</Text>
+                    <Text style={styles.attachActionLabel}>Bild erstellen</Text>
+                  </Pressable>
+                </View>
+              )}
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (
                   <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
@@ -1214,14 +1258,8 @@ export default function App() {
                     <Text style={styles.micText}>🎤</Text>
                   </Pressable>
                 )}
-                <Pressable onPress={pickImage} style={styles.micBtn}>
-                  <Text style={styles.micText}>🖼</Text>
-                </Pressable>
-                <Pressable onPress={pickFile} style={styles.micBtn}>
-                  <Text style={styles.micText}>📎</Text>
-                </Pressable>
-                <Pressable onPress={generateImageInChat} style={styles.micBtn}>
-                  <Text style={styles.micText}>🎨</Text>
+                <Pressable onPress={() => setAttachOpen((o) => !o)} style={styles.micBtn}>
+                  <Text style={styles.attachToggle}>{attachOpen ? "✕" : "+"}</Text>
                 </Pressable>
                 <TextInput
                   style={styles.input}
@@ -1241,6 +1279,7 @@ export default function App() {
                   <Text style={styles.sendText}>➤</Text>
                 </Pressable>
               </View>
+              <Text style={styles.disclaimer}>KittyAI kann Fehler machen — wichtige Informationen prüfen.</Text>
             </KeyboardAvoidingView>
           </>
         ) : (
@@ -1427,12 +1466,16 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { padding: 12, paddingBottom: 16 },
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
-  userBubble: { alignSelf: "flex-end", backgroundColor: colors.accent, borderBottomRightRadius: 5 },
-  aiBubble: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderBottomLeftRadius: 5 },
-  aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.danger, borderBottomLeftRadius: 5 },
-  aiBubbleDone: { alignSelf: "flex-start", backgroundColor: colors.surface, borderWidth: 2, borderColor: colors.success, borderBottomLeftRadius: 5 },
+  senderLabel: { fontSize: 11, fontWeight: "600", color: colors.muted, marginBottom: 4 },
+  senderLabelUser: { textAlign: "right" },
+  senderLabelAi: { textAlign: "left" },
+  // Claude-Look: User rechts in warmer heller Blase, KI flach (kein Kasten/Rahmen).
+  userBubble: { alignSelf: "flex-end", backgroundColor: "#f0eee6", borderBottomRightRadius: 5 },
+  aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },
+  aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: "transparent" },
+  aiBubbleDone: { alignSelf: "flex-start", backgroundColor: "transparent" },
   msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
-  userText: { color: "#ffffff", fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
+  userText: { color: colors.text, fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 6, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },
   activitySummary: { color: colors.muted, fontSize: 12, fontWeight: "600", marginBottom: 2 },
@@ -1455,6 +1498,9 @@ const styles = StyleSheet.create({
   empty: { alignItems: "center", marginTop: 70, paddingHorizontal: 28 },
   emptyTitle: { fontSize: 22, fontWeight: "800", color: colors.text, textAlign: "center" },
   emptyText: { fontSize: 15, color: colors.muted, textAlign: "center", marginTop: 10, lineHeight: 22 },
+  suggestionRow: { flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 8, marginTop: 20 },
+  suggestionChip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
+  suggestionChipText: { fontSize: 14, color: colors.text },
   thinking: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 4 },
   thinkingText: { color: colors.muted, fontSize: 13, flex: 1 },
   compactionWrap: { alignItems: "center", gap: 6, flex: 1 },
@@ -1559,6 +1605,11 @@ const styles = StyleSheet.create({
   micBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   micBtnActive: { backgroundColor: colors.danger },
   attachPreview: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface },
+  attachRow: { flexDirection: "row", gap: 8, paddingHorizontal: 10, paddingBottom: 8, backgroundColor: colors.surface },
+  attachAction: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  attachActionIcon: { fontSize: 18 },
+  attachActionLabel: { fontSize: 13, color: colors.text, fontWeight: "600" },
+  attachToggle: { fontSize: 26, lineHeight: 30, color: colors.accent, fontWeight: "700" },
   attachChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, color: colors.text, fontSize: 13, maxWidth: 200 },
   attachClear: { color: colors.danger, fontSize: 16, fontWeight: "700", paddingHorizontal: 6 },
   replyBar: {
@@ -1574,15 +1625,15 @@ const styles = StyleSheet.create({
   replyBarLabel: { fontSize: 11, color: colors.accent, fontWeight: "700" },
   replyBarText: { fontSize: 13, color: colors.muted, marginTop: 1 },
   replyQuote: {
-    backgroundColor: "rgba(255,255,255,0.18)",
+    backgroundColor: "rgba(0,0,0,0.05)",
     borderLeftWidth: 3,
-    borderLeftColor: "#ffffff",
+    borderLeftColor: colors.accent,
     borderRadius: 6,
     paddingHorizontal: 8,
     paddingVertical: 4,
     marginBottom: 6,
   },
-  replyQuoteText: { color: "#ffffff", fontSize: 13, fontStyle: "italic" },
+  replyQuoteText: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
   stopBtn: { backgroundColor: colors.danger },
   micText: { fontSize: 20 },
   input: {
@@ -1602,6 +1653,7 @@ const styles = StyleSheet.create({
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
   sendText: { color: "#ffffff", fontSize: 18 },
+  disclaimer: { textAlign: "center", color: colors.muted, fontSize: 11, paddingTop: 2, paddingBottom: 6 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: colors.border },
   modalTitle: { fontSize: 18, fontWeight: "700", color: colors.text },
