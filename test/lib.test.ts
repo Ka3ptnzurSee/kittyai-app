@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { Utf8Decoder, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -98,19 +98,85 @@ test("cronLabel fällt bei unbekanntem Muster auf rohen Cron zurück", () => {
 });
 
 test("toolMeta übersetzt bekannte pi-Werkzeuge in Deutsch + Icon", () => {
-  assert.deepStrictEqual(toolMeta("bash"), { label: "Befehl", icon: "💻", category: "system" });
-  assert.deepStrictEqual(toolMeta("read"), { label: "Datei lesen", icon: "📄", category: "file" });
-  assert.deepStrictEqual(toolMeta("web_fetch"), { label: "Webseite abrufen", icon: "🌐", category: "web" });
+  assert.deepStrictEqual(toolMeta("bash"), { label: "Befehl", icon: "⌘", category: "system" });
+  assert.deepStrictEqual(toolMeta("read"), { label: "Datei lesen", icon: "¶", category: "file" });
+  assert.deepStrictEqual(toolMeta("web_fetch"), { label: "Webseite abrufen", icon: "◎", category: "web" });
   assert.strictEqual(toolLabel("bash"), "Befehl");
 });
 
 test("toolMeta fällt über Präfix-Heuristik auf sinnvolle Kategorien zurück", () => {
   assert.strictEqual(toolMeta("memory_search").category, "memory");
-  assert.strictEqual(toolMeta("calendar_list_events").icon, "📅");
-  assert.strictEqual(toolMeta("github_foo").icon, "🐙");
+  assert.strictEqual(toolMeta("calendar_list_events").icon, "▤");
+  assert.strictEqual(toolMeta("github_foo").icon, "◈");
   assert.strictEqual(toolMeta("skill_bar").category, "search");
 });
 
-test("toolMeta liefert rohen Namen + 🔧 bei unbekanntem Werkzeug", () => {
-  assert.deepStrictEqual(toolMeta("völlig_unbekannt"), { label: "völlig_unbekannt", icon: "🔧", category: "other" });
+test("toolMeta liefert rohen Namen + ⌁ bei unbekanntem Werkzeug", () => {
+  assert.deepStrictEqual(toolMeta("völlig_unbekannt"), { label: "völlig_unbekannt", icon: "⌁", category: "other" });
+});
+
+test("SseParser parst ein einzelnes Event", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data: {"type":"text","data":"Hallo"}\n\n'), [{ type: "text", data: "Hallo" }]);
+});
+
+test("SseParser parst mehrere Events in einem Chunk", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data: {"type":"a"}\n\ndata: {"type":"b"}\n\n'), [{ type: "a" }, { type: "b" }]);
+});
+
+test("SseParser sammelt Events über Chunk-Grenzen", () => {
+  const p = new SseParser();
+  const parts = ['data: {"type":"te', 'xt","data":"Hallo"}\n\n'];
+  let out: unknown[] = [];
+  for (const part of parts) out = out.concat(p.push(part));
+  assert.deepStrictEqual(out, [{ type: "text", data: "Hallo" }]);
+});
+
+test("SseParser normalisiert CRLF-Delimiter", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data: {"type":"text","data":"Hi"}\r\n\r\n'), [{ type: "text", data: "Hi" }]);
+});
+
+test("SseParser behandelt CRLF über eine Chunk-Grenze", () => {
+  const p = new SseParser();
+  // \r am Ende des ersten Chunks, \n am Anfang des zweiten → ein CRLF-Paar
+  let out = p.push('data: {"type":"a"}\r');
+  out = out.concat(p.push('\n\r\ndata: {"type":"b"}\n\n'));
+  assert.deepStrictEqual(out, [{ type: "a" }, { type: "b" }]);
+});
+
+test("SseParser verwirft übergroße Einzel-Events statt sie zu parsen", () => {
+  const p = new SseParser(1000000);
+  const huge = `data: {"type":"text","data":"${"x".repeat(70000)}"}\n\n`;
+  assert.deepStrictEqual(p.push(huge), []); // > MAX_EVENT_CHARS (65536) → verworfen
+});
+
+test("SseParser überspringt kaputtes JSON und liefert Folge-Events", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data: {kaputt\n\ndata: {"type":"ok"}\n\n'), [{ type: "ok" }]);
+});
+
+test("SseParser ignoriert Events ohne data:-Feld (Kommentare/Heartbeats)", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push(': keep-alive\n\n'), []);
+});
+
+test("SseParser akzeptiert data: ohne Leerzeichen", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data:{"type":"x"}\n\n'), [{ type: "x" }]);
+});
+
+test("SseParser.flush liefert ein Event ohne finales \\n\\n", () => {
+  const p = new SseParser();
+  assert.deepStrictEqual(p.push('data: {"type":"text","data":"Ende"}'), []);
+  assert.deepStrictEqual(p.flush(), [{ type: "text", data: "Ende" }]);
+  assert.deepStrictEqual(p.flush(), []); // zweiter flush ist leer
+});
+
+test("SseParser deckelt einen hängenden Puffer ohne Chunks zu verlieren", () => {
+  const p = new SseParser(10);
+  // 1000 Zeichen ohne Delimiter → Puffer wird intern gekürzt, kein Crash
+  assert.deepStrictEqual(p.push("x".repeat(1000)), []);
+  assert.deepStrictEqual(p.flush(), []); // kein data:-Feld → nichts Verwertbares
 });
