@@ -667,6 +667,7 @@ export default function App() {
   // Hintergrund fertig gewordene Antwort (leere lokale KI-Bubble) wieder auffüllen.
   useEffect(() => {
     if (!activeChatId || !loadedRef.current) return;
+    if (busyChatIds.has(activeChatId)) return; // busy → Antwort noch nicht final im Server
     let cancelled = false;
     (async () => {
       try {
@@ -697,7 +698,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [activeChatId, serverUrl]);
+  }, [activeChatId, serverUrl, busyChatIds]);
 
   // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
   useEffect(() => {
