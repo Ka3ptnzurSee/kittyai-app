@@ -681,7 +681,7 @@ export default function App() {
             if (c.id !== activeChatId) return c;
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant");
-            if (lastAi && serverLast && !lastAi.text.trim() && serverLast.text.trim()) {
+            if (lastAi && !lastAi.error && serverLast && !lastAi.text.trim() && serverLast.text.trim()) {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
