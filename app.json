@@ -18,7 +18,7 @@
         "NSMicrophoneUsageDescription": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
         "NSSpeechRecognitionUsageDescription": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
       },
-      "buildNumber": "55"
+      "buildNumber": "66"
     },
     "android": {
       "package": "com.meister.piapp",
@@ -54,13 +54,14 @@
           "speechRecognitionPermission": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-font"
     ],
     "extra": {
       "eas": {
-        "projectId": "9801f142-3519-46fa-88c6-54d4baeb45a5"
+        "projectId": "1f2cda59-ed40-4415-9d1f-fa2f5fe5ac5b"
       }
     },
-    "owner": "kittyai0q1t"
+    "owner": "per_h"
   }
 }
