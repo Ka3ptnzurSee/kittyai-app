@@ -4,6 +4,7 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
+  AppState,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -29,7 +30,7 @@ import Constants from "expo-constants";
 import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
-import { Ionicons } from "./icons";
+import { Ionicons, preloadIcons } from "./icons";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
 import { DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
@@ -75,12 +76,26 @@ function CompactionBar() {
   );
 }
 
-// Denk-Text als aufklappbarer Block (Volllänge) statt 1-Zeilen-Marquee.
+// Denk-Text als aufklappbarer Block (Volllänge). Standardmäßig eingeklappt,
+// damit die lange Reasoning-Ausgabe KEINE weiße Bubble/Layout-Loop erzeugt —
+// der volle Text ist per Tap erreichbar.
 function ThinkingBlock({ text }: { text: string }) {
-  if (!text.trim()) return null;
+  const [open, setOpen] = useState(false);
+  const trimmed = (text || "").trim();
+  if (!trimmed) return null;
   return (
-    <View style={styles.thinking}>
-      <Text style={styles.thinkingText} numberOfLines={1}>⚙️ pi denkt …</Text>
+    <View style={styles.thinkingBlock}>
+      <Pressable onPress={() => setOpen((o) => !o)} style={styles.thinkingHeader} hitSlop={6}>
+        <Text style={styles.thinkingText} numberOfLines={1}>
+          {open ? "Denkprozess ausblenden" : "Denkprozess anzeigen"}
+        </Text>
+        <Ionicons name={open ? "chevron-up" : "chevron-down"} size={14} color={colors.muted} />
+      </Pressable>
+      {open ? (
+        <ScrollView style={styles.thinkingScroll} nestedScrollEnabled>
+          <Text style={styles.thinkingDetail}>{breakUnbreakable(trimmed, 120)}</Text>
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
@@ -119,6 +134,7 @@ type Schedule = { id: string; message: string; cron: string };
 const TOKEN_KEY = "pi-api-token";
 const CHATS_KEY = "pi-chats-v2";
 const CWD_KEY = "pi-cwd";
+const STREAM_STATE_KEY = "pi-stream-state-v1";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
@@ -195,6 +211,22 @@ function ToolCard({ a }: { a: Activity }) {
           {breakLongLines(a.result)}
         </Text>
       ) : null}
+    </View>
+  );
+}
+
+// Werkzeug-Aktivität standardmäßig EINGEKLAPPT (nur „X Werkzeuge“-Zeile).
+// Verhindert große weiße Blöcke, wenn die Antwort nur aus Tool-Aufrufen besteht.
+function ActivityList({ activity }: { activity: Activity[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.activityWrap}>
+      <Pressable onPress={() => setOpen((o) => !o)} style={styles.activityToggle}>
+        <Text style={styles.activitySummary}>
+          {open ? "▴" : "▾"} {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} {open ? "" : "· versteckt"}
+        </Text>
+      </Pressable>
+      {open ? activity.map((a) => <ToolCard key={a.id} a={a} />) : null}
     </View>
   );
 }
@@ -347,14 +379,7 @@ function MessageBubble({
         ))
       ) : null}
       {activity.length > 0 ? (
-        <View style={styles.activityWrap}>
-          <Text style={styles.activitySummary}>
-            {activity.length} Werkzeug{activity.length === 1 ? "" : "e"}
-          </Text>
-          {activity.map((a) => (
-            <ToolCard key={a.id} a={a} />
-          ))}
-        </View>
+        <ActivityList activity={activity} />
       ) : null}
       {item.permissions && item.permissions.length > 0 ? (
         <View style={styles.permissionWrap}>
@@ -430,10 +455,32 @@ export default function App() {
   const player = useAudioPlayer();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const abortedRef = useRef<Set<string>>(new Set());
-  const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number }>>({});
+  const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number; clientMessageId?: string }>>({});
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
   const nearBottomRef = useRef(true); // ob der Nutzer am Listenende ist (für Auto-Scroll)
+
+  // App-Vordergrund/-Hintergrund: iOS beendet die Socket-Verbindung, sobald die App
+  // in den Hintergrund geht. Retries deshalb erst im Vordergrund starten (siehe send()).
+  const appStateRef = useRef(AppState.currentState);
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (s) => {
+      appStateRef.current = s;
+    });
+    return () => sub.remove();
+  }, []);
+
+  // Wartet, bis die App wieder aktiv (Vordergrund) ist. Löst sofort auf, wenn bereits aktiv.
+  const waitForForeground = () =>
+    new Promise<void>((resolve) => {
+      if (appStateRef.current === "active") return resolve();
+      const sub = AppState.addEventListener("change", (s) => {
+        if (s === "active") {
+          sub.remove();
+          resolve();
+        }
+      });
+    });
 
   // Mikro-Puls während Diktieren: sanfter Loop, der das „höre zu“-Gefühl sichtbar macht.
   useEffect(() => {
@@ -488,6 +535,21 @@ export default function App() {
   function setChatThinking(chatId: string, value: string) {
     setThinkingByChat((prev) => ({ ...prev, [chatId]: value }));
   }
+  function persistStreamState(chatId: string) {
+    const st = streamStateRef.current[chatId];
+    AsyncStorage.getItem(STREAM_STATE_KEY)
+      .then((raw) => {
+        let map: Record<string, { turnId: string; lastSeq: number; clientMessageId?: string }> = {};
+        try { if (raw) map = JSON.parse(raw) || {}; } catch { map = {}; }
+        if (st) {
+          map[chatId] = st;
+        } else {
+          delete map[chatId];
+        }
+        return AsyncStorage.setItem(STREAM_STATE_KEY, JSON.stringify(map));
+      })
+      .catch(() => { /* ignorieren */ });
+  }
 
   function authHeaders(): Record<string, string> {
     // Token nur über HTTPS senden – kein Klartext-Token im LAN-/Dev-Modus
@@ -513,6 +575,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      preloadIcons(); // Vektor-Icons (Ionicons) beim Start laden — kein FOUC/Start-Crash
       // Server-URL ist fest verdrahtet (detectBase) — keine gespeicherte/manuelle URL mehr.
       const url = serverUrl;
       let savedToken = "";
@@ -541,11 +604,22 @@ export default function App() {
         // ignorieren
       }
       try {
+        // Persistierten Stream-State beim Start laden: nach einem kompletten App-Kill
+        // ist der turnId/lastSeq-Anker nur hier rekonstruierbar (Resume statt Antwort-Verlust).
+        const rawStream = await AsyncStorage.getItem(STREAM_STATE_KEY);
+        if (rawStream) {
+          try { streamStateRef.current = JSON.parse(rawStream) || {}; } catch { streamStateRef.current = {}; }
+        }
+      } catch {
+        // ignorieren
+      }
+      try {
         const savedChats = await AsyncStorage.getItem(CHATS_KEY);
         if (savedChats) {
           const parsed = JSON.parse(savedChats);
           if (Array.isArray(parsed)) {
-            // Verwaiste leere KI-Nachrichten entfernen (weiße Balken aus abgebrochenen Streams)
+            // Verwaiste leere KI-Nachrichten entfernen (weiße Balken aus abgebrochenen Streams).
+            // ABER: leere Bubble als Resume-Anker behalten, wenn ein Stream-State existiert.
             const cleaned = parsed.map((c: any) => ({
               ...c,
               messages: (Array.isArray(c.messages) ? c.messages : []).filter(
@@ -555,10 +629,29 @@ export default function App() {
                   (m.activity && m.activity.length) ||
                   (m.permissions && m.permissions.length) ||
                   (m.images && m.images.length) ||
-                  m.error,
+                  m.error ||
+                  !!streamStateRef.current[c.id],
               ),
             }));
             setChats((prev) => (prev.length ? prev : cleaned));
+            // Auto-Resume: für jeden Chat mit Stream-State + leerer KI-Bubble + User-Nachricht
+            // den letzten Turn am Server fortsetzen (kompletter App-Kill -> Antwort wiederherstellen).
+            for (const chat of cleaned) {
+              const st = streamStateRef.current[chat.id];
+              if (!st) continue;
+              const aiMsg = chat.messages.filter(
+                (m: any) => m.role === "assistant" && !(m.text?.trim()) && !m.error,
+              ).pop();
+              const userMsg = [...chat.messages].reverse().find((m: any) => m.role === "user");
+              if (!aiMsg || !userMsg) continue;
+              markBusy(chat.id, true);
+              streamChat(userMsg.text, chat.id, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId)
+                .catch(() => {
+                  // Resume nicht möglich (Turn aufgeräumt/offline) -> Karte als Fehler markieren.
+                  patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Verbindung unterbrochen", retryable: true } }));
+                })
+                .finally(() => markBusy(chat.id, false));
+            }
           }
         }
       } catch {
@@ -772,7 +865,7 @@ export default function App() {
     setInput("");
     setChatThinking(chatId, "");
     setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "🖼 Bild" : documents.length ? "📄 PDF" : "📎 Datei"), images: imageUris, replyTo };
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "Bild" : documents.length ? "PDF" : "Datei"), images: imageUris, replyTo };
     const aiId = uid("a");
     setPendingImages([]);
     setPendingFiles([]);
@@ -786,13 +879,15 @@ export default function App() {
       updatedAt: Date.now(),
     }));
     abortedRef.current.delete(chatId);
-    delete streamStateRef.current[chatId];
+    const clientMessageId = uid("m");
+    streamStateRef.current[chatId] = { turnId: "", lastSeq: 0, clientMessageId };
+    persistStreamState(chatId);
     markBusy(chatId, true);
     // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
 
     try {
-      await streamChat(finalMessage, chatId, aiId, images, documents);
+      await streamChat(finalMessage, chatId, aiId, images, documents, undefined, clientMessageId);
     } catch (e) {
       if (abortedRef.current.has(chatId)) {
         abortedRef.current.delete(chatId);
@@ -803,20 +898,28 @@ export default function App() {
       const rawErr = e instanceof Error ? e.message : String(e);
       const retriable = /network|fetch failed|connection lost|timed out|request failed|prematurely closed|aborted|econnreset|socket hang up|bad gateway|502|503|504|5[0-9][0-9]/i.test(rawErr);
       if (retriable) {
+        // Im Hintergrund NICHT retryen: iOS tötet die Socket-Verbindung beim Verlassen
+        // der App. Erst auf Vordergrund warten — der Server-Turn läuft unabhängig weiter
+        // und wird über turnRegistry gepuffert; Resume knüpft dann nahtlos an.
+        if (appStateRef.current !== "active") {
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "App im Hintergrund — Antwort wird auf dem Server weiterverarbeitet …" }));
+        }
         for (let attempt = 1; attempt <= 3; attempt++) {
+          await waitForForeground();
+          if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
           try {
             setStatusByChat((prev) => ({ ...prev, [chatId]: `Verbindung verloren — neuer Versuch ${attempt}/3…` }));
-            await new Promise((r) => setTimeout(r, 1500 * attempt)); // 1.5s, 3s, 4.5s
+            await new Promise((r) => setTimeout(r, 1200));
             if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
             const st = streamStateRef.current[chatId];
             setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
-            if (st && st.turnId && st.lastSeq > 0) {
+            if (st && st.turnId) {
               // Resumable: an der Abbruchstelle fortsetzen statt von vorn zu streamen.
-              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq });
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, clientMessageId);
             } else {
-              // Kein Resume möglich → Voll-Replay (Text zurücksetzen, sonst doppelt).
-              patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
-              await streamChat(finalMessage, chatId, aiId, images, documents);
+              // Kein turnId bekannt (App evtl. vor turn_start getötet) → Server sucht
+              // den letzten Turn dieses Chats selbst (vermeidet doppeltes Senden).
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: "", lastSeq: 0 }, clientMessageId);
             }
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
@@ -828,37 +931,21 @@ export default function App() {
         }
       }
       setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); // Status nach fehlgeschlagenem Retry löschen (Fallback übernimmt)
-      // Fallback: synchroner /chat (mit eigenem Abort-Timeout gegen Busy-Lockup)
-      const ctrl = new AbortController();
-      abortControllersRef.current.set(chatId, ctrl);
-      const timer = setTimeout(() => ctrl.abort(), STREAM_TIMEOUT_MS);
+      // Fallback: KEIN neuer Turn! Stattdessen den letzten Turn dieses Chats über
+      // clientMessageId resumen (Voll-Replay), damit nichts doppelt gesendet wird.
+      await waitForForeground();
+      if (abortedRef.current.has(chatId)) return;
+      const st = streamStateRef.current[chatId];
       try {
-        const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/chat`, {
-          method: "POST",
-          headers: authHeaders(),
-          body: JSON.stringify({ message: finalMessage, chatId, images, documents }),
-          signal: ctrl.signal,
-        });
-        if (!res.ok) {
-          const ct = res.headers.get("content-type") || "";
-          const body = await res.text().catch(() => "");
-          throw new Error(ct.includes("json") ? body.slice(0, 200) : `Server/Proxy-Fehler (HTTP ${res.status})`);
-        }
-        const data = await res.json();
-        const reply = (data.reply || data.error || "(keine Antwort)").trim().slice(0, MAX_REPLY_CHARS);
-        const activity: Activity[] = (Array.isArray(data.activity) ? data.activity : []).map((a: Activity) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
-        patchMsg(chatId, aiId, (m) => ({ ...m, text: reply, activity }));
-        if (speak && data.reply) speakReply(data.reply);
+        await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0 }, clientMessageId);
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } catch (e2) {
-        const rawMsg = ctrl.signal.aborted ? "Zeitüberschreitung beim Server" : (e2 instanceof Error ? e2.message : String(e2));
+        const rawMsg = e2 instanceof Error ? e2.message : String(e2);
         const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
           ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
           : rawMsg;
         // Fehler als eigene Karte statt als Text-Suffix in die Antwort.
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(msg), retryable: isRetryable(msg) } }));
-      } finally {
-        clearTimeout(timer);
-        if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
       }
     } finally {
       markBusy(chatId, false);
@@ -887,17 +974,22 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number }) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number }, clientMessageId?: string) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
     let lastSeq = resume?.lastSeq ?? 0;
     let turnId = resume?.turnId ?? "";
+    // Voll-Replay (lastSeq=0): bereits gestreamten Teiltext zurücksetzen, damit
+    // die Deltas beim Replay nicht doppelt angehängt werden.
+    if (resume && lastSeq === 0) {
+      patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
+    }
     try {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify(resume ? { chatId, resume } : { message, chatId, images, documents }),
+      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId }),
       signal: controller.signal,
     });
 
@@ -936,6 +1028,18 @@ export default function App() {
           args: d.args,
         };
         patchMsg(chatId, aiId, (m) => ({ ...m, activity: [...(m.activity || []), a] }));
+      } else if (t === "tool_update") {
+        // Live-Ausgabe eines noch laufenden Tools (Claude zeigt partielles Ergebnis
+        // während der Ausführung, nicht erst beim Abschluss).
+        const d = (e.data || {}) as { id?: string; tool?: string; partial?: string };
+        patchMsg(chatId, aiId, (m) => ({
+          ...m,
+          activity: (m.activity || []).map((x) =>
+            x.id === d.id || (x.status === "running" && x.tool === d.tool)
+              ? { ...x, result: (d.partial || "").slice(0, 2000) }
+              : x,
+          ),
+        }));
       } else if (t === "tool_end") {
         const d = (e.data || {}) as { id?: string; tool?: string; error?: boolean; result?: string };
         const err = !!d.error;
@@ -966,6 +1070,9 @@ export default function App() {
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+        // Turn abgeschlossen: keinen Resume-Anker mehr hinterlassen (Auto-Resume idempotent).
+        delete streamStateRef.current[chatId];
+        persistStreamState(chatId);
       } else if (t === "resume_unavailable") {
         // Turn ist auf dem Server nicht mehr vorhanden → Voll-Replay erzwingen.
         throw new Error("resume_unavailable");
@@ -979,7 +1086,8 @@ export default function App() {
       const e0 = evt as { type?: string; data?: { turnId?: string }; seq?: number };
       if (typeof e0.seq === "number" && e0.seq > lastSeq) lastSeq = e0.seq;
       if (e0.type === "turn_start" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
-      streamStateRef.current[chatId] = { turnId, lastSeq };
+      streamStateRef.current[chatId] = { turnId, lastSeq, clientMessageId };
+      if (e0.type === "turn_start") persistStreamState(chatId);
       apply(evt);
     };
 
@@ -1251,13 +1359,14 @@ export default function App() {
     const userMsg = [...chat.messages.slice(0, idx)].reverse().find((m) => m.role === "user");
     if (!userMsg) return;
     const text = userMsg.text.trim();
-    // Reine Anhang-Nachrichten ("🖼 Bild"/"📄 PDF"/"📎 Datei") können ohne
+    // Reine Anhang-Nachrichten ("Bild"/"PDF"/"Datei") können ohne
     // die Base64-Anhänge nicht korrekt wiederholt werden → Retry unterdrücken.
-    if (!text || /^(🖼 Bild|📄 PDF|📎 Datei)$/.test(text)) return;
+    if (!text || /^(Bild|PDF|Datei)$/.test(text)) return;
     patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "", activity: [], error: undefined }));
     markBusy(chat.id, true);
     setChatThinking(chat.id, "");
     abortedRef.current.delete(chat.id);
+    delete streamStateRef.current[chat.id];
     streamChat(text, chat.id, aiMsg.id).catch((e) => {
       const raw = e instanceof Error ? e.message : String(e);
       patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
@@ -1409,7 +1518,7 @@ export default function App() {
               scrollEventThrottle={32}
               ListEmptyComponent={
                 <View style={styles.empty}>
-                  <Text style={styles.emptyTitle}>Hallo 👋</Text>
+                  <Text style={styles.emptyTitle}>Hallo</Text>
                   <Text style={styles.emptyText}>Wie kann ich dir heute helfen?</Text>
                   <View style={styles.suggestionRow}>
                     {["Fasse den Tag zusammen", "Recherchiere etwas für mich", "Schreibe mir eine Nachricht", "Erkläre mir ein Thema"].map((s) => (
@@ -1431,7 +1540,7 @@ export default function App() {
                         thisStatus.startsWith("kompaktiere Kontext") ? (
                           <CompactionBar />
                         ) : (
-                          <Text style={styles.thinkingText} numberOfLines={1}>⚙️ {thisStatus}</Text>
+                          <Text style={styles.thinkingText} numberOfLines={1}>{thisStatus}</Text>
                         )
                       ) : listening ? (
                         <Text style={styles.thinkingText} numberOfLines={1}>höre zu …</Text>
@@ -1566,9 +1675,9 @@ export default function App() {
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={
                 <View style={styles.empty}>
-                  <Text style={styles.emptyTitle}>Noch keine Chats 💬</Text>
+                  <Text style={styles.emptyTitle}>Noch keine Chats</Text>
                   <Text style={styles.emptyText}>
-                    Starte deine erste Unterhaltung –{"\n"}tippe oben auf „✚ Neu".
+                    Starte deine erste Unterhaltung –{"\n"}tippe oben auf „Neu".
                   </Text>
                 </View>
               }
@@ -1597,14 +1706,14 @@ export default function App() {
             </Text>
             {taskList.length === 0 ? (
               <View style={styles.empty}>
-                <Text style={styles.emptyTitle}>Noch keine Aufgaben 📋</Text>
+                <Text style={styles.emptyTitle}>Noch keine Aufgaben</Text>
               </View>
             ) : (
               taskList.map(renderTask)
             )}
 
             <View style={styles.schedSection}>
-              <Text style={styles.schedHeader}>⏰ Routinen (wiederkehrend)</Text>
+              <Text style={styles.schedHeader}>Routinen (wiederkehrend)</Text>
               <TextInput
                 style={styles.schedMessageInput}
                 value={schedInput}
@@ -1674,7 +1783,10 @@ export default function App() {
                 disabled={!schedInput.trim()}
                 style={[styles.schedAddBtn, !schedInput.trim() && styles.sendBtnDisabled]}
               >
-                <Text style={styles.schedAddText}>⏰ Routine anlegen</Text>
+                <View style={styles.chipRow}>
+                  <Ionicons name="time-outline" size={15} color="#fff" />
+                  <Text style={styles.schedAddText}>Routine anlegen</Text>
+                </View>
               </Pressable>
               {scheduleList.length > 0 ? (
                 <View style={styles.schedList}>
@@ -1751,6 +1863,7 @@ const styles = StyleSheet.create({
   aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   activityWrap: { gap: 6, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },
   activitySummary: { color: colors.muted, fontSize: 12, fontWeight: "600", marginBottom: 2 },
+  activityToggle: { paddingVertical: 4 },
   toolCard: {
     backgroundColor: colors.surface,
     borderWidth: 1,
@@ -1803,8 +1916,10 @@ const styles = StyleSheet.create({
   suggestionChipText: { fontSize: 14, color: colors.text },
   thinking: { flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 8, paddingHorizontal: 4 },
   thinkingText: { color: colors.muted, fontSize: 13, flex: 1 },
-  thinkingBlock: { paddingVertical: 8, paddingHorizontal: 4, gap: 4 },
-  thinkingHint: { color: colors.accent, fontSize: 12, fontWeight: "600" },
+  thinkingBlock: { backgroundColor: colors.surface2, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 8 },
+  thinkingHeader: { flexDirection: "row", alignItems: "center", gap: 8 },
+  thinkingScroll: { maxHeight: 220, marginTop: 8 },
+  thinkingDetail: { color: colors.muted, fontSize: 13, lineHeight: 19, fontFamily: monoFontFamily },
   errorCard: { marginTop: 8, padding: 12, borderRadius: 12, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, gap: 8 },
   errorCardText: { color: colors.danger, fontSize: 13, fontWeight: "600" },
   errorCardTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
@@ -1953,7 +2068,7 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: 999,
+    borderRadius: 20,
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 10,
