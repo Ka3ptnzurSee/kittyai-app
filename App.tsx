@@ -219,11 +219,12 @@ function ToolCard({ a }: { a: Activity }) {
 // Verhindert große weiße Blöcke, wenn die Antwort nur aus Tool-Aufrufen besteht.
 function ActivityList({ activity }: { activity: Activity[] }) {
   const [open, setOpen] = useState(false);
+  const hasError = activity.some((a) => a.status === "error");
   return (
     <View style={styles.activityWrap}>
       <Pressable onPress={() => setOpen((o) => !o)} style={styles.activityToggle}>
-        <Text style={styles.activitySummary}>
-          {open ? "▴" : "▾"} {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} {open ? "" : "· versteckt"}
+        <Text style={[styles.activitySummary, hasError && { color: colors.danger }]}>
+          {hasError ? "⚠ " : ""}{open ? "▴" : "▾"} {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} {open ? "" : "· versteckt"}
         </Text>
       </Pressable>
       {open ? activity.map((a) => <ToolCard key={a.id} a={a} />) : null}
