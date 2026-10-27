@@ -84,10 +84,10 @@ function boxStyle(props: Props): Record<string, unknown> {
   const align = str(getProp(props, "align"), "");
   const justify = str(getProp(props, "justify"), "");
   const bg = str(getProp(props, "background"), "");
-  const w = num(getProp(props, "width"), 0);
-  const h = num(getProp(props, "height"), 0);
+  const w = Math.max(0, num(getProp(props, "width"), 0));
+  const h = Math.max(0, num(getProp(props, "height"), 0));
   const flex = num(getProp(props, "flex"), 0);
-  const maxW = num(getProp(props, "maxWidth"), 0);
+  const maxW = Math.max(0, num(getProp(props, "maxWidth"), 0));
   const s: Record<string, unknown> = {};
   if (pad) s.padding = pad;
   if (radius) s.borderRadius = radius;
@@ -291,7 +291,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "Checkbox":
       return <CheckboxWidget props={props} />;
     case "Select": {
-      const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]) : [];
+      const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 200) : [];
       const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>).label ?? (o as Record<string, unknown>).value ?? String(o)));
       return (
         <View style={styles.select}>
@@ -317,9 +317,9 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     // ── Inhalt ──
     case "Image": {
       const src = str(getProp(props, "src"), str(getProp(props, "url"), ""));
-      const w = num(getProp(props, "width"), 0);
-      const h = num(getProp(props, "height"), 0);
-      const radius = num(getProp(props, "radius"), 12);
+      const w = Math.max(0, num(getProp(props, "width"), 0));
+      const h = Math.max(0, num(getProp(props, "height"), 0));
+      const radius = Math.max(0, num(getProp(props, "radius"), 12));
       if (!src) return null;
       // Schema-Allowlist: nur https + whitelistete data:image/* (kein file:///http:///Tracking).
       if (!isSafeImageSrc(src)) return null;
@@ -378,7 +378,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         </View>
       );
     case "Table": {
-      const columns = Array.isArray(getProp(props, "columns")) ? (getProp(props, "columns") as unknown[]) : [];
+      const columns = Array.isArray(getProp(props, "columns")) ? (getProp(props, "columns") as unknown[]).slice(0, 50) : [];
       const rows = Array.isArray(getProp(props, "rows")) ? (getProp(props, "rows") as unknown[]).slice(0, 500) : [];
       const headers = columns.map((c) => str((c as Record<string, unknown>)?.label ?? (c as Record<string, unknown>)?.header, String(c)));
       const keys = columns.map((c) => str((c as Record<string, unknown>)?.key, ""));
@@ -493,14 +493,17 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "TableHeader":
     case "TableCell":
       return <Text style={styles.text}>{str(getProp(props, "label"), str(getProp(props, "header"), ""))}</Text>;
-    case "SearchImage":
+    case "SearchImage": {
+      const src = str(getProp(props, "src"), str(getProp(props, "searchImage"), ""));
+      if (!src || !isSafeImageSrc(src)) return null;
       return (
         <Image
-          source={{ uri: str(getProp(props, "src"), str(getProp(props, "searchImage"), "")) }}
+          source={{ uri: src }}
           resizeMode="cover"
-          style={{ width: num(getProp(props, "width"), 0) || "100%", height: num(getProp(props, "height"), 0) || 220, borderRadius: num(getProp(props, "radius"), 12), backgroundColor: colors.surface2 }}
+          style={{ width: Math.max(0, num(getProp(props, "width"), 0)) || "100%", height: Math.max(0, num(getProp(props, "height"), 0)) || 220, borderRadius: Math.max(0, num(getProp(props, "radius"), 12)), backgroundColor: colors.surface2 }}
         />
       );
+    }
     case "HorizontalSwipeSurface":
     case "FlashcardFlip":
     case "FlashcardFlipStack":

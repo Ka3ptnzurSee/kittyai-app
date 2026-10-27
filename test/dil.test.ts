@@ -127,6 +127,10 @@ test("isSafeImageSrc erlaubt nur https und data:image/*", () => {
   assert.strictEqual(isSafeImageSrc("https://localhost/a.png"), false);
   assert.strictEqual(isSafeImageSrc("https://192.168.1.1/a.png"), false);
   assert.strictEqual(isSafeImageSrc("https://169.254.169.254/a.png"), false);
+  // userinfo-Trick + DNS-Rebinding-artige Hosts (Regression aus Review Runde 1)
+  assert.strictEqual(isSafeImageSrc("https://irgendwas@127.0.0.1/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://user:pass@10.0.0.1/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://localhost.evil.com/a.png"), true); // echter öffentlicher Host bleibt erlaubt
 });
 
 test("resolveDil: Each iteriert und setzt item/index", () => {

@@ -629,10 +629,22 @@ const MAX_RESOLVED_NODES = 10_000;
 
 /** Schema-Allowlist für Bild-URLs (verhindert Client-SSRF/Tracking via file://, http://, Loopback/private Hosts). */
 const BLOCKED_IMAGE_HOST = /^https:\/\/(localhost(\/|:|$)|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?(\/|:|$))/i;
+const BLOCKED_HOSTNAME = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?)$/i;
 
 export function isSafeImageSrc(src: string): boolean {
   if (src.length > 50_000) return false; // Base64-/Riesen-Payload-Cap
-  if (/^https:\/\//i.test(src)) return !BLOCKED_IMAGE_HOST.test(src);
+  if (/^https:\/\//i.test(src)) {
+    if (BLOCKED_IMAGE_HOST.test(src)) return false; // schneller String-Check (wie bisher)
+    try {
+      const u = new URL(src);
+      // userinfo-Trick (https://x@127.0.0.1/) + Hostname-Block (inkl. DNS-Rebinding-artiger Hosts) blocken.
+      if (u.username || u.password) return false;
+      if (BLOCKED_HOSTNAME.test(u.hostname)) return false;
+    } catch {
+      return false; // unparsbare URL → nicht vertrauenswürdig
+    }
+    return true;
+  }
   return /^data:image\/(png|jpe?g|webp|gif);base64,/i.test(src.slice(0, 64));
 }
 
