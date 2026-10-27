@@ -100,50 +100,50 @@ export type ToolMeta = { label: string; icon: string; category: ToolCategory };
 
 const TOOL_META: Record<string, ToolMeta> = {
   // System / Shell
-  bash: { label: "Befehl", icon: "💻", category: "system" },
+  bash: { label: "Befehl", icon: "⌘", category: "system" },
   // Dateien
-  read: { label: "Datei lesen", icon: "📄", category: "file" },
-  write: { label: "Datei schreiben", icon: "✍️", category: "file" },
-  edit: { label: "Datei bearbeiten", icon: "✏️", category: "file" },
+  read: { label: "Datei lesen", icon: "¶", category: "file" },
+  write: { label: "Datei schreiben", icon: "✎", category: "file" },
+  edit: { label: "Datei bearbeiten", icon: "✏", category: "file" },
   // Web
-  web_fetch: { label: "Webseite abrufen", icon: "🌐", category: "web" },
+  web_fetch: { label: "Webseite abrufen", icon: "◎", category: "web" },
   // GitHub
-  github_read_repo: { label: "Repo ansehen", icon: "🐙", category: "github" },
-  github_create_issue: { label: "Issue anlegen", icon: "🐙", category: "github" },
+  github_read_repo: { label: "Repo ansehen", icon: "◈", category: "github" },
+  github_create_issue: { label: "Issue anlegen", icon: "◈", category: "github" },
   // Gedächtnis
-  memory_add: { label: "Merkzettel", icon: "🧠", category: "memory" },
-  memory_replace: { label: "Merkzettel ändern", icon: "🧠", category: "memory" },
-  memory_remove: { label: "Merkzettel löschen", icon: "🧠", category: "memory" },
-  memory_search: { label: "Gedächtnis durchsuchen", icon: "🧠", category: "memory" },
-  session_search: { label: "Verlauf durchsuchen", icon: "🔍", category: "search" },
+  memory_add: { label: "Merkzettel", icon: "◉", category: "memory" },
+  memory_replace: { label: "Merkzettel ändern", icon: "◉", category: "memory" },
+  memory_remove: { label: "Merkzettel löschen", icon: "◉", category: "memory" },
+  memory_search: { label: "Gedächtnis durchsuchen", icon: "◉", category: "memory" },
+  session_search: { label: "Verlauf durchsuchen", icon: "⌕", category: "search" },
   // Skills
-  skill_search: { label: "Skill suchen", icon: "🧩", category: "search" },
-  skill_load: { label: "Skill laden", icon: "🧩", category: "search" },
-  skill_manage: { label: "Skill verwalten", icon: "🧩", category: "search" },
-  skill_fetch_online: { label: "Skill online suchen", icon: "🧩", category: "search" },
+  skill_search: { label: "Skill suchen", icon: "◆", category: "search" },
+  skill_load: { label: "Skill laden", icon: "◆", category: "search" },
+  skill_manage: { label: "Skill verwalten", icon: "◆", category: "search" },
+  skill_fetch_online: { label: "Skill online suchen", icon: "◆", category: "search" },
   // Agenten
-  subagent: { label: "Subagent", icon: "🤖", category: "agent" },
-  codemode: { label: "Codemode-Skript", icon: "⚡", category: "agent" },
+  subagent: { label: "Subagent", icon: "▣", category: "agent" },
+  codemode: { label: "Codemode-Skript", icon: "▶", category: "agent" },
   // Kalender / Zeit
-  time_now: { label: "Uhrzeit", icon: "🕐", category: "calendar" },
-  calendar_list_events: { label: "Kalender lesen", icon: "📅", category: "calendar" },
-  calendar_create_event: { label: "Termin anlegen", icon: "📅", category: "calendar" },
+  time_now: { label: "Uhrzeit", icon: "◷", category: "calendar" },
+  calendar_list_events: { label: "Kalender lesen", icon: "▤", category: "calendar" },
+  calendar_create_event: { label: "Termin anlegen", icon: "▤", category: "calendar" },
   // Sonstiges
-  git_status: { label: "Git-Status", icon: "🌿", category: "system" },
-  email_send: { label: "E-Mail senden", icon: "✉️", category: "web" },
+  git_status: { label: "Git-Status", icon: "⌘", category: "system" },
+  email_send: { label: "E-Mail senden", icon: "◎", category: "web" },
 };
 
 /** Menschlich lesbare Beschreibung für ein pi-Werkzeug (mit Fallback). */
 export function toolMeta(tool: string): ToolMeta {
   const exact = TOOL_META[tool];
   if (exact) return exact;
-  if (tool.startsWith("memory_")) return { label: "Gedächtnis", icon: "🧠", category: "memory" };
-  if (tool.startsWith("calendar_")) return { label: "Kalender", icon: "📅", category: "calendar" };
-  if (tool.startsWith("github_")) return { label: "GitHub", icon: "🐙", category: "github" };
-  if (tool.startsWith("skill_")) return { label: "Skill", icon: "🧩", category: "search" };
-  if (tool.startsWith("web_") || tool.startsWith("http")) return { label: "Web", icon: "🌐", category: "web" };
-  if (tool.startsWith("image") || tool.startsWith("tts") || tool.startsWith("stt")) return { label: tool, icon: "🎙️", category: "media" };
-  return { label: tool, icon: "🔧", category: "other" };
+  if (tool.startsWith("memory_")) return { label: "Gedächtnis", icon: "◉", category: "memory" };
+  if (tool.startsWith("calendar_")) return { label: "Kalender", icon: "▤", category: "calendar" };
+  if (tool.startsWith("github_")) return { label: "GitHub", icon: "◈", category: "github" };
+  if (tool.startsWith("skill_")) return { label: "Skill", icon: "◆", category: "search" };
+  if (tool.startsWith("web_") || tool.startsWith("http")) return { label: "Web", icon: "◎", category: "web" };
+  if (tool.startsWith("image") || tool.startsWith("tts") || tool.startsWith("stt")) return { label: tool, icon: "▢", category: "media" };
+  return { label: tool, icon: "⌁", category: "other" };
 }
 
 /** Nur das Label (deutscher Name) für ein Tool – für kompakte Anzeige. */
@@ -282,4 +282,84 @@ export function cronLabel(cron: string): string {
   if (dom === "*" && month === "*" && /^[0-6]$/.test(dow)) return `jeden ${WEEKDAYS_DE[Number(dow)]} um ${time}`;
   if (dom !== "*" && month === "*" && dow === "*" && /^\d+$/.test(dom)) return `monatlich am ${dom}. um ${time}`;
   return cron;
+}
+
+// ---------------------------------------------------------------------------
+// SSE-Parser (robust) – für den Chat-Stream vom Backend.
+//
+// Der Server sendet `data: {json}\n\n` (ein Event pro Block). Ein naiver
+// `buffer.indexOf("\n\n")`-Parser bricht bei drei Dingen:
+//   1. Proxys/HTTP können `\r\n` liefern → Delimiter wird nie gefunden.
+//   2. `data:` darf laut SSE-Standard mehrzeilig sein → nur die erste Zeile zählt.
+//   3. Ein hängendes Event ohne finales `\n\n` (Stream-Ende) geht verloren.
+// Diese Klasse behandelt alle drei plus Puffer-Deckelung (kein stilles
+// Verwerfen von Chunks, kein unbegrenztes Puffer-Wachstum).
+// ---------------------------------------------------------------------------
+
+/** Einzelne SSE-Events, die größer sind, werden verworfen statt synchron auf dem
+ *  JS-Thread geparst — verhindert UI-Jank durch ein einzelnes Riesen-Event. */
+const MAX_EVENT_CHARS = 65536;
+
+/** Parst einen einzelnen SSE-Event-Block (Zeilen bis zur Trennzeile `\n\n`). */
+function parseSseEvent(raw: string): unknown {
+  const data = raw
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => l.slice(5).trim())
+    .join("\n");
+  if (!data) return undefined;
+  if (data.length > MAX_EVENT_CHARS) return undefined; // Riesen-Event nicht synchron parsen
+  try {
+    return JSON.parse(data);
+  } catch {
+    return undefined; // einzelnes kaputtes Event überspringen, Stream nicht abbrechen
+  }
+}
+
+export class SseParser {
+  private buffer = "";
+  private maxBufferChars: number;
+
+  constructor(maxBufferChars = 200000) {
+    this.maxBufferChars = maxBufferChars;
+  }
+
+  /** Füttert einen dekodierten Text-Chunk und liefert alle darin vollständig
+   *  enthaltenen Events als geparste Objekte zurück. */
+  push(chunk: string): unknown[] {
+    const out: unknown[] = [];
+    // CRLF kann an einer Chunk-Grenze zerreißen (\r am Ende des einen Chunks,
+    // \n am Anfang des nächsten). Überhängendes \r abschneiden, damit der
+    // \n\n-Delimiter zuverlässig gefunden wird.
+    if (this.buffer.endsWith("\r") && chunk.startsWith("\n")) {
+      this.buffer = this.buffer.slice(0, -1);
+    }
+    this.buffer += chunk.replace(/\r\n/g, "\n");
+    let idx: number;
+    while ((idx = this.buffer.indexOf("\n\n")) !== -1) {
+      const raw = this.buffer.slice(0, idx);
+      this.buffer = this.buffer.slice(idx + 2);
+      const evt = parseSseEvent(raw);
+      if (evt !== undefined) out.push(evt);
+    }
+    // Deckel: riesiger Rest ohne Delimiter (hängendes/kaputtes Event) → kürzen,
+    // damit der Puffer nicht unbegrenzt wächst.
+    if (this.buffer.length > this.maxBufferChars) {
+      this.buffer = this.buffer.slice(-this.maxBufferChars);
+    }
+    return out;
+  }
+
+  /** Stream zu Ende: letzten Rest (Event ohne finales `\n\n`) noch auswerten. */
+  flush(): unknown[] {
+    const out: unknown[] = [];
+    const raw = this.buffer;
+    this.buffer = "";
+    if (raw.trim()) {
+      const evt = parseSseEvent(raw);
+      if (evt !== undefined) out.push(evt);
+    }
+    return out;
+  }
 }

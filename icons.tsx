@@ -1,29 +1,34 @@
-import { Text } from "react-native";
+import type { ComponentProps } from "react";
+import { Ionicons as VectorIonicons } from "@expo/vector-icons";
 
-// Einfache Text-Icon-Komponente als Ersatz für @expo/vector-icons (Ionicons).
-// Verhindert natives Font-Modul beim Start (verursachte sofortigen Start-Crash).
-const GLYPHS: Record<string, string> = {
-  "key-outline": "🔑",
-  "checkmark-circle-outline": "✓",
-  "close-circle-outline": "✕",
-  "alert-circle-outline": "⚠",
-  refresh: "↻",
-  "chatbubbles-outline": "💬",
-  close: "✕",
-  "trash-outline": "🗑",
-  add: "＋",
-  "volume-high-outline": "🔊",
-  "chatbubble-outline": "💬",
-  "clipboard-outline": "📋",
-  "document-text-outline": "📄",
-  "attach-outline": "📎",
-  "image-outline": "🖼",
-  "color-palette-outline": "🎨",
-  stop: "■",
-  mic: "🎤",
-  "arrow-up": "↑",
-};
+// Echte Vektor-Icons (Ionicons → SF-Symbol-ähnlich, statt Unicode-/Emoji-Glyphen).
+//
+// WICHTIG (Start-Crash-Fix vom 26.10.2026): Der frühere Start-Crash lag NICHT
+// an @expo/vector-icons selbst, sondern an einer Versions-Kollision — es war
+// expo-font@58 (hoisted) installiert, während expo@57 die ABI-kompatible
+// expo-font@57.0.4 braucht. Fix: package.json pinnt jetzt
+//   "@expo/vector-icons": "^15.0.2"  +  "expo-font": "~57.0.4"
+// (via `npx expo install`). Damit lädt die Icon-Komponente die Schrift korrekt
+// über expo-font und rendert echte Glyphen statt Text-Ersatz.
 
-export function Ionicons({ name, size = 16, color }: { name: string; size?: number; color?: string }) {
-  return <Text style={{ fontSize: size, color, lineHeight: Math.round(size * 1.2) }}>{GLYPHS[name] || "•"}</Text>;
+// Lädt die Ionicons-Schrift einmal beim App-Start (verhindert leeren Frame/FOUC
+// beim allerersten Icon-Render). Fällt der Preload aus, lädt die Komponente die
+// Schrift selbst in componentDidMount nach — kein Crash.
+let preloaded = false;
+export async function preloadIcons(): Promise<void> {
+  if (preloaded) return;
+  try {
+    await (VectorIonicons as any).loadFont();
+    preloaded = true;
+  } catch {
+    // ignorieren – Lazy-Load übernimmt
+  }
+}
+
+export function Ionicons(props: {
+  name: ComponentProps<typeof VectorIonicons>["name"];
+  size?: number;
+  color?: string;
+}) {
+  return <VectorIonicons {...props} />;
 }
