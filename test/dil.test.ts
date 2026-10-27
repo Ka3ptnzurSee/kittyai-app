@@ -133,6 +133,34 @@ test("isSafeImageSrc erlaubt nur https und data:image/*", () => {
   assert.strictEqual(isSafeImageSrc("https://localhost.evil.com/a.png"), true); // echter öffentlicher Host bleibt erlaubt
 });
 
+test("isSafeImageSrc blockt IPv6-/IP-Notations-Bypässe (Review Runde 2)", () => {
+  // IPv4-mapped IPv6 → eingebettete IPv4 ist Loopback/private
+  assert.strictEqual(isSafeImageSrc("https://[::ffff:127.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[::ffff:10.0.0.1]/a.png"), false);
+  // IPv6-Literal: loopback/unspec/link-local/ULA
+  assert.strictEqual(isSafeImageSrc("https://[::1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[::]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[fe80::1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[fc00::1]/a.png"), false);
+  // Integer/Hex/Oktal-Notation normalisiert zu Loopback (WHATWG)
+  assert.strictEqual(isSafeImageSrc("https://2130706433/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://0x7f000001/a.png"), false);
+  // trailing dot + „this host" + CGNAT
+  assert.strictEqual(isSafeImageSrc("https://localhost.:8080/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://0.0.0.0/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://100.64.0.1/a.png"), false);
+});
+
+test("Each: itemName/indexName '__proto__' wird auf Default zurückgewiesen", () => {
+  const nodes = resolveDilRoot(
+    { type: "Each", items: ["a", "b"], itemName: "__proto__", children: [{ type: "Text", "$value": "item" }] },
+    {}
+  );
+  // itemName fällt auf "item" zurück → $value="item" löst gegen die Items auf (kein Prototype-Set).
+  const texts = nodes.filter((n) => n.kind === "widget" && (n as { type: string }).type === "Text").map((n) => (n as { props: Record<string, unknown> }).props.$value);
+  assert.deepStrictEqual(texts, ["a", "b"]);
+});
+
 test("resolveDil: Each iteriert und setzt item/index", () => {
   const tree = resolveDilRoot(
     { type: "Each", of: "$products", itemName: "p", children: [{ type: "Text", $value: "$p.name" }] },

@@ -535,8 +535,13 @@ export function resolveDil(node: DilNode, scope: Record<string, unknown> = {}, d
       try { items = evalCel(itemsRaw as string, scope); } catch { items = []; }
     }
     if (!Array.isArray(items)) return out;
-    const itemName = (root.itemName ?? root.item ?? "item") as string;
-    const indexName = (root.indexName ?? root.index ?? "index") as string;
+    const rawItemName = (root.itemName ?? root.item ?? "item") as string;
+    const rawIndexName = (root.indexName ?? root.index ?? "index") as string;
+    // itemName/indexName validieren: nur Identifier, keine Proto-Setter (__proto__/constructor/prototype).
+    const SAFE_IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+    const BLOCKED_IDENT = new Set(["__proto__", "constructor", "prototype"]);
+    const itemName = SAFE_IDENT.test(rawItemName) && !BLOCKED_IDENT.has(rawItemName) ? rawItemName : "item";
+    const indexName = SAFE_IDENT.test(rawIndexName) && !BLOCKED_IDENT.has(rawIndexName) ? rawIndexName : "index";
     const cap = Math.min(items.length, 500); // Cap gegen DoS (Riesen-Array)
     for (let index = 0; index < cap; index++) {
       if (++ctx.count > MAX_RESOLVED_NODES) break; // JEDE Iteration zählt gegen das Budget (auch bei leeren children)
@@ -628,24 +633,51 @@ type ResolveCtx = { count: number };
 const MAX_RESOLVED_NODES = 10_000;
 
 /** Schema-Allowlist für Bild-URLs (verhindert Client-SSRF/Tracking via file://, http://, Loopback/private Hosts). */
-const BLOCKED_IMAGE_HOST = /^https:\/\/(localhost(\/|:|$)|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?(\/|:|$))/i;
-const BLOCKED_HOSTNAME = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|\[?::1\]?)$/i;
+const PRIVATE_V4 = [
+  /^0\./, /^10\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^127\./,
+  /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
+  /^192\.0\.0\./, /^198\.18\./, /^198\.51\.100\./, /^203\.0\.113\./,
+];
 
 export function isSafeImageSrc(src: string): boolean {
-  if (src.length > 50_000) return false; // Base64-/Riesen-Payload-Cap
-  if (/^https:\/\//i.test(src)) {
-    if (BLOCKED_IMAGE_HOST.test(src)) return false; // schneller String-Check (wie bisher)
-    try {
-      const u = new URL(src);
-      // userinfo-Trick (https://x@127.0.0.1/) + Hostname-Block (inkl. DNS-Rebinding-artiger Hosts) blocken.
-      if (u.username || u.password) return false;
-      if (BLOCKED_HOSTNAME.test(u.hostname)) return false;
-    } catch {
-      return false; // unparsbare URL → nicht vertrauenswürdig
+  if (typeof src !== "string" || src.length > 50_000) return false;
+  // data:-Bilder sind die einzige erlaubte Nicht-https-Quelle.
+  if (/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(src.slice(0, 64))) return true;
+  if (!/^https:\/\//i.test(src)) return false;
+
+  let u: URL;
+  try { u = new URL(src); } catch { return false; }
+  if (u.username || u.password) return false; // userinfo-Trick (https://x@127.0.0.1/)
+
+  let host = u.hostname.replace(/\.$/, "").toLowerCase(); // trailing dot (localhost.)
+  if (host === "localhost") return false;
+
+  // IPv4-mapped IPv6 ([::ffff:127.0.0.1] bzw. [::ffff:7f00:1]) → eingebettete IPv4 prüfen.
+  const mappedDotted = host.match(/^\[?::ffff:(\d+\.\d+\.\d+\.\d+)\]?$/i);
+  if (mappedDotted) {
+    host = mappedDotted[1];
+  } else {
+    const mappedHex = host.match(/^\[?::ffff:([0-9a-f]+):([0-9a-f]+)\]?$/i);
+    if (mappedHex) {
+      const hi = parseInt(mappedHex[1], 16);
+      const lo = parseInt(mappedHex[2], 16);
+      if (Number.isFinite(hi) && Number.isFinite(lo)) {
+        host = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      }
     }
+  }
+
+  if (host.startsWith("[")) {
+    // IPv6-Literal: unspec/loopback/link-local/ULA blocken.
+    const bare = host.replace(/^\[|\]$/g, "");
+    if (bare === "::" || bare === "::1") return false;
+    if (/^f[eab][0-9a-f]/i.test(bare)) return false; // fe80..febf link-local
+    if (/^f[cd]/i.test(bare)) return false; // fc00::/7 ULA
     return true;
   }
-  return /^data:image\/(png|jpe?g|webp|gif);base64,/i.test(src.slice(0, 64));
+  // new URL() normalisiert Integer/Hex/Oktal-Notation zu Dotted-Quad (WHATWG).
+  if (PRIVATE_V4.some((r) => r.test(host))) return false;
+  return true;
 }
 
 /** Eine DIL-Antwort (JSON-Wert) vollständig auflösen. */

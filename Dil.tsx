@@ -245,7 +245,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         </View>
       );
     case "Spacer":
-      return <View style={{ height: num(getProp(props, "minSize"), 8) }} />;
+      return <View style={{ height: Math.max(0, num(getProp(props, "minSize"), 8)) }} />;
     case "Divider":
       return <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: color(getProp(props, "color"), colors.border), marginVertical: num(getProp(props, "spacing"), 8) }} />;
 
@@ -292,7 +292,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return <CheckboxWidget props={props} />;
     case "Select": {
       const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 200) : [];
-      const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>).label ?? (o as Record<string, unknown>).value ?? String(o)));
+      const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>)?.label ?? (o as Record<string, unknown>)?.value ?? String(o)));
       return (
         <View style={styles.select}>
           {opts.map((o, i) => (
@@ -334,8 +334,8 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "Badge": {
       const label = str(getProp(props, "label"), "");
       const c = color(str(getProp(props, "color"), ""), colors.accent);
-      // Alpha-Suffix ("22") funktioniert nur bei #hex — bei rgb()/hsl() unverändert nutzen.
-      const bg = /^#/.test(c) ? c + "22" : c;
+      // Alpha-Suffix ("22") nur bei 6-stelligem Hex — sonst (rgb()/hsl()/#abc/#rrggbbaa) unverändert.
+      const bg = /^#[0-9a-f]{6}$/i.test(c) ? c + "22" : c;
       return (
         <View style={[styles.badge, { backgroundColor: bg, borderColor: c }]}>
           <Text style={{ color: c, fontWeight: "700", fontSize: 12 }}>{label}</Text>
@@ -392,7 +392,8 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
             </View>
           ) : null}
           {rows.map((r, ri) => {
-            const row = r as Record<string, unknown>;
+            if (r == null) return null; // null/undefined-Zeile überspringen statt crash
+            const row = (typeof r === "object" && !Array.isArray(r)) ? r as Record<string, unknown> : { value: r };
             const cells = keys.length
               ? keys.map((k) => str(row[k], ""))
               : Array.isArray(r) ? (r as unknown[]).map((c) => str(c, "")) : Object.values(row).map((v) => str(v, ""));
@@ -421,7 +422,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return <CheckboxWidget props={{ ...props, label: getProp(props, "label") }} />;
     case "Icon": {
       const name = str(getProp(props, "name"), "");
-      const size = num(getProp(props, "size"), 18);
+      const size = Math.max(0, num(getProp(props, "size"), 18));
       const c = color(str(getProp(props, "color"), ""), colors.text);
       const icon = str(getProp(props, "icon"), name);
       return <Text style={{ fontSize: size, color: c }}>{icon || "◆"}</Text>;
@@ -466,7 +467,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       );
     case "Favicon": {
       const url = str(getProp(props, "url"), "");
-      const size = num(getProp(props, "size"), 16);
+      const size = Math.max(0, num(getProp(props, "size"), 16));
       if (url && isSafeImageSrc(url)) {
         return <Image source={{ uri: url }} style={{ width: size, height: size, borderRadius: size / 4 }} />;
       }
