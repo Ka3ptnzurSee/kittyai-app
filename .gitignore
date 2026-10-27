@@ -46,3 +46,7 @@ credentials.json
 *.p12
 *.mobileprovision
 *.p8
+
+# build tooling logs
+*.log
+build-monitor.log
