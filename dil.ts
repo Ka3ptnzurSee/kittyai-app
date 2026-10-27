@@ -640,8 +640,26 @@ export function isSafeImageSrc(src: string): boolean {
 export function resolveDilRoot(json: unknown, scope: Record<string, unknown> = {}): ResolvedNode[] {
   const parsed = parseDil(json);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && "kind" in parsed && (parsed as DilV2Root).kind === "v2") {
-    // v2: Render-Funktion muss in der Sandbox laufen — hier nur ein Platzhalter.
-    return [{ kind: "widget", type: "ClientDefinedWidget", props: { fallback: "[DIL v2 — Sandbox-Render]", code: (parsed as DilV2Root).code }, children: [] }];
+    const v2 = parsed as DilV2Root;
+    // v2: `code`/`compiledDil` sind vom Modell generierte JS-Render-Funktionen, die in der
+    // QuickJS-Sandbox laufen. Wir führen KEINEN Fremdcode aus (kein eval/Function-Konstruktor
+    // — Sicherheitshärtung). Stattdessen:
+    //   (1) appData als deklarativen Baum rendern, falls es Widget-Struktur trägt,
+    //   (2) constants als CEL-Scope für appData-Referenzen ($x) bereitstellen,
+    //   (3) sonst ein sauberer Fallback.
+    const data = v2.appData;
+    if (data != null && (Array.isArray(data) || (typeof data === "object"))) {
+      const mergedScope: Record<string, unknown> = { ...scope, ...(v2.constants ?? {}) };
+      const dataNodes = resolveDil(data as DilNode, mergedScope);
+      if (dataNodes.length) return dataNodes;
+    }
+    return [{ kind: "widget", type: "ClientDefinedWidget", props: { fallback: "Interaktive Ansicht (Sandbox nicht verfügbar)", constants: v2.constants }, children: [] }];
   }
   return resolveDil(parsed as DilNode, scope);
+}
+
+/** True, wenn die Antwort eine v2-Root (code/compiledDil) ist. */
+export function isDilV2(json: unknown): boolean {
+  const parsed = parseDil(json);
+  return !!parsed && typeof parsed === "object" && !Array.isArray(parsed) && "kind" in parsed && (parsed as DilV2Root).kind === "v2";
 }

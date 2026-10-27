@@ -31,9 +31,10 @@ import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
+import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
 import { DilRichText } from "./Dil";
-import { aiFontFamily, colors, monoFontFamily } from "./theme";
+import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
@@ -434,6 +435,7 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
+  const [chatModel, setChatModel] = useState<"pro" | "flash">("pro"); // Modellwechsel pro (Reasoning) ↔ flash (schnell)
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [apiToken, setApiToken] = useState("");
   const [cwd, setCwd] = useState("");
@@ -577,6 +579,7 @@ export default function App() {
   useEffect(() => {
     (async () => {
       preloadIcons(); // Vektor-Icons (Ionicons) beim Start laden — kein FOUC/Start-Crash
+      preloadFonts(); // echte Claude-Fonts (Anthropic Serif/Sans + JetBrains Mono) laden
       // Server-URL ist fest verdrahtet (detectBase) — keine gespeicherte/manuelle URL mehr.
       const url = serverUrl;
       let savedToken = "";
@@ -1027,7 +1030,7 @@ export default function App() {
     const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId }),
+      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model: chatModel }),
       signal: controller.signal,
     });
 
@@ -1517,6 +1520,9 @@ export default function App() {
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
             <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
+          <Pressable onPress={() => setChatModel((m) => (m === "pro" ? "flash" : "pro"))} style={[styles.iconBtn, chatModel === "pro" && styles.chipActive]} hitSlop={6}>
+            <Text style={[styles.modelChipText, chatModel === "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{chatModel === "pro" ? "PRO" : "FLASH"}</Text>
+          </Pressable>
         </View>
       </View>
 
@@ -1881,6 +1887,7 @@ const styles = StyleSheet.create({
   chipNew: { backgroundColor: colors.accent },
   chipNewText: { fontSize: 13, color: "#fff", fontWeight: "600" },
   chipRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  modelChipText: { fontSize: 10, fontWeight: "800", letterSpacing: 0.5 },
   iconBtn: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface2 },
   tabs: { flexDirection: "row", backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
   tab: { flex: 1, alignItems: "center", paddingVertical: 11 },
@@ -1891,14 +1898,14 @@ const styles = StyleSheet.create({
   list: { flex: 1 },
   listContent: { padding: 12, paddingBottom: 16 },
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
-  // Claude-Look: User rechts in warmer heller Blase, KI flach (kein Kasten/Rahmen).
-  userBubble: { alignSelf: "flex-end", backgroundColor: colors.surface2 },
+  // ChatGPT-Look: User rechts in hellgrauer Blase (oai-bg-user-message #0000000D), KI flach.
+  userBubble: { alignSelf: "flex-end", backgroundColor: oaicolors.bgUserMessage },
   aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: "transparent" },
   aiBubbleDone: { alignSelf: "flex-start", backgroundColor: "transparent" },
   msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
-  userText: { color: colors.text, fontSize: 16, lineHeight: 22, fontFamily: Platform.select({ ios: undefined, android: "sans-serif" }) },
-  aiText: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
+  userText: { color: colors.text, fontSize: 16, lineHeight: 22, fontFamily: uiFontFamily },
+  aiText: { color: colors.text, fontSize: 17, lineHeight: 24, fontFamily: aiFontFamily },
   activityWrap: { gap: 6, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },
   activitySummary: { color: colors.muted, fontSize: 12, fontWeight: "600", marginBottom: 2 },
   activityToggle: { paddingVertical: 4 },
@@ -2104,15 +2111,14 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 42,
     maxHeight: 120,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderWidth: 0,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 10,
     fontSize: 16,
     color: colors.text,
-    backgroundColor: colors.surface,
+    backgroundColor: colors.surface2,
   },
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },

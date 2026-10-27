@@ -1,6 +1,7 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import {
+  Animated,
   Image,
   Pressable,
   StyleSheet,
@@ -150,6 +151,80 @@ function CheckboxWidget({ props }: { props: Props }) {
       <Text style={styles.checkboxLabel}>{str(getProp(props, "label"), "")}</Text>
     </Pressable>
   );
+}
+
+function RadioGroupWidget({ props }: { props: Props }) {
+  const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 200) : [];
+  const [value, setValue] = useState(str(getProp(props, "value"), str(getProp(props, "defaultValue"), "")));
+  const valueProp = getProp(props, "value");
+  useEffect(() => {
+    if (typeof valueProp === "string") setValue(valueProp);
+  }, [valueProp]);
+  const direction = str(getProp(props, "direction"), "column");
+  return (
+    <View style={{ gap: 8, flexDirection: direction === "row" ? "row" : "column", flexWrap: "wrap" }}>
+      {options.map((o, i) => {
+        const label = typeof o === "string" ? o : str((o as Record<string, unknown>)?.label, String(o));
+        const val = typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, label);
+        const active = value === val;
+        return (
+          <Pressable key={i} style={styles.checkboxRow} onPress={() => setValue(val)}>
+            <View style={[styles.radio, active && { borderColor: colors.accent }]}>
+              {active ? <View style={styles.radioDot} /> : null}
+            </View>
+            <Text style={styles.checkboxLabel}>{label}</Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+function PulseIndicatorWidget({ props }: { props: Props }) {
+  const pulse = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1.6, duration: 600, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 1, duration: 600, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+  const size = Math.max(0, num(getProp(props, "size"), 8));
+  const c = color(str(getProp(props, "color"), ""), colors.accent);
+  return (
+    <Animated.View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: c,
+        transform: [{ scale: pulse }],
+        opacity: 0.7,
+        alignSelf: "flex-start",
+      }}
+    />
+  );
+}
+
+function LoadingWidget({ props }: { props: Props }) {
+  const op = useRef(new Animated.Value(0.4)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(op, { toValue: 1, duration: 700, useNativeDriver: true }),
+        Animated.timing(op, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [op]);
+  const w = Math.max(0, num(getProp(props, "width"), 0));
+  const h = Math.max(0, num(getProp(props, "height"), num(getProp(props, "size"), 12)));
+  const radius = Math.max(0, num(getProp(props, "radius"), 6));
+  return <Animated.View style={{ width: w || "100%", height: h, borderRadius: radius, backgroundColor: colors.surface2, opacity: op }} />;
 }
 
 function Widget({ type, props, children }: { type: string; props: Props; children: ResolvedNode[] }) {
@@ -339,6 +414,100 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "ValdiPieChart":
       return <BarChart data={getProp(props, "data")} series={getProp(props, "series")} horizontal />;
 
+    // ── Erweiterter Katalog (Radio/Icon/Loading/Grid/Form/Video/Svg/…) ──
+    case "RadioGroup":
+      return <RadioGroupWidget props={props} />;
+    case "Radio":
+      return <CheckboxWidget props={{ ...props, label: getProp(props, "label") }} />;
+    case "Icon": {
+      const name = str(getProp(props, "name"), "");
+      const size = num(getProp(props, "size"), 18);
+      const c = color(str(getProp(props, "color"), ""), colors.text);
+      const icon = str(getProp(props, "icon"), name);
+      return <Text style={{ fontSize: size, color: c }}>{icon || "◆"}</Text>;
+    }
+    case "LoadingDot":
+    case "LoadingBlock":
+      return <LoadingWidget props={props} />;
+    case "PulseIndicator":
+      return <PulseIndicatorWidget props={props} />;
+    case "Grid":
+    case "Flow":
+      return (
+        <View style={[boxStyle(props), { flexDirection: "row", flexWrap: "wrap", gap: num(getProp(props, "gap"), num(getProp(props, "columnGap"), 8)) }]}>
+          {renderNodes(children)}
+        </View>
+      );
+    case "GridItem":
+    case "FlowItem":
+      return <View style={boxStyle(props)}>{renderNodes(children)}</View>;
+    case "Form":
+      return (
+        <View style={[boxStyle(props), { flexDirection: "column", gap: num(getProp(props, "gap"), 8) }]}>
+          {renderNodes(children)}
+        </View>
+      );
+    case "YouTubeEmbed": {
+      const videoId = str(getProp(props, "videoId"), "");
+      const title = str(getProp(props, "title"), "Video");
+      return (
+        <View style={styles.youtube}>
+          <Text style={{ color: colors.muted, fontSize: 13 }}>▶ {title}{videoId ? ` (${videoId})` : ""}</Text>
+        </View>
+      );
+    }
+    case "Svg":
+    case "AnimatedSvg":
+    case "Lottie":
+      return (
+        <View style={styles.svgFallback}>
+          <Text style={{ color: colors.muted, fontSize: 13 }}>◈</Text>
+        </View>
+      );
+    case "Favicon": {
+      const url = str(getProp(props, "url"), "");
+      const size = num(getProp(props, "size"), 16);
+      if (url && isSafeImageSrc(url)) {
+        return <Image source={{ uri: url }} style={{ width: size, height: size, borderRadius: size / 4 }} />;
+      }
+      return <Text style={{ fontSize: size, color: colors.muted }}>◈</Text>;
+    }
+    case "DatePicker":
+      return <InputWidget props={{ ...props, inputType: "date" }} multiline={false} />;
+    case "Pressable": {
+      const label = str(getProp(props, "label"), str(getProp(props, "value"), ""));
+      return (
+        <Pressable style={({ pressed }) => [styles.button, { backgroundColor: colors.surface2, opacity: pressed ? 0.8 : 1 }]}>
+          <Text style={{ color: colors.text, fontWeight: "600", fontSize: 15 }}>{label || "…"}</Text>
+        </Pressable>
+      );
+    }
+    case "Carousel":
+    case "VideoCarousel":
+    case "OverflowRow":
+      return (
+        <View style={{ flexDirection: "row", gap: 8, overflow: "scroll" }}>
+          {renderNodes(children)}
+        </View>
+      );
+    case "TableHeader":
+    case "TableCell":
+      return <Text style={styles.text}>{str(getProp(props, "label"), str(getProp(props, "header"), ""))}</Text>;
+    case "SearchImage":
+      return (
+        <Image
+          source={{ uri: str(getProp(props, "src"), str(getProp(props, "searchImage"), "")) }}
+          resizeMode="cover"
+          style={{ width: num(getProp(props, "width"), 0) || "100%", height: num(getProp(props, "height"), 0) || 220, borderRadius: num(getProp(props, "radius"), 12), backgroundColor: colors.surface2 }}
+        />
+      );
+    case "HorizontalSwipeSurface":
+    case "FlashcardFlip":
+    case "FlashcardFlipStack":
+    case "Tooltip":
+    case "Popover":
+      return <View style={boxStyle(props)}>{renderNodes(children)}</View>;
+
     // v2 / unbekannt → sicherer Fallback (kein Crash, kein Sandbox-Code ausführen).
     case "ClientDefinedWidget":
     case "WebWidget":
@@ -496,6 +665,10 @@ const styles = StyleSheet.create({
   checkboxRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   checkbox: { width: 20, height: 20, borderRadius: 5, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
   checkboxLabel: { color: colors.text, fontSize: 15, flex: 1 },
+  radio: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
+  radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.accent },
+  youtube: { borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, backgroundColor: colors.surface2 },
+  svgFallback: { width: 48, height: 48, borderRadius: 10, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center", alignSelf: "flex-start" },
   select: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, gap: 4, backgroundColor: colors.surface },
   selectItem: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   sliderTrack: { height: 6, borderRadius: 3, backgroundColor: colors.surface2, justifyContent: "center", marginVertical: 8 },
