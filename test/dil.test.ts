@@ -149,6 +149,17 @@ test("isSafeImageSrc blockt IPv6-/IP-Notations-Bypässe (Review Runde 2)", () =>
   assert.strictEqual(isSafeImageSrc("https://localhost.:8080/a.png"), false);
   assert.strictEqual(isSafeImageSrc("https://0.0.0.0/a.png"), false);
   assert.strictEqual(isSafeImageSrc("https://100.64.0.1/a.png"), false);
+  // IPv4-eingebettete IPv6 (IPv4-compatible/translated/NAT64) + DNS-Rebinding (Review Runde 3)
+  assert.strictEqual(isSafeImageSrc("https://[::127.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[::10.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[::ffff:0:127.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[64:ff9b::127.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://[64:ff9b::10.0.0.1]/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://lvh.me/a.png"), false);
+  assert.strictEqual(isSafeImageSrc("https://localtest.me/a.png"), false);
+  // globales IPv6 bleibt erlaubt (kein Embedding-Präfix, auch wenn low-32-Bits privat wären)
+  assert.strictEqual(isSafeImageSrc("https://[2001:db8::1]/a.png"), true);
+  assert.strictEqual(isSafeImageSrc("https://[2001:db8::7f00:1]/a.png"), true);
 });
 
 test("Each: itemName/indexName '__proto__' wird auf Default zurückgewiesen", () => {

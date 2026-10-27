@@ -651,6 +651,9 @@ export function isSafeImageSrc(src: string): boolean {
 
   let host = u.hostname.replace(/\.$/, "").toLowerCase(); // trailing dot (localhost.)
   if (host === "localhost") return false;
+  // Bekannte DNS-Rebinding-Hostnamen (lösen statisch auf Loopback/LAN auf; vollständige
+  // Auflösung ist im synchronen Render-Pfad nicht möglich → Blacklist der bekannten Domains).
+  if (/(^|\.)(lvh\.me|localtest\.me|nip\.io|sslip\.io|vcap\.me|traefik\.me)$/i.test(host)) return false;
 
   // IPv4-mapped IPv6 ([::ffff:127.0.0.1] bzw. [::ffff:7f00:1]) → eingebettete IPv4 prüfen.
   const mappedDotted = host.match(/^\[?::ffff:(\d+\.\d+\.\d+\.\d+)\]?$/i);
@@ -669,10 +672,21 @@ export function isSafeImageSrc(src: string): boolean {
 
   if (host.startsWith("[")) {
     // IPv6-Literal: unspec/loopback/link-local/ULA blocken.
-    const bare = host.replace(/^\[|\]$/g, "");
+    const bare = host.replace(/^\[|\]$/g, "").toLowerCase();
     if (bare === "::" || bare === "::1") return false;
     if (/^f[eab][0-9a-f]/i.test(bare)) return false; // fe80..febf link-local
     if (/^f[cd]/i.test(bare)) return false; // fc00::/7 ULA
+    // IPv4-eingebettete IPv6: ::/96 (IPv4-compatible), ::ffff:0:0/96 (translated), 64:ff9b::/96 (NAT64).
+    // Die unteren 32 Bit kodieren eine IPv4 → gegen PRIVATE_V4 prüfen.
+    const emb = bare.match(/^(?:64:ff9b::|::ffff:0:|::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
+    if (emb) {
+      const hi = parseInt(emb[1], 16);
+      const lo = parseInt(emb[2], 16);
+      if (Number.isFinite(hi) && Number.isFinite(lo)) {
+        const ip4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+        if (PRIVATE_V4.some((r) => r.test(ip4))) return false;
+      }
+    }
     return true;
   }
   // new URL() normalisiert Integer/Hex/Oktal-Notation zu Dotted-Quad (WHATWG).
