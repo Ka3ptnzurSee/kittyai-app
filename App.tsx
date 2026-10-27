@@ -663,6 +663,42 @@ export default function App() {
     })();
   }, []);
 
+  // Live-Sync: beim Öffnen/Zurückkommen die Session vom Server laden — eine im
+  // Hintergrund fertig gewordene Antwort (leere lokale KI-Bubble) wieder auffüllen.
+  useEffect(() => {
+    if (!activeChatId || !loadedRef.current) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const base = serverUrl.replace(/\/+$/, "");
+        const res = await fetch(`${base}/api/session/${activeChatId}`, { headers: authHeaders() });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!Array.isArray(data.messages) || data.messages.length === 0) return;
+        setChats((cs) =>
+          cs.map((c) => {
+            if (c.id !== activeChatId) return c;
+            const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
+            const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant");
+            if (lastAi && serverLast && !lastAi.text.trim() && serverLast.text.trim()) {
+              return {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === lastAi.id ? { ...m, text: serverLast.text, images: serverLast.images || m.images } : m,
+                ),
+                updatedAt: Date.now(),
+              };
+            }
+            return c;
+          }),
+        );
+      } catch {
+        // offline/Server nicht erreichbar → lokalen Stand behalten
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeChatId, serverUrl]);
+
   // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
   useEffect(() => {
     if (!loadedRef.current) return;
