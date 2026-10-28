@@ -685,11 +685,14 @@ export default function App() {
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant");
             // Server-Session ist die Wahrheit: eine (Resume-)Fehler-Karte auffüllen, wenn der
-            // Server die finale Antwort WIRKLICH hat (letzte Server-Nachricht ist eine
-            // Assistant-Antwort = Turn fertig). Bei fehlgeschlagenem Turn (letzte Nachricht
-            // ist User) bleibt die Fehler-Karte — keine veraltete Antwort einfüllen.
+            // Server die finale Antwort WIRKLICH hat. Zwei Guards gegen veraltete Antworten:
+            // (1) letzte Server-Nachricht ist eine Assistant-Antwort (Turn fertig),
+            // (2) der Server kennt mindestens so viele User-Nachrichten wie lokal — der
+            //     fehlgeschlagene Turn hat den Server erreicht (kein reiner Send-Netzwerkfehler).
             const lastServerMsg = data.messages[data.messages.length - 1];
-            const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim();
+            const serverUserCount = [...data.messages].filter((m) => m.role === "user").length;
+            const localUserCount = c.messages.filter((m) => m.role === "user").length;
+            const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim() && serverUserCount >= localUserCount;
             if (lastAi && !lastAi.text.trim() && serverHasFreshAnswer) {
               return {
                 ...c,
