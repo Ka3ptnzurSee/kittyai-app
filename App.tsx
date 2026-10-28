@@ -142,6 +142,20 @@ const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 const MAX_THINKING_CHARS = 16000; // Denk-Text deckeln (vorher 800 → schnitt Reasoning sichtbar ab)
 const MAX_TITLE_CHARS = 22;
 
+// Auswählbare Chat-Modelle (Key = Server-Slug, Label = kurze Anzeige).
+// Reihenfolge = Zyklus beim Tippen auf den Chip.
+const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
+  { key: "pro", label: "PRO" },
+  { key: "flash", label: "FLASH" },
+  // --goeran-options:start--
+  { key: "muse", label: "MUSE" },
+  { key: "coder", label: "CODER" },
+  { key: "qwen", label: "QWEN" },
+  // --goeran-options:end--
+  { key: "hz_flash", label: "HZ·FLASH" },
+  { key: "glm", label: "GLM" },
+];
+
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
 const SCHEDULE_PRESETS: { id: CronPreset | "custom"; label: string }[] = [
   { id: "hourly", label: "Stündlich" },
@@ -435,7 +449,7 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
-  const [chatModel, setChatModel] = useState<"pro" | "flash">("pro"); // Modellwechsel pro (Reasoning) ↔ flash (schnell)
+  const [chatModel, setChatModel] = useState<string>("pro"); // Modellwechsel (Zyklus durch CHAT_MODEL_OPTIONS)
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [apiToken, setApiToken] = useState("");
   const [cwd, setCwd] = useState("");
@@ -1529,8 +1543,8 @@ export default function App() {
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
             <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
-          <Pressable onPress={() => setChatModel((m) => (m === "pro" ? "flash" : "pro"))} style={[styles.iconBtn, chatModel === "pro" && styles.chipActive]} hitSlop={6}>
-            <Text style={[styles.modelChipText, chatModel === "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{chatModel === "pro" ? "PRO" : "FLASH"}</Text>
+          <Pressable onPress={() => setChatModel((m) => { const i = CHAT_MODEL_OPTIONS.findIndex((o) => o.key === m); return CHAT_MODEL_OPTIONS[(i + 1) % CHAT_MODEL_OPTIONS.length].key; })} style={[styles.iconBtn, chatModel !== "pro" && styles.chipActive]} hitSlop={6}>
+            <Text style={[styles.modelChipText, chatModel !== "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{CHAT_MODEL_OPTIONS.find((o) => o.key === chatModel)?.label ?? "PRO"}</Text>
           </Pressable>
         </View>
       </View>
