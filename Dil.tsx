@@ -291,7 +291,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "Checkbox":
       return <CheckboxWidget props={props} />;
     case "Select": {
-      const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 200) : [];
+      const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 50) : [];
       const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>)?.label ?? (o as Record<string, unknown>)?.value ?? String(o)));
       return (
         <View style={styles.select}>
@@ -349,7 +349,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         </View>
       );
     case "List": {
-      const items = Array.isArray(getProp(props, "items")) ? (getProp(props, "items") as unknown[]).slice(0, 500) : [];
+      const items = Array.isArray(getProp(props, "items")) ? (getProp(props, "items") as unknown[]).slice(0, 50) : [];
       if (items.length) {
         return (
           <View style={styles.list}>
@@ -378,8 +378,9 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         </View>
       );
     case "Table": {
+      const allRows = Array.isArray(getProp(props, "rows")) ? (getProp(props, "rows") as unknown[]) : [];
       const columns = Array.isArray(getProp(props, "columns")) ? (getProp(props, "columns") as unknown[]).slice(0, 50) : [];
-      const rows = Array.isArray(getProp(props, "rows")) ? (getProp(props, "rows") as unknown[]).slice(0, 500) : [];
+      const rows = allRows.slice(0, 50);
       const headers = columns.map((c) => str((c as Record<string, unknown>)?.label ?? (c as Record<string, unknown>)?.header, String(c)));
       const keys = columns.map((c) => str((c as Record<string, unknown>)?.key, ""));
       return (
@@ -405,6 +406,9 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
               </View>
             );
           })}
+          {allRows.length > rows.length ? (
+            <Text style={styles.tableNote}>{allRows.length - rows.length} weitere Zeilen ausgeblendet</Text>
+          ) : null}
         </View>
       );
     }
@@ -688,6 +692,7 @@ const styles = StyleSheet.create({
   tableRow: { flexDirection: "row", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   tableHeaderCell: { flex: 1, padding: 8, fontSize: 13, fontWeight: "700", color: colors.text, backgroundColor: colors.surface2 },
   tableCell: { flex: 1, padding: 8, fontSize: 13, color: colors.text },
+  tableNote: { color: colors.muted, fontSize: 11, padding: 6, textAlign: "center" },
   chart: { gap: 6, marginVertical: 4 },
   vBarArea: { flexDirection: "row", alignItems: "flex-end", gap: 6, height: 140 },
   vBarCol: { flex: 1, alignItems: "center", gap: 4 },

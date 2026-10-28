@@ -38,7 +38,12 @@ import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from ".
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
-type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number };
+type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number; folderId?: string | null };
+type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
+type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
+type SkillMeta = { id: string; name: string; description: string };
+type AgentMeta = { id: string; name: string; description: string };
+type WorkflowMeta = { id: string; name: string; cron?: string };
 
 // Eigenständige Komponente: tickt jede Sekunde, OHNE den ganzen App-Baum neu zu rendern.
 function ElapsedLabel({ style }: { style?: TextStyle }) {
@@ -134,6 +139,7 @@ type Schedule = { id: string; message: string; cron: string };
 
 const TOKEN_KEY = "pi-api-token";
 const CHATS_KEY = "pi-chats-v2";
+const FOLDERS_KEY = "pi-folders-v1";
 const CWD_KEY = "pi-cwd";
 const STREAM_STATE_KEY = "pi-stream-state-v1";
 const STREAM_TIMEOUT_MS = 30 * 60 * 1000; // 30 min – deckt PROMPT_TIMEOUT_MS ab
@@ -141,6 +147,8 @@ const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 const MAX_THINKING_CHARS = 16000; // Denk-Text deckeln (vorher 800 → schnitt Reasoning sichtbar ab)
 const MAX_TITLE_CHARS = 22;
+const MAX_FOLDER_NAME_CHARS = 40;
+const MAX_FOLDER_DESC_CHARS = 200;
 
 // Auswählbare Chat-Modelle (Key = Server-Slug, Label = kurze Anzeige).
 // Reihenfolge = Zyklus beim Tippen auf den Chip.
@@ -154,6 +162,15 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
   // --goeran-options:end--
   { key: "hz_flash", label: "HZ·FLASH" },
   { key: "glm", label: "GLM" },
+];
+
+// Plugins-Untertabs (Connectors/Skills/Agenten/Workflows/Tasks).
+const PLUGIN_TABS: { key: "connectors" | "skills" | "agents" | "workflows" | "tasks"; label: string }[] = [
+  { key: "connectors", label: "Connectoren" },
+  { key: "skills", label: "Skills" },
+  { key: "agents", label: "Agenten" },
+  { key: "workflows", label: "Workflows" },
+  { key: "tasks", label: "Tasks" },
 ];
 
 // Routinen-Presets (Claude-iOS-„Routines“-Pendant) → 5-Feld-Cron
@@ -433,7 +450,7 @@ function isEmptyAi(m: Msg): boolean {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"chats" | "tasks">("chats");
+  const [tab, setTab] = useState<"chats" | "plugins" | "tasks">("chats");
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -462,7 +479,27 @@ export default function App() {
   const [schedDay, setSchedDay] = useState(1); // 0=So … 6=Sa
   const [schedDom, setSchedDom] = useState("1");
   const [schedCustomCron, setSchedCustomCron] = useState("");
+  // Ordner/Projekte
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [folderFilter, setFolderFilter] = useState<string | null>(null);
+  const [folderModal, setFolderModal] = useState<{ mode: "create" | "rename" | "edit"; folderId?: string; parentId?: string | null } | null>(null);
+  const [folderInput, setFolderInput] = useState("");
+  const [folderDescInput, setFolderDescInput] = useState("");
+  const [assignChatId, setAssignChatId] = useState<string | null>(null);
+  const [folderSuggestion, setFolderSuggestion] = useState<{ chatId: string; folderId: string; name: string } | null>(null);
+  // Modell-Menü
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [dynamicModels, setDynamicModels] = useState<{ key: string; label: string }[]>([]);
+  // Chat umbenennen
+  const [renameChatId, setRenameChatId] = useState<string | null>(null);
+  const [renameInput, setRenameInput] = useState("");
+  // Plugins
+  const [pluginsTab, setPluginsTab] = useState<"connectors" | "skills" | "agents" | "workflows" | "tasks">("connectors");
+  const [meta, setMeta] = useState<{ connectors: Connector[]; skills: SkillMeta[]; agents: AgentMeta[]; workflows: WorkflowMeta[] }>({ connectors: [], skills: [], agents: [], workflows: [] });
+  const [connectorsList, setConnectorsList] = useState<Connector[]>([]);
+  const [connectorForm, setConnectorForm] = useState<{ name: string; agent: string; description: string }>({ name: "", agent: "", description: "" });
   const loadedRef = useRef(false);
+  const chatsRef = useRef<Chat[]>([]);
   const dictationBaseRef = useRef("");
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
@@ -590,6 +627,187 @@ export default function App() {
     );
   }
 
+  // chatsRef aktuell halten (für Helfer, die außerhalb von State-Closures lesen müssen).
+  useEffect(() => { chatsRef.current = chats; }, [chats]);
+
+  // Live-Sync/Reload: finale Antwort aus der Server-Session-Datei holen (überlebt die
+  // turnRegistry-TTL) und eine leere/fehlerhafte KI-Bubble damit auffüllen.
+  async function reloadFromServer(chatId: string): Promise<boolean> {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!Array.isArray(data.messages)) return false;
+      const serverMsgs = data.messages as { id?: string; role: string; text?: string; images?: { uri: string }[] }[];
+      const lastServerMsg = serverMsgs[serverMsgs.length - 1];
+      const serverLast = [...serverMsgs].reverse().find((m) => m.role === "assistant");
+      const serverUserCount = serverMsgs.filter((m) => m.role === "user").length;
+      // Turn ist erst „fertig“, wenn die LETZTE Server-Nachricht eine Assistant-Antwort ist
+      // (sonst würde die leere Live-Bubble mit der VORHERIGEN Antwort gefüllt).
+      if (!lastServerMsg || lastServerMsg.role !== "assistant") return false;
+      if (!serverLast || !serverLast.text?.trim()) return false;
+      const chat = chatsRef.current.find((c) => c.id === chatId);
+      if (!chat) return false;
+      const localUserCount = chat.messages.filter((m) => m.role === "user").length;
+      if (serverUserCount < localUserCount) return false; // Turn hat den Server nie erreicht
+      const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
+      if (!lastAi || (lastAi.text.trim() && !lastAi.error)) return false; // schon gefüllt
+      const answerText = serverLast.text || "";
+      patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
+      delete streamStateRef.current[chatId];
+      persistStreamState(chatId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function saveFolders(next: Folder[]) {
+    setFolders(next);
+    AsyncStorage.setItem(FOLDERS_KEY, JSON.stringify(next)).catch(() => { /* ignorieren */ });
+  }
+
+  // Dynamische Modell-Liste vom Server laden (neue Goeran-Modelle ohne Rebuild).
+  async function loadModels() {
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/models`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data.models) && data.models.length) {
+        setDynamicModels(data.models.map((m: any) => ({ key: String(m.key || ""), label: String(m.label || m.key || "").toUpperCase() })));
+      }
+    } catch {
+      // offline → statische CHAT_MODEL_OPTIONS verwenden
+    }
+  }
+
+  async function loadMeta() {
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/meta`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      setMeta({
+        connectors: Array.isArray(data.connectors) ? data.connectors : [],
+        skills: Array.isArray(data.skills) ? data.skills : [],
+        agents: Array.isArray(data.agents) ? data.agents : [],
+        workflows: Array.isArray(data.workflows) ? data.workflows : [],
+      });
+    } catch {
+      // offline → leer lassen
+    }
+  }
+
+  async function loadConnectorsList() {
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/connectors`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      setConnectorsList(Array.isArray(data.connectors) ? data.connectors : []);
+    } catch {
+      // offline → leer lassen
+    }
+  }
+
+  function modelOptions(): { key: string; label: string }[] {
+    return dynamicModels.length ? dynamicModels : CHAT_MODEL_OPTIONS;
+  }
+
+  // --- Ordner/Projekte ---
+  function folderChildren(parentId: string | null): Folder[] {
+    return folders.filter((f) => f.parentId === parentId).sort((a, b) => a.order - b.order);
+  }
+
+  function openFolderModal(mode: "create" | "rename" | "edit", folderId?: string, parentId?: string | null) {
+    if (mode === "create") {
+      setFolderInput("");
+      setFolderDescInput("");
+      setFolderModal({ mode, parentId: parentId ?? null });
+    } else {
+      const f = folders.find((x) => x.id === folderId);
+      setFolderInput(f?.name || "");
+      setFolderDescInput(f?.description || "");
+      setFolderModal({ mode, folderId, parentId: f?.parentId ?? null });
+    }
+  }
+
+  function submitFolder() {
+    const name = folderInput.trim().slice(0, MAX_FOLDER_NAME_CHARS);
+    if (!name || !folderModal) return;
+    if (folderModal.mode === "create") {
+      const f: Folder = { id: uid("f"), name, description: folderDescInput.trim().slice(0, MAX_FOLDER_DESC_CHARS), parentId: folderModal.parentId ?? null, order: folders.length };
+      saveFolders([...folders, f]);
+    } else {
+      saveFolders(folders.map((f) => (f.id === folderModal.folderId ? { ...f, name, description: folderDescInput.trim().slice(0, MAX_FOLDER_DESC_CHARS) } : f)));
+    }
+    setFolderModal(null);
+  }
+
+  function deleteFolder(folderId: string) {
+    const descendants = new Set<string>([folderId]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const f of folders) {
+        if (f.parentId && descendants.has(f.parentId) && !descendants.has(f.id)) { descendants.add(f.id); changed = true; }
+      }
+    }
+    saveFolders(folders.filter((f) => !descendants.has(f.id)));
+    setChats((cs) => cs.map((c) => (descendants.has(c.folderId || "") ? { ...c, folderId: null } : c)));
+  }
+
+  function assignChatToFolder(chatId: string, folderId: string | null) {
+    patchChat(chatId, (c) => ({ ...c, folderId }));
+    setAssignChatId(null);
+    setFolderSuggestion((s) => (s && s.chatId === chatId ? null : s));
+  }
+
+  // KI ordnet eine neue Anfrage einem passenden Ordner zu (nicht-blockierend).
+  async function suggestFolder(chatId: string, query: string) {
+    if (folders.length === 0 || !query.trim()) return;
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/classify-folder`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ folders: folders.map((f) => ({ id: f.id, name: f.name, description: f.description })), query }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.folderId && data.name) {
+        setFolderSuggestion({ chatId, folderId: data.folderId, name: data.name });
+      }
+    } catch {
+      // offline → kein Vorschlag
+    }
+  }
+
+  // --- Connectors ---
+  async function addConnector() {
+    const name = connectorForm.name.trim();
+    if (!name) return;
+    try {
+      const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/connectors`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(connectorForm),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setConnectorForm({ name: "", agent: "", description: "" });
+      loadConnectorsList();
+    } catch {
+      // Eingabe stehen lassen
+    }
+  }
+
+  async function deleteConnector(id: string) {
+    try {
+      await fetch(`${serverUrl.replace(/\/+$/, "")}/api/connectors/${id}`, { method: "DELETE", headers: authHeaders() });
+    } catch {
+      // ignorieren
+    }
+    loadConnectorsList();
+  }
+
   useEffect(() => {
     (async () => {
       preloadIcons(); // Vektor-Icons (Ionicons) beim Start laden — kein FOUC/Start-Crash
@@ -664,9 +882,13 @@ export default function App() {
               if (!aiMsg || !userMsg) continue;
               markBusy(chat.id, true);
               streamChat(userMsg.text, chat.id, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId)
-                .catch(() => {
-                  // Resume nicht möglich (Turn aufgeräumt/offline) -> Karte als Fehler markieren.
-                  patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Verbindung unterbrochen", retryable: true } }));
+                .catch(async () => {
+                  // Resume nicht möglich (Turn aufgeräumt) -> erst Session-Reload versuchen:
+                  // die Server-Session-Datei überlebt die turnRegistry-TTL und ist die Wahrheit.
+                  const filled = await reloadFromServer(chat.id);
+                  if (!filled) {
+                    patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Verbindung unterbrochen", retryable: true } }));
+                  }
                 })
                 .finally(() => markBusy(chat.id, false));
             }
@@ -675,6 +897,18 @@ export default function App() {
       } catch {
         // ignorieren
       }
+      try {
+        const savedFolders = await AsyncStorage.getItem(FOLDERS_KEY);
+        if (savedFolders) {
+          const parsed = JSON.parse(savedFolders);
+          if (Array.isArray(parsed)) setFolders(parsed);
+        }
+      } catch {
+        // ignorieren
+      }
+      loadModels();
+      loadMeta();
+      loadConnectorsList();
       loadedRef.current = true;
       registerPush(url, savedToken);
     })();
@@ -726,6 +960,27 @@ export default function App() {
     return () => { cancelled = true; };
   }, [activeChatId, serverUrl, busyChatIds]);
 
+  // Während ein Chat „busy“ ist (Turn läuft serverseitig, z. B. nach App-Wechsel in den
+  // Hintergrund), die Server-Session regelmäßig pollen: sobald die finale Antwort vorliegt,
+  // die lokale (leere/teilweise) Bubble auffüllen und busy aufheben.
+  useEffect(() => {
+    if (!activeChatId || !loadedRef.current) return;
+    if (!busyChatIds.has(activeChatId)) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      if (cancelled) return;
+      const filled = await reloadFromServer(activeChatId);
+      if (filled) {
+        markBusy(activeChatId, false);
+        return;
+      }
+      if (!cancelled) timer = setTimeout(poll, 3000);
+    };
+    timer = setTimeout(poll, 3000);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
+  }, [activeChatId, busyChatIds, serverUrl]);
+
   // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
   useEffect(() => {
     if (!loadedRef.current) return;
@@ -738,16 +993,16 @@ export default function App() {
     return () => clearTimeout(t);
   }, [chats]);
 
-  // Aufgaben automatisch aktualisieren
+  // Aufgaben automatisch aktualisieren (Plugins → Tasks)
   useEffect(() => {
-    if (tab !== "tasks") return;
+    if (tab !== "plugins" || pluginsTab !== "tasks") return;
     loadTasks();
     const t = setInterval(loadTasks, 4000);
     return () => {
       clearInterval(t);
       tasksAbortRef.current?.abort();
     };
-  }, [tab, serverUrl, apiToken]);
+  }, [tab, pluginsTab, serverUrl, apiToken]);
 
   async function registerPush(url: string, tok?: string) {
     // Push-Token (sensibler Geräte-Credential) nur über HTTPS übertragen
@@ -911,6 +1166,7 @@ export default function App() {
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
+    const isFirst = !chats.find((c) => c.id === chatId)?.messages.length;
     let finalMessage = message;
     const replyTo = replyingTo ? { text: replyingTo.text.replace(/\n+/g, " ").trim().slice(0, 200) } : undefined;
     if (replyTo) {
@@ -942,6 +1198,8 @@ export default function App() {
       messages: [...c.messages, userMsg, aiMsg],
       updatedAt: Date.now(),
     }));
+    // KI schlägt einen passenden Projektordner vor (nur beim ersten Turn, nicht-blockierend).
+    if (isFirst && message.trim()) suggestFolder(chatId, message.trim());
     abortedRef.current.delete(chatId);
     const clientMessageId = uid("m");
     streamStateRef.current[chatId] = { turnId: "", lastSeq: 0, clientMessageId };
@@ -1004,6 +1262,10 @@ export default function App() {
         await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0 }, clientMessageId);
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } catch (e2) {
+        // Letzter Ausweg: Antwort aus der Server-Session-Datei holen (falls der Turn
+        // serverseitig doch fertig wurde). Nur wenn das fehlschlägt → Fehler-Karte.
+        const filled = await reloadFromServer(chatId);
+        if (filled) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
         const rawMsg = e2 instanceof Error ? e2.message : String(e2);
         const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
           ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
@@ -1464,7 +1726,7 @@ export default function App() {
     const hasMessages = item.messages.length > 0;
     const statusColor = isBusy ? colors.danger : hasMessages ? colors.success : "#ffffff";
     return (
-      <Pressable onPress={() => setActiveChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
+      <Pressable onPress={() => setActiveChatId(item.id)} onLongPress={() => setAssignChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
         <View style={styles.chatAvatar}>
           <Ionicons name="chatbubbles-outline" size={20} color={colors.accent} />
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
@@ -1475,9 +1737,14 @@ export default function App() {
         </View>
         <View style={styles.chatRight}>
           <Text style={styles.chatTime}>{formatTime(item.updatedAt)}</Text>
-          <Pressable onPress={() => deleteChat(item.id)} hitSlop={8}>
-            <Ionicons name="close" size={14} color={colors.danger} />
-          </Pressable>
+          <View style={styles.chatRightRow}>
+            <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8}>
+              <Ionicons name="pencil" size={13} color={colors.muted} />
+            </Pressable>
+            <Pressable onPress={() => deleteChat(item.id)} hitSlop={8}>
+              <Ionicons name="close" size={14} color={colors.danger} />
+            </Pressable>
+          </View>
         </View>
       </Pressable>
     );
@@ -1507,6 +1774,137 @@ export default function App() {
   }
 
   const sortedChats = [...chats].sort((a, b) => b.updatedAt - a.updatedAt);
+  const filteredChats = folderFilter ? sortedChats.filter((c) => c.folderId === folderFilter) : sortedChats;
+
+  function renderMetaList(list: { id: string; name: string; description?: string; cron?: string }[], title: string) {
+    if (list.length === 0) {
+      return (
+        <View style={styles.empty}>
+          <Text style={styles.emptyTitle}>Keine {title}</Text>
+          <Text style={styles.emptyText}>Auf dem Server sind aktuell keine {title} verfügbar.</Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.metaList}>
+        {list.map((m) => (
+          <View key={m.id} style={styles.metaCard}>
+            <Text style={styles.metaName}>{m.name}</Text>
+            {m.description ? <Text style={styles.metaDesc} numberOfLines={3}>{m.description}</Text> : null}
+            {m.cron ? <Text style={styles.metaCron}>{cronLabel(m.cron)}</Text> : null}
+          </View>
+        ))}
+      </View>
+    );
+  }
+
+  function renderConnectors() {
+    return (
+      <View style={styles.connectorsWrap}>
+        <Text style={styles.pluginsHint}>Verbundene Apps & Connectoren. Neue Connectoren mit einem spezialisierten Agenten verbinden.</Text>
+        <Text style={styles.pluginsSectionTitle}>Verfügbare Connectoren</Text>
+        {meta.connectors.length === 0 ? (
+          <Text style={styles.pluginsEmpty}>Keine MCP-Connectoren konfiguriert.</Text>
+        ) : (
+          <View style={styles.metaList}>
+            {meta.connectors.map((c) => (
+              <View key={c.id} style={styles.metaCard}>
+                <View style={styles.metaCardHeader}>
+                  <Text style={styles.metaName}>{c.name}</Text>
+                  <View style={[styles.metaDot, { backgroundColor: c.enabled === false ? colors.muted : colors.success }]} />
+                </View>
+                {c.description ? <Text style={styles.metaDesc} numberOfLines={3}>{c.description}</Text> : null}
+              </View>
+            ))}
+          </View>
+        )}
+        <Text style={styles.pluginsSectionTitle}>Eigene Connectors</Text>
+        {connectorsList.length === 0 ? (
+          <Text style={styles.pluginsEmpty}>Noch keine eigenen Connectors.</Text>
+        ) : (
+          <View style={styles.metaList}>
+            {connectorsList.map((c) => (
+              <View key={c.id} style={styles.metaCard}>
+                <View style={styles.metaCardHeader}>
+                  <Text style={styles.metaName}>{c.name}</Text>
+                  <Pressable onPress={() => deleteConnector(c.id)} hitSlop={8}>
+                    <Ionicons name="close" size={14} color={colors.danger} />
+                  </Pressable>
+                </View>
+                {c.agent ? <Text style={styles.metaAgent}>Agent: {c.agent}</Text> : null}
+                {c.description ? <Text style={styles.metaDesc} numberOfLines={3}>{c.description}</Text> : null}
+              </View>
+            ))}
+          </View>
+        )}
+        <View style={styles.connectorForm}>
+          <Text style={styles.pluginsSectionTitle}>Neuen Connector anlegen</Text>
+          <TextInput
+            style={styles.schedMessageInput}
+            value={connectorForm.name}
+            onChangeText={(t) => setConnectorForm((f) => ({ ...f, name: t }))}
+            placeholder="Name (z. B. „Instagram-Connector“)"
+            placeholderTextColor={colors.muted}
+          />
+          <TextInput
+            style={styles.schedMessageInput}
+            value={connectorForm.agent}
+            onChangeText={(t) => setConnectorForm((f) => ({ ...f, agent: t }))}
+            placeholder="Spezialisierter Agent (z. B. „instagram“)"
+            placeholderTextColor={colors.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TextInput
+            style={styles.schedMessageInput}
+            value={connectorForm.description}
+            onChangeText={(t) => setConnectorForm((f) => ({ ...f, description: t }))}
+            placeholder="Beschreibung (optional)"
+            placeholderTextColor={colors.muted}
+            multiline
+          />
+          <Pressable onPress={addConnector} disabled={!connectorForm.name.trim()} style={[styles.schedAddBtn, !connectorForm.name.trim() && styles.sendBtnDisabled]}>
+            <View style={styles.chipRow}>
+              <Ionicons name="add" size={15} color="#fff" />
+              <Text style={styles.schedAddText}>Connector anlegen</Text>
+            </View>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  function renderFolders() {
+    if (folders.length === 0) {
+      return (
+        <View style={styles.foldersBar}>
+          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip}>
+            <Ionicons name="folder-open-outline" size={14} color={colors.accent} />
+            <Text style={styles.folderChipText}>Ordner anlegen</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    const ordered = [...folders].sort((a, b) => a.order - b.order);
+    return (
+      <View style={styles.foldersBar}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.foldersBarContent}>
+          <Pressable onPress={() => setFolderFilter(null)} style={[styles.folderChip, folderFilter === null && styles.folderChipActive]}>
+            <Text style={[styles.folderChipText, folderFilter === null && styles.folderChipTextActive]}>Alle</Text>
+          </Pressable>
+          {ordered.map((f) => (
+            <Pressable key={f.id} onPress={() => setFolderFilter(folderFilter === f.id ? null : f.id)} onLongPress={() => openFolderModal("edit", f.id)} style={[styles.folderChip, folderFilter === f.id && styles.folderChipActive]}>
+              <Text style={[styles.folderChipText, folderFilter === f.id && styles.folderChipTextActive]}>{f.parentId ? "↳ " : ""}{f.name}</Text>
+            </Pressable>
+          ))}
+          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip}>
+            <Ionicons name="add" size={14} color={colors.accent} />
+            <Text style={styles.folderChipText}>Ordner</Text>
+          </Pressable>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -1543,8 +1941,8 @@ export default function App() {
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
             <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
-          <Pressable onPress={() => setChatModel((m) => { const i = CHAT_MODEL_OPTIONS.findIndex((o) => o.key === m); return CHAT_MODEL_OPTIONS[(i + 1) % CHAT_MODEL_OPTIONS.length].key; })} style={[styles.iconBtn, chatModel !== "pro" && styles.chipActive]} hitSlop={6}>
-            <Text style={[styles.modelChipText, chatModel !== "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{CHAT_MODEL_OPTIONS.find((o) => o.key === chatModel)?.label ?? "PRO"}</Text>
+          <Pressable onPress={() => setModelMenuOpen(true)} style={[styles.iconBtn, chatModel !== "pro" && styles.chipActive]} hitSlop={6}>
+            <Text style={[styles.modelChipText, chatModel !== "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{modelOptions().find((o) => o.key === chatModel)?.label ?? "PRO"}</Text>
           </Pressable>
         </View>
       </View>
@@ -1556,10 +1954,10 @@ export default function App() {
             <Text style={[styles.tabText, tab === "chats" && styles.tabTextActive]}>Chats</Text>
           </View>
         </Pressable>
-        <Pressable onPress={() => setTab("tasks")} style={[styles.tab, tab === "tasks" && styles.tabActive]}>
+        <Pressable onPress={() => setTab("plugins")} style={[styles.tab, tab === "plugins" && styles.tabActive]}>
           <View style={styles.tabRow}>
-            <Ionicons name="clipboard-outline" size={16} color={tab === "tasks" ? colors.accent : colors.muted} />
-            <Text style={[styles.tabText, tab === "tasks" && styles.tabTextActive]}>Aufgaben</Text>
+            <Ionicons name="grid-outline" size={16} color={tab === "plugins" ? colors.accent : colors.muted} />
+            <Text style={[styles.tabText, tab === "plugins" && styles.tabTextActive]}>Plugins</Text>
           </View>
         </Pressable>
       </View>
@@ -1619,6 +2017,19 @@ export default function App() {
                 ) : null
               }
             />
+
+            {folderSuggestion && folderSuggestion.chatId === activeChatId ? (
+              <View style={styles.folderSuggestion}>
+                <Ionicons name="folder-open-outline" size={16} color={colors.accent} />
+                <Text style={styles.folderSuggestionText} numberOfLines={1}>In Ordner „{folderSuggestion.name}“ verschieben?</Text>
+                <Pressable onPress={() => assignChatToFolder(folderSuggestion.chatId, folderSuggestion.folderId)} hitSlop={8}>
+                  <Text style={styles.folderSuggestionYes}>Ja</Text>
+                </Pressable>
+                <Pressable onPress={() => setFolderSuggestion(null)} hitSlop={8}>
+                  <Ionicons name="close" size={16} color={colors.muted} />
+                </Pressable>
+              </View>
+            ) : null}
 
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
               {replyingTo ? (
@@ -1734,8 +2145,9 @@ export default function App() {
           </>
         ) : (
           <>
+            {renderFolders()}
             <FlatList
-              data={sortedChats}
+              data={filteredChats}
               keyExtractor={(c) => c.id}
               renderItem={renderChatItem}
               style={styles.list}
@@ -1753,6 +2165,15 @@ export default function App() {
         )
       ) : (
         <>
+          <View style={styles.pluginsSubTabs}>
+            {PLUGIN_TABS.map((p) => (
+              <Pressable key={p.key} onPress={() => setPluginsTab(p.key)} style={[styles.pluginsSubTab, pluginsTab === p.key && styles.pluginsSubTabActive]}>
+                <Text style={[styles.pluginsSubTabText, pluginsTab === p.key && styles.pluginsSubTabTextActive]}>{p.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {pluginsTab === "tasks" ? (
+          <>
           <View style={styles.taskInputBar}>
             <TextInput
               style={styles.input}
@@ -1872,8 +2293,110 @@ export default function App() {
               ) : null}
             </View>
           </ScrollView>
+          </>
+          ) : (
+          <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
+            {pluginsTab === "connectors" ? renderConnectors() : pluginsTab === "skills" ? renderMetaList(meta.skills, "Skills") : pluginsTab === "agents" ? renderMetaList(meta.agents, "Agenten") : renderMetaList(meta.workflows, "Workflows")}
+          </ScrollView>
+          )}
         </>
       )}
+
+      {/* Modell-Auswahl (Bottom-Sheet) */}
+      <Modal visible={modelMenuOpen} transparent animationType="fade" onRequestClose={() => setModelMenuOpen(false)}>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setModelMenuOpen(false)}>
+          <Pressable style={styles.attachSheet} onPress={() => {}}>
+            <View style={styles.attachSheetHandle} />
+            <Text style={styles.attachSheetTitle}>Modell auswählen</Text>
+            {modelOptions().map((o) => (
+              <Pressable key={o.key} onPress={() => { setChatModel(o.key); setModelMenuOpen(false); }} style={[styles.modelMenuItem, chatModel === o.key && styles.modelMenuItemActive]}>
+                <Text style={[styles.modelMenuItemText, chatModel === o.key && styles.modelMenuItemTextActive]}>{o.label}</Text>
+                {chatModel === o.key ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : null}
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      {/* Chat umbenennen */}
+      <Modal visible={!!renameChatId} transparent animationType="fade" onRequestClose={() => setRenameChatId(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Chat umbenennen</Text>
+            <TextInput
+              style={styles.urlInput}
+              value={renameInput}
+              onChangeText={setRenameInput}
+              placeholder="Name (max. 22 Zeichen)"
+              placeholderTextColor={colors.muted}
+              autoFocus
+              maxLength={MAX_TITLE_CHARS}
+            />
+            <View style={styles.modalButtons}>
+              <Pressable onPress={() => setRenameChatId(null)} style={styles.modalCancel}><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
+              <Pressable onPress={() => { if (renameChatId) patchChat(renameChatId, (c) => ({ ...c, title: deriveTitle(renameInput) || c.title })); setRenameChatId(null); }} style={styles.modalSave}><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Ordner anlegen/bearbeiten */}
+      <Modal visible={!!folderModal} transparent animationType="fade" onRequestClose={() => setFolderModal(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>{folderModal?.mode === "create" ? (folderModal.parentId ? "Unterordner anlegen" : "Ordner anlegen") : "Ordner bearbeiten"}</Text>
+            <TextInput
+              style={styles.urlInput}
+              value={folderInput}
+              onChangeText={setFolderInput}
+              placeholder="Name (max. 40 Zeichen)"
+              placeholderTextColor={colors.muted}
+              maxLength={MAX_FOLDER_NAME_CHARS}
+            />
+            <TextInput
+              style={styles.urlInput}
+              value={folderDescInput}
+              onChangeText={setFolderDescInput}
+              placeholder="Beschreibung (für die KI-Zuordnung)"
+              placeholderTextColor={colors.muted}
+              multiline
+              maxLength={MAX_FOLDER_DESC_CHARS}
+            />
+            <View style={styles.modalButtons}>
+              {folderModal?.mode === "edit" ? (
+                <>
+                  <Pressable onPress={() => openFolderModal("create", undefined, folderModal.folderId)} style={styles.modalCancel}>
+                    <Text style={styles.folderSubBtn}>↳ Unterordner</Text>
+                  </Pressable>
+                  <Pressable onPress={() => { if (folderModal.folderId) deleteFolder(folderModal.folderId); setFolderModal(null); }} style={styles.modalCancel}>
+                    <Text style={styles.modalCancelText}>Löschen</Text>
+                  </Pressable>
+                </>
+              ) : null}
+              <Pressable onPress={() => setFolderModal(null)} style={styles.modalCancel}><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
+              <Pressable onPress={submitFolder} style={styles.modalSave}><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Chat einem Ordner zuordnen */}
+      <Modal visible={!!assignChatId} transparent animationType="fade" onRequestClose={() => setAssignChatId(null)}>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setAssignChatId(null)}>
+          <Pressable style={styles.attachSheet} onPress={() => {}}>
+            <View style={styles.attachSheetHandle} />
+            <Text style={styles.attachSheetTitle}>In Ordner verschieben</Text>
+            <Pressable onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, null); }} style={styles.modelMenuItem}>
+              <Text style={styles.modelMenuItemText}>Kein Ordner</Text>
+            </Pressable>
+            {folders.map((f) => (
+              <Pressable key={f.id} onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, f.id); }} style={styles.modelMenuItem}>
+                <Text style={styles.modelMenuItemText}>{f.name}</Text>
+              </Pressable>
+            ))}
+          </Pressable>
+        </Pressable>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -2164,6 +2687,42 @@ const styles = StyleSheet.create({
   modalButtons: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 16 },
   modalCancel: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 },
   modalCancelText: { color: colors.muted, fontSize: 15 },
+  folderSubBtn: { color: colors.accent, fontSize: 15, fontWeight: "600" },
   modalSave: { paddingHorizontal: 18, paddingVertical: 10, borderRadius: 10, backgroundColor: colors.accent },
   modalSaveText: { color: "#ffffff", fontSize: 15, fontWeight: "600" },
+  chatRightRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  // Ordner/Projekte
+  foldersBar: { paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface },
+  foldersBarContent: { gap: 8, alignItems: "center" },
+  folderChip: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  folderChipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  folderChipText: { fontSize: 13, color: colors.text },
+  folderChipTextActive: { color: "#ffffff", fontWeight: "700" },
+  folderSuggestion: { flexDirection: "row", alignItems: "center", gap: 8, padding: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.accentSoft },
+  folderSuggestionText: { flex: 1, fontSize: 13, color: colors.text },
+  folderSuggestionYes: { fontSize: 13, fontWeight: "700", color: colors.accent },
+  // Plugins
+  pluginsSubTabs: { flexDirection: "row", flexWrap: "wrap", gap: 6, padding: 10, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface },
+  pluginsSubTab: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border },
+  pluginsSubTabActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  pluginsSubTabText: { fontSize: 13, color: colors.text },
+  pluginsSubTabTextActive: { color: "#ffffff", fontWeight: "700" },
+  pluginsHint: { fontSize: 13, color: colors.muted, lineHeight: 18, marginBottom: 12 },
+  pluginsSectionTitle: { fontSize: 14, fontWeight: "700", color: colors.text, marginTop: 10, marginBottom: 6 },
+  pluginsEmpty: { fontSize: 13, color: colors.muted, marginBottom: 6 },
+  connectorsWrap: { gap: 4 },
+  connectorForm: { marginTop: 8, gap: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 12 },
+  metaList: { gap: 8 },
+  metaCard: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 12, gap: 4 },
+  metaCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  metaName: { fontSize: 15, fontWeight: "700", color: colors.text, flex: 1 },
+  metaDesc: { fontSize: 13, color: colors.muted, lineHeight: 18 },
+  metaCron: { fontSize: 12, color: colors.accent, fontWeight: "700" },
+  metaAgent: { fontSize: 12, color: colors.accent },
+  metaDot: { width: 9, height: 9, borderRadius: 5 },
+  // Modell-Menü
+  modelMenuItem: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 13, paddingHorizontal: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
+  modelMenuItemActive: { backgroundColor: colors.accentSoft, borderRadius: 10, paddingHorizontal: 10 },
+  modelMenuItemText: { fontSize: 15, color: colors.text },
+  modelMenuItemTextActive: { color: colors.accent, fontWeight: "700" },
 });
