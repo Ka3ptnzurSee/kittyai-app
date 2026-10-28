@@ -684,11 +684,17 @@ export default function App() {
             if (c.id !== activeChatId) return c;
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant");
-            if (lastAi && !lastAi.error && serverLast && !lastAi.text.trim() && serverLast.text.trim()) {
+            // Server-Session ist die Wahrheit: eine (Resume-)Fehler-Karte auffüllen, wenn der
+            // Server die finale Antwort WIRKLICH hat (letzte Server-Nachricht ist eine
+            // Assistant-Antwort = Turn fertig). Bei fehlgeschlagenem Turn (letzte Nachricht
+            // ist User) bleibt die Fehler-Karte — keine veraltete Antwort einfüllen.
+            const lastServerMsg = data.messages[data.messages.length - 1];
+            const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim();
+            if (lastAi && !lastAi.text.trim() && serverHasFreshAnswer) {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
-                  m.id === lastAi.id ? { ...m, text: serverLast.text, images: serverLast.images || m.images } : m,
+                  m.id === lastAi.id ? { ...m, text: serverLast.text, images: serverLast.images || m.images, error: undefined } : m,
                 ),
                 updatedAt: Date.now(),
               };
