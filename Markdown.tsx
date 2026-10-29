@@ -365,6 +365,11 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
       let j = i + 1;
       const rows: Token[][][] = [];
       let currentRow: Token[][] = [];
+      let totalRows = 0;
+      // Obergrenze gegen den iOS-Bug „unendlicher weißer Balken“: eine riesige
+      // Markdown-Tabelle (z. B. Daten-Dump mit 500 Zeilen) bläht die Bubble sonst
+      // unbegrenzt auf. Mehr als MAX_TABLE_ROWS Zeilen werden ausgeblendet.
+      const MAX_TABLE_ROWS = 50;
       while (j < tokens.length && tokens[j].type !== "table_close") {
         const tok = tokens[j];
         if (tok.type === "tr_open") {
@@ -380,7 +385,8 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
           currentRow.push(cellTokens);
           j = k;
         } else if (tok.type === "tr_close") {
-          rows.push(currentRow);
+          totalRows++;
+          if (rows.length < MAX_TABLE_ROWS) rows.push(currentRow);
         }
         j++;
       }
@@ -392,7 +398,7 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
                 const inlineTok = cell.find((c) => c.type === "inline");
                 return (
                   <View key={`${key}-r${ri}-c${ci}`} style={styles.tableCell}>
-                    <Text style={styles.tableCellText}>
+                    <Text style={styles.tableCellText} numberOfLines={3}>
                       {inlineTok ? renderInline(inlineTok.children || [], `${key}-r${ri}-c${ci}`) : null}
                     </Text>
                   </View>
@@ -400,6 +406,9 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
               })}
             </View>
           ))}
+          {totalRows > rows.length ? (
+            <Text style={styles.tableNote}>{totalRows - rows.length} weitere Zeilen ausgeblendet</Text>
+          ) : null}
         </View>,
       );
       i = j;
@@ -524,4 +533,5 @@ const styles = StyleSheet.create({
   tableRow: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: colors.border },
   tableCell: { flex: 1, padding: 6 },
   tableCellText: { fontSize: 14, lineHeight: 20, color: colors.text, fontFamily: aiFontFamily },
+  tableNote: { fontSize: 12, color: colors.muted, fontFamily: aiFontFamily, padding: 6, fontStyle: "italic" },
 });
