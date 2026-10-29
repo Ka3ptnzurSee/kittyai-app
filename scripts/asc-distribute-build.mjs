@@ -4,8 +4,8 @@
 // verteilt aber NICHT an eine Beta-Gruppe → Build bleibt unsichtbar in TestFlight.
 //
 // Nutzung:  node scripts/asc-distribute-build.mjs <ascBuildId|buildVersion>
-//   Beispiel: node scripts/asc-distribute-build.mjs 77
-// Env (optional): ASC_APP_ID (Default 6818109107), ASC_EXT_GROUP_ID (Default Public Testers)
+// Exit-Codes: 0 = verteilt (Review optional), 1 = harter Fehler (Auth/Netz/Gruppe),
+//             2 = Build noch nicht VALID (retrybar — Polling-Fall)
 import fs from "node:fs";
 import crypto from "node:crypto";
 
@@ -40,15 +40,19 @@ function jwt() {
 }
 const H = { Authorization: `Bearer ${jwt()}`, "Content-Type": "application/json" };
 async function api(p, opts = {}) {
-  const r = await fetch("https://api.appstoreconnect.apple.com/v1" + p, {
-    ...opts,
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    headers: { ...H, ...(opts.headers || {}) },
-  });
-  const txt = await r.text();
-  let body = null;
-  try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
-  return { status: r.status, body };
+  try {
+    const r = await fetch("https://api.appstoreconnect.apple.com/v1" + p, {
+      ...opts,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: { ...H, ...(opts.headers || {}) },
+    });
+    const txt = await r.text();
+    let body = null;
+    try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
+    return { status: r.status, body };
+  } catch (e) {
+    die(`API-Aufruf fehlgeschlagen (${p}): ${e.message}`);
+  }
 }
 
 function die(msg) {
@@ -65,7 +69,9 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)
   }
   const b = (r.body?.data || []).find((x) => String(x.attributes.version) === String(arg) && x.attributes.processingState === "VALID");
   if (!b) {
-    die(`Kein VALID-Build mit Version ${arg} gefunden.`);
+    // Build noch nicht VALID (EAS-Upload wird verarbeitet) → retrybarer Exit-Code 2
+    console.log(`Build ${arg} noch nicht VALID in ASC.`);
+    process.exit(2);
   }
   buildId = b.id;
   console.log(`Build ${arg} → ASC id=${buildId}`);
@@ -81,9 +87,13 @@ if (r.status < 200 || r.status >= 300) {
 }
 console.log(`Gruppen-Zuweisung → HTTP ${r.status}`);
 
-// 2) Beta App Review anstoßen (nötig für externe Tester/Public Link)
-//    Fehlt betaBuildLocalizations, schlägt es fehl → dann Hinweis statt Crash.
+// 2) Beta App Review anstoßen (nötig für externe Tester/Public Link).
+//    Ab hier ist der Build bereits verteilt → Fehler sind nicht fatal (Exit 0).
 const bbd = await api(`/builds/${buildId}/buildBetaDetail`);
+if (bbd.status < 200 || bbd.status >= 300) {
+  console.log(`⚠️ buildBetaDetail nicht abrufbar (HTTP ${bbd.status}) — Build ist trotzdem intern verteilt.`);
+  process.exit(0);
+}
 const extState = bbd.body?.data?.attributes?.externalBuildState;
 console.log(`externalBuildState=${extState}`);
 if (extState === "READY_FOR_BETA_SUBMISSION") {
@@ -103,3 +113,4 @@ if (extState === "READY_FOR_BETA_SUBMISSION") {
 } else {
   console.log("ℹ️ externalBuildState unerwartet — manuell prüfen.");
 }
+process.exit(0);

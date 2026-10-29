@@ -14,7 +14,17 @@ cd "$APP_DIR" || exit 1
 if [ -z "$BUILD_ID" ]; then echo "FEHLER: BUILD_ID nicht gesetzt"; exit 1; fi
 if [ -z "$BUILD_VER" ]; then echo "FEHLER: BUILD_VER nicht gesetzt"; exit 1; fi
 
-log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+# Eingaben streng validieren (gegen Log-Injection / unerwartete Werte)
+case "$BUILD_ID" in
+  [0-9a-fA-F][0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*[0-9a-fA-F]*) : ;;
+  *) echo "FEHLER: BUILD_ID sieht nicht nach UUID aus"; exit 1 ;;
+esac
+case "$BUILD_VER" in
+  ''|*[!0-9]*) echo "FEHLER: BUILD_VER muss numerisch sein"; exit 1 ;;
+esac
+
+# Control-Chars aus Log-Zeilen entfernen (keine Log-Fälschung via \n/\r)
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tr -d '\r' | tee -a "$LOG"; }
 
 log "START monitor build=$BUILD_ID ver=$BUILD_VER"
 
@@ -50,20 +60,15 @@ for i in $(seq 1 8); do
 done
 if [ "$submitted" -eq 0 ]; then log "Submit endgültig fehlgeschlagen."; exit 1; fi
 
-# 3) Warten bis Build VALID in ASC ist, dann verteilen + Review
+# 3) Warten bis Build VALID ist, dann verteilen + Review.
+#    Exit-Codes vom mjs: 0 = verteilt, 1 = harter Fehler, 2 = noch nicht VALID (retry)
 for i in $(seq 1 60); do
   sleep 30
-  OUT=$(node scripts/asc-distribute-build.mjs "$BUILD_VER" 2>&1)
-  if echo "$OUT" | grep -qE 'externalBuildState=IN_BETA_TESTING|externalBuildState=BETA_APPROVED|externalBuildState=IN_EXTERNAL_TESTING|Beta App Review eingereicht'; then
-    log "$OUT"
-    log "✅ Verteilung + Review angestoßen."
-    exit 0
-  fi
-  if echo "$OUT" | grep -q 'FEHLER: Kein VALID-Build'; then
-    log "Build noch nicht VALID (wird verarbeitet) — Versuch $i/60."
-  else
-    log "$OUT"
-  fi
+  node scripts/asc-distribute-build.mjs "$BUILD_VER" >> "$LOG" 2>&1
+  rc=$?
+  if [ "$rc" -eq 0 ]; then log "✅ Verteilung + Review abgeschlossen."; exit 0; fi
+  if [ "$rc" -eq 2 ]; then log "Build noch nicht VALID — Versuch $i/60."; continue; fi
+  log "Verteilung fehlgeschlagen (rc=$rc) — Abbruch."; exit 1
 done
 log "Timeout beim Verteilen — manuell prüfen."
 exit 1
