@@ -22,7 +22,7 @@ if (!arg) {
   process.exit(1);
 }
 // Control-Chars/ANSI aus allen Log-Ausgaben entfernen (gegen Log-Injection)
-const sanitize = (v) => String(v).replace(/[\r\n\x1b]/g, "");
+const sanitize = (v) => String(v).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029]/g, "");
 const safeArg = sanitize(arg);
 
 let key;
@@ -41,7 +41,14 @@ function jwt() {
   const si = b64(h) + "." + b64(p);
   return si + "." + crypto.sign("sha256", Buffer.from(si), { key, format: "pem", type: "pkcs8", dsaEncoding: "ieee-p1363" }).toString("base64url");
 }
-const H = { Authorization: `Bearer ${jwt()}`, "Content-Type": "application/json" };
+const H = (() => {
+  try {
+    return { Authorization: `Bearer ${jwt()}`, "Content-Type": "application/json" };
+  } catch (e) {
+    console.error("FEHLER: JWT-Erzeugung fehlgeschlagen: " + sanitize(e.message));
+    process.exit(1);
+  }
+})();
 async function api(p, opts = {}) {
   try {
     const r = await fetch("https://api.appstoreconnect.apple.com/v1" + p, {
@@ -63,13 +70,13 @@ function die(msg) {
   process.exit(1);
 }
 
-// Transportfehler/Timeouts (status -1) und 5xx sind transient → retrybar (Exit 2).
-function isTransient(status) { return status < 0 || status >= 500; }
+// Transportfehler/Timeouts (status -1), 408/429 und 5xx sind transient → retrybar (Exit 2).
+function isTransient(status) { return status < 0 || status === 408 || status === 429 || status >= 500; }
 
 // Build-ID auflösen (entweder direkt UUID oder Version → neuester VALID-Build)
 let buildId = arg;
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)) {
-  const r = await api(`/builds?filter[app]=${APP_ID}&limit=30&sort=-uploadedDate`);
+  const r = await api(`/builds?filter[app]=${encodeURIComponent(APP_ID)}&limit=30&sort=-uploadedDate`);
   if (isTransient(r.status)) {
     console.error(`Build-Liste transient nicht abrufbar (HTTP ${r.status}) — später erneut.`);
     process.exit(2);
@@ -94,6 +101,11 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(buil
   die(`Ungültige Build-ID: ${buildId}`);
 }
 
+// EXT_GROUP_ID defensiv als UUID validieren (kommt ggf. aus Env)
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(EXT_GROUP_ID)) {
+  die(`Ungültige ASC_EXT_GROUP_ID: ${EXT_GROUP_ID}`);
+}
+
 // 1) Build an die externe Beta-Gruppe hängen (idempotent; 204 = ok)
 let r = await api(`/betaGroups/${EXT_GROUP_ID}/relationships/builds`, {
   method: "POST",
@@ -103,10 +115,13 @@ if (isTransient(r.status)) {
   console.error(`Gruppen-Zuweisung transient fehlgeschlagen (HTTP ${r.status}) — später erneut.`);
   process.exit(2);
 }
-if (r.status < 200 || r.status >= 300) {
+if (r.status === 409) {
+  console.log("Gruppen-Zuweisung → Build bereits in Gruppe (HTTP 409).");
+} else if (r.status < 200 || r.status >= 300) {
   die(`Gruppen-Zuweisung fehlgeschlagen (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
+} else {
+  console.log(`Gruppen-Zuweisung → HTTP ${r.status}`);
 }
-console.log(`Gruppen-Zuweisung → HTTP ${r.status}`);
 
 // 2) Beta App Review anstoßen (nötig für externe Tester/Public Link).
 //    Ab hier ist der Build bereits verteilt → Fehler sind nicht fatal (Exit 0).
