@@ -29,7 +29,7 @@ let key;
 try {
   key = fs.readFileSync(KEY_PATH, "utf8");
 } catch (e) {
-  console.error(`FEHLER: API-Key nicht lesbar unter ${KEY_PATH}: ${e.message}`);
+  console.error("FEHLER: API-Key nicht lesbar unter " + sanitize(KEY_PATH) + ": " + sanitize(e.message));
   process.exit(1);
 }
 
@@ -135,7 +135,7 @@ if (bbd.status < 200 || bbd.status >= 300) {
   process.exit(0);
 }
 const extState = bbd.body?.data?.attributes?.externalBuildState;
-console.log(`externalBuildState=${extState}`);
+console.log("externalBuildState=" + sanitize(extState));
 if (extState === "READY_FOR_BETA_SUBMISSION") {
   r = await api("/betaAppReviewSubmissions", {
     method: "POST",
