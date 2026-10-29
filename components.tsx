@@ -30,6 +30,7 @@ import {
   oaiSpacing,
   oaiControlHeight,
   oaiTypography,
+  motion,
 } from "./theme";
 
 // ───────────────────────────── Haptik (Valdi Device.performHapticFeedback) ─────────────────────────────
@@ -276,8 +277,8 @@ export function SegmentedControl({
     const targetX = pill ? 4 + x : x;
     const targetW = pill ? Math.max(0, w - 8) : w;
     Animated.parallel([
-      Animated.spring(indicator, { toValue: { x: targetX, y: 0 }, damping: 38, stiffness: 460, useNativeDriver: true }),
-      Animated.spring(indicatorSize, { toValue: targetW, damping: 38, stiffness: 460, useNativeDriver: false }),
+      Animated.spring(indicator, { toValue: { x: targetX, y: 0 }, ...motion.springDefault, useNativeDriver: true }),
+      Animated.spring(indicatorSize, { toValue: targetW, ...motion.springDefault, useNativeDriver: false }),
     ]).start();
   }, [idx, measured, widths, pill, indicator, indicatorSize]);
 
@@ -362,8 +363,7 @@ export function Toggle({
   useEffect(() => {
     Animated.spring(progress, {
       toValue: on ? 1 : 0,
-      damping: 38,
-      stiffness: 460,
+      ...motion.springDefault,
       useNativeDriver: true,
     }).start();
   }, [on, progress]);
@@ -378,7 +378,7 @@ export function Toggle({
     <RNPressable
       disabled={disabled}
       onPress={() => {
-        haptic("action_sheet");
+        haptic(motion.toggleHaptic);
         onToggle?.(!on);
       }}
       style={{ width: 38, height: 24, borderRadius: 12, justifyContent: "center", opacity: disabled ? 0.38 : 1 }}
@@ -401,12 +401,12 @@ export function Toggle({
 // ───────────────────────────── Shimmer (Valdi ShimmerText/ShimmerLines.js) ─────────────────────────────
 // Zyklus 1400 ms, Glyph-/Block-Opazität animiert.
 export function ShimmerLines({ lines = 3, width = "100%" }: { lines?: number; width?: ViewStyle["width"] }) {
-  const op = useRef(new Animated.Value(0.4)).current;
+  const op = useRef(new Animated.Value(motion.shimmerOpacityMin)).current;
   useEffect(() => {
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(op, { toValue: 1, duration: 700, useNativeDriver: true }),
-        Animated.timing(op, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+        Animated.timing(op, { toValue: motion.shimmerOpacityMax, duration: motion.shimmerDurationMs, useNativeDriver: true }),
+        Animated.timing(op, { toValue: motion.shimmerOpacityMin, duration: motion.shimmerDurationMs, useNativeDriver: true }),
       ])
     );
     loop.start();

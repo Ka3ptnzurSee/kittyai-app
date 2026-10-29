@@ -123,6 +123,8 @@ export const WIDGET_PROPS: Record<string, string[]> = {
   Text: ["block", "value"],
   Markdown: ["streaming", "value", "fontSize", "lineHeight", "textAlign"],
   Math: ["streaming", "value"],
+  // Diff (markdown_diff.dec)
+  Diff: ["old", "new", "before", "after"],
 };
 
 /** Gemeinsame Layout-Properties, die jedes Widget (implizit) akzeptieren darf. */

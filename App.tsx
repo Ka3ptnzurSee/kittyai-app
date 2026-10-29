@@ -33,14 +33,15 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
-import { DilRichText } from "./Dil";
+import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean } };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
 type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number; folderId?: string | null };
 type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
 type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
+type ConnectedPlatform = { id: string; name: string; status: "ok" | "error" | "warning"; detail: string };
 type SkillMeta = { id: string; name: string; description: string };
 type AgentMeta = { id: string; name: string; description: string };
 type WorkflowMeta = { id: string; name: string; cron?: string };
@@ -331,6 +332,12 @@ function StreamingCursor() {
   );
 }
 
+// ```dil```-Fences aus einem Text entfernen (nur Prosa bleibt übrig), damit die
+// strukturierten DIL-Widgets separat über das dil-Array gerendert werden können.
+function stripDilFences(text: string): string {
+  return text.replace(/```dil\b[^\n]*\n?([\s\S]*?)```/g, "");
+}
+
 function MessageBubble({
   item,
   isLast,
@@ -386,7 +393,16 @@ function MessageBubble({
         </Text>
       ) : (
         <>
-          <DilRichText text={item.text || ""} />
+          {Array.isArray(item.dil) && item.dil.length > 0 ? (
+            <View style={{ gap: 8 }}>
+              <DilRichText text={stripDilFences(item.text || "")} />
+              {item.dil.map((block, i) => (
+                <Dil key={i} json={block} />
+              ))}
+            </View>
+          ) : (
+            <DilRichText text={item.text || ""} />
+          )}
           {isLast && isBusy && item.text ? <StreamingCursor /> : null}
           {item.error ? (
             <View style={styles.errorCard}>
@@ -495,7 +511,7 @@ export default function App() {
   const [renameInput, setRenameInput] = useState("");
   // Plugins
   const [pluginsTab, setPluginsTab] = useState<"connectors" | "skills" | "agents" | "workflows" | "tasks">("connectors");
-  const [meta, setMeta] = useState<{ connectors: Connector[]; skills: SkillMeta[]; agents: AgentMeta[]; workflows: WorkflowMeta[] }>({ connectors: [], skills: [], agents: [], workflows: [] });
+  const [meta, setMeta] = useState<{ connectors: Connector[]; skills: SkillMeta[]; agents: AgentMeta[]; workflows: WorkflowMeta[]; platforms: ConnectedPlatform[] }>({ connectors: [], skills: [], agents: [], workflows: [], platforms: [] });
   const [connectorsList, setConnectorsList] = useState<Connector[]>([]);
   const [connectorForm, setConnectorForm] = useState<{ name: string; agent: string; description: string }>({ name: "", agent: "", description: "" });
   const loadedRef = useRef(false);
@@ -649,6 +665,18 @@ export default function App() {
       if (!serverLast || !serverLast.text?.trim()) return false;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
+      // Server-Fehler der letzten Runde (z. B. Zeitüberschreitung) sichtbar machen:
+      // statt einer leeren/abgeschnittenen Bubble eine klare Fehler-Karte setzen.
+      const lastErr = data.lastError && typeof data.lastError === "object" && data.lastError.text ? String(data.lastError.text) : "";
+      if (lastErr) {
+        const errAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
+        if (errAi && !errAi.error) {
+          patchMsg(chatId, errAi.id, (m) => ({ ...m, error: { type: classifyError(lastErr), retryable: isRetryable(lastErr) } }));
+          delete streamStateRef.current[chatId];
+          persistStreamState(chatId);
+          return true;
+        }
+      }
       const localUserCount = chat.messages.filter((m) => m.role === "user").length;
       if (serverUserCount < localUserCount) return false; // Turn hat den Server nie erreicht
       const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
@@ -692,6 +720,7 @@ export default function App() {
         skills: Array.isArray(data.skills) ? data.skills : [],
         agents: Array.isArray(data.agents) ? data.agents : [],
         workflows: Array.isArray(data.workflows) ? data.workflows : [],
+        platforms: Array.isArray(data.platforms) ? data.platforms : [],
       });
     } catch {
       // offline → leer lassen
@@ -1002,6 +1031,18 @@ export default function App() {
       clearInterval(t);
       tasksAbortRef.current?.abort();
     };
+  }, [tab, pluginsTab, serverUrl, apiToken]);
+
+  // Plugins → Connectoren: Meta inkl. Plattform-Status laden. Der Plattform-Doctor
+  // läuft serverseitig asynchron (TTL-Cache), deshalb pollen bis Daten da sind.
+  useEffect(() => {
+    if (tab !== "plugins" || pluginsTab !== "connectors") return;
+    loadMeta();
+    if (meta.platforms.length > 0) return;
+    const t = setInterval(() => {
+      loadMeta();
+    }, 8000);
+    return () => clearInterval(t);
   }, [tab, pluginsTab, serverUrl, apiToken]);
 
   async function registerPush(url: string, tok?: string) {
@@ -1339,6 +1380,8 @@ export default function App() {
       if (t === "text") {
         const delta = typeof e.data === "string" ? e.data : "";
         patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(0, MAX_REPLY_CHARS) }));
+      } else if (t === "dil") {
+        patchMsg(chatId, aiId, (m) => ({ ...m, dil: Array.isArray(e.data) ? e.data : [] }));
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
         setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-MAX_THINKING_CHARS) }));
@@ -1802,6 +1845,22 @@ export default function App() {
     return (
       <View style={styles.connectorsWrap}>
         <Text style={styles.pluginsHint}>Verbundene Apps & Connectoren. Neue Connectoren mit einem spezialisierten Agenten verbinden.</Text>
+        <Text style={styles.pluginsSectionTitle}>Verbundene Plattformen</Text>
+        {meta.platforms.length === 0 ? (
+          <Text style={styles.pluginsEmpty}>Status wird geladen …</Text>
+        ) : (
+          <View style={styles.metaList}>
+            {meta.platforms.map((p) => (
+              <View key={p.id} style={styles.metaCard}>
+                <View style={styles.metaCardHeader}>
+                  <Text style={styles.metaName}>{p.name}</Text>
+                  <View style={[styles.metaDot, { backgroundColor: p.status === "ok" ? colors.success : p.status === "warning" ? colors.warning : colors.danger }]} />
+                </View>
+                {p.detail ? <Text style={styles.metaDesc} numberOfLines={2}>{p.detail}</Text> : null}
+              </View>
+            ))}
+          </View>
+        )}
         <Text style={styles.pluginsSectionTitle}>Verfügbare Connectoren</Text>
         {meta.connectors.length === 0 ? (
           <Text style={styles.pluginsEmpty}>Keine MCP-Connectoren konfiguriert.</Text>

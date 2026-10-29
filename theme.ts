@@ -198,3 +198,19 @@ export const oaiRadius = { none: 0, xs: 4, sm: 6, md: 8, lg: 12, xl: 16, xxl: 24
 export const oaiSpacing = { none: 0, px: 1, quarter: 2, half: 4, threeQuarters: 6, one: 8, oneAndHalf: 12, two: 16, three: 24, four: 32 };
 export const oaiControlHeight = { sm: 28, md: 44, lg: 52 };
 export const oaiMetric = { badgeSize: 18, navigationItemHeight: 52 };
+
+// ───────────────────────────── Motion (ChatGPT Spring-/Timing-Werte) ─────────────────────────────
+// Zentralisiert die in der App verstreuten Inline-Werte (RN Animated).
+// Quellen: Sidebar/Toggle Spring damping=38/stiffness=460, Shimmer-Zyklus 1400 ms (2×700 ms),
+// Haptik „action_sheet" (impactAsync Light), Press-Dauer 150 ms, Pulse 600 ms.
+export const motion = {
+  springDefault: { damping: 38, stiffness: 460 },
+  springSidebar: { damping: 38, stiffness: 460 },
+  pressDurationMs: 150,
+  shimmerDurationMs: 700,
+  shimmerCycleMs: 1400,
+  shimmerOpacityMin: 0.4,
+  shimmerOpacityMax: 1,
+  pulseDurationMs: 600,
+  toggleHaptic: "action_sheet" as const,
+};

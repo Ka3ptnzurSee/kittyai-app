@@ -26,6 +26,8 @@ import ini from "highlight.js/lib/languages/ini";
 import diff from "highlight.js/lib/languages/diff";
 import plaintext from "highlight.js/lib/languages/plaintext";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
+import { MathView } from "./MathView";
+import { splitMathSegments, escapeInlineMathMeta } from "./dilviz";
 import { breakLongLines, breakUnbreakable } from "./lib";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
@@ -189,7 +191,19 @@ function renderInline(tokens: Token[], keyPrefix: string): ReactNode {
     const t = tokens[i];
     const key = `${keyPrefix}-i${i}`;
     if (t.type === "text") {
-      children.push(breakUnbreakable(t.content));
+      const segs = splitMathSegments(t.content);
+      segs.forEach((seg, si) => {
+        if (seg.kind === "math") {
+          // Inline-Math: Quelltext sauber als markierter Mono-Span (kein Rohtext mit $).
+          children.push(
+            <Text key={`${key}-m${si}`} style={styles.inlineMath}>
+              {breakUnbreakable(seg.value)}
+            </Text>,
+          );
+        } else if (seg.value) {
+          children.push(breakUnbreakable(seg.value));
+        }
+      });
     } else if (t.type === "softbreak" || t.type === "hardbreak") {
       children.push("\n");
     } else if (t.type === "code_inline") {
@@ -397,12 +411,49 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
 
 // --- Öffentliche Komponente ---
 
+/** Maskiert ```...```/~~~...~~~-Fences, damit `$$` in Code-Blöcken nicht als Math erkannt wird. */
+function maskFencedBlocks(text: string): { masked: string; restore: (s: string) => string } {
+  const fences: string[] = [];
+  const masked = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, (m) => {
+    fences.push(m);
+    return `\u0000FENCE${fences.length - 1}\u0000`;
+  });
+  const restore = (s: string) => s.replace(/\u0000FENCE(\d+)\u0000/g, (_m, idx) => fences[Number(idx)] ?? "");
+  return { masked, restore };
+}
+
 export function Markdown({ text }: { text: string }) {
   const rendered = useMemo(() => {
     if (!text) return null;
     try {
-      const tokens = md.parse(text, {});
-      return renderBlocks(tokens, "md");
+      // Fences (Code-Blöcke) maskieren, damit $/$$ dort unangetastet bleiben.
+      const { masked, restore } = maskFencedBlocks(text);
+      const segs = splitMathSegments(masked);
+      const hasMath = segs.some((s) => s.kind === "math");
+      if (!hasMath) {
+        const tokens = md.parse(text, {});
+        return renderBlocks(tokens, "md");
+      }
+      // Math vorhanden: $$..$$ als KaTeX-Block, $..$ inline (Meta-escaped, renderInline splittet erneut).
+      const nodes: ReactNode[] = [];
+      let mdText = "";
+      const flush = () => {
+        if (!mdText) return;
+        nodes.push(...renderBlocks(md.parse(mdText, {}), "md"));
+        mdText = "";
+      };
+      for (const seg of segs) {
+        if (seg.kind === "math" && seg.display) {
+          flush();
+          nodes.push(<MathView key={`mb${nodes.length}`} value={seg.value} display />);
+        } else if (seg.kind === "math") {
+          mdText += escapeInlineMathMeta(`$${seg.value}$`);
+        } else {
+          mdText += restore(seg.value);
+        }
+      }
+      flush();
+      return nodes;
     } catch {
       // Fallback: roher Text
       return (
@@ -432,6 +483,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 4,
     borderRadius: 4,
     fontSize: 15,
+  },
+  inlineMath: {
+    fontFamily: monoFontFamily,
+    backgroundColor: colors.accentSoft,
+    color: colors.accentHover,
+    paddingHorizontal: 4,
+    borderRadius: 4,
+    fontSize: 15,
+    fontStyle: "italic",
   },
   link: { color: colors.link, textDecorationLine: "underline" },
   list: { gap: 4, marginVertical: 4 },

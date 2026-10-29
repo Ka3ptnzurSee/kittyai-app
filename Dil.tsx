@@ -12,7 +12,11 @@ import {
 import type { ResolvedNode } from "./dil";
 import { splitDilBlocks, resolveDilRoot, isSafeImageSrc } from "./dil";
 import { Markdown } from "./Markdown";
-import { aiFontFamily, colors, monoFontFamily } from "./theme";
+import { MathView } from "./MathView";
+import Svg, { Path, Polyline, Circle, Line as SvgLine, Text as SvgText } from "react-native-svg";
+import { normalizeChart, computePieSlices, classifyDiff } from "./dilviz";
+import type { ChartPoint } from "./dilviz";
+import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
 import { breakUnbreakable } from "./lib";
 
 // ───────────────────────────── RN-Renderer für DIL (GenUI) ─────────────────────────────
@@ -259,11 +263,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "Markdown":
       return <Markdown text={str(getProp(props, "value"), "")} />;
     case "Math":
-      return (
-        <Text selectable style={[styles.text, { fontFamily: monoFontFamily }]}>
-          {str(getProp(props, "value"), "")}
-        </Text>
-      );
+      return <MathView value={str(getProp(props, "value"), "")} display />;
 
     // ── Formular/Interaktion ──
     case "Button": {
@@ -414,10 +414,12 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     }
     case "Chart":
     case "ValdiChart":
-      return <BarChart data={getProp(props, "data")} series={getProp(props, "series")} />;
+      return <ChartWidget props={props} />;
     case "PieChart":
     case "ValdiPieChart":
-      return <BarChart data={getProp(props, "data")} series={getProp(props, "series")} horizontal />;
+      return <PieChartWidget props={props} />;
+    case "Diff":
+      return <DiffWidget props={props} />;
 
     // ── Erweiterter Katalog (Radio/Icon/Loading/Grid/Form/Video/Svg/…) ──
     case "RadioGroup":
@@ -535,36 +537,41 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
   }
 }
 
-// ── Balken-Chart (View-basiert, kein externes Charting-Dep) ──
-// Robust gegenüber data=Array<{label,value}> | Array<[label,value]> | Array<number>.
-function normalizeChart(data: unknown): { label: string; value: number }[] {
-  if (!Array.isArray(data)) return [];
-  const out: { label: string; value: number }[] = [];
-  const items = data.slice(0, 500); // Cap gegen DoS (Riesen-Datenarray)
-  for (const d of items) {
-    if (typeof d === "number") {
-      out.push({ label: String(out.length + 1), value: d });
-    } else if (Array.isArray(d)) {
-      out.push({ label: str(d[0], "?"), value: num(d[1], 0) });
-    } else if (d && typeof d === "object") {
-      const o = d as Record<string, unknown>;
-      const value = num(o.value ?? o.y, 0);
-      const label = str(o.label ?? o.name ?? o.x ?? o.key, String(out.length + 1));
-      out.push({ label, value });
-    }
-  }
-  return out;
+// ── Chart-Daten (normalizeChart ist in dilviz.ts, RN-unabhängig & getestet) ──
+interface ChartData {
+  points: ChartPoint[];
+  type: string; // aus series[0].type (recharts-Konvention)
 }
 
-function BarChart({ data, series, horizontal }: { data?: unknown; series?: unknown; horizontal?: boolean }) {
-  const points = useMemo(() => {
-    if (Array.isArray(series)) {
-      // series = [{ name, type, data:[...] }] — nimm die erste Serie.
-      const first = (series as unknown[])[0] as Record<string, unknown> | undefined;
-      if (first && Array.isArray(first.data)) return normalizeChart(first.data);
+function resolveChartData(data: unknown, series: unknown): ChartData {
+  if (Array.isArray(series)) {
+    const first = (series as unknown[])[0] as Record<string, unknown> | undefined;
+    if (first && typeof first === "object") {
+      const type = str(first.type, "");
+      if (Array.isArray(first.data)) return { points: normalizeChart(first.data), type };
     }
-    return normalizeChart(data);
-  }, [data, series]);
+  }
+  return { points: normalizeChart(data), type: "" };
+}
+
+// ── Chart / ValdiChart (bar | line | area) ──
+function ChartWidget({ props }: { props: Props }) {
+  const { points, type: seriesType } = useMemo(
+    () => resolveChartData(getProp(props, "data"), getProp(props, "series")),
+    [props],
+  );
+  const explicitType = str(getProp(props, "type"), "").toLowerCase();
+  const kind = explicitType || seriesType.toLowerCase();
+  if (!points.length) return null;
+  if (kind === "line" || kind === "area") {
+    return <LineChart points={points} area={kind === "area"} />;
+  }
+  const horizontal = str(getProp(props, "layout"), "") === "vertical";
+  return <BarChart points={points} horizontal={horizontal} />;
+}
+
+// ── Balken-Chart (View-basiert) ──
+function BarChart({ points, horizontal }: { points: ChartPoint[]; horizontal?: boolean }) {
   if (!points.length) return null;
   const max = Math.max(1, ...points.map((p) => p.value));
   const barColor = colors.accent;
@@ -595,6 +602,183 @@ function BarChart({ data, series, horizontal }: { data?: unknown; series?: unkno
           </View>
         ))}
       </View>
+    </View>
+  );
+}
+
+// ── Linien-/Flächen-Chart (SVG via react-native-svg) ──
+function LineChart({ points, area }: { points: ChartPoint[]; area?: boolean }) {
+  if (points.length < 2) return <BarChart points={points} />;
+  const shown = points.slice(0, 60); // Rendering-Cap (Daten-Cap liegt bei 500 in normalizeChart)
+  const W = 320;
+  const H = 180;
+  const padL = 34;
+  const padR = 12;
+  const padT = 12;
+  const padB = 26;
+  const max = Math.max(1, ...shown.map((p) => p.value));
+  const min = Math.min(0, ...shown.map((p) => p.value));
+  const range = max - min || 1;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const coords = shown.map((p, i) => ({
+    x: padL + (i / (shown.length - 1)) * innerW,
+    y: padT + innerH - ((p.value - min) / range) * innerH,
+  }));
+  const line = coords.map((c) => `${c.x},${c.y}`).join(" ");
+  const baseY = padT + innerH;
+  const areaPath = `M ${coords[0].x},${baseY} L ${coords.map((c) => `${c.x},${c.y}`).join(" L ")} L ${coords[coords.length - 1].x},${baseY} Z`;
+  const lineColor = colors.accent;
+  const areaColor = "rgba(2,133,255,0.2)";
+  return (
+    <View style={styles.chart}>
+      <Svg width={W} height={H}>
+        <SvgLine x1={padL} y1={baseY} x2={W - padR} y2={baseY} stroke={colors.border} strokeWidth={1} />
+        {area ? <Path d={areaPath} fill={areaColor} stroke="none" /> : null}
+        <Polyline points={line} fill="none" stroke={lineColor} strokeWidth={2} />
+        {coords.map((c, i) => (
+          <Circle key={i} cx={c.x} cy={c.y} r={2.5} fill={lineColor} />
+        ))}
+        <SvgText x={2} y={padT + 4} fontSize={9} fill={colors.muted}>{max}</SvgText>
+        <SvgText x={2} y={baseY - 2} fontSize={9} fill={colors.muted}>{min}</SvgText>
+      </Svg>
+      {shown.length <= 12 ? (
+        <View style={styles.axisRow}>
+          {shown.map((p, i) => (
+            <Text key={i} style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// ── Pie / ValdiPieChart (echtes Kreisdiagramm via react-native-svg) ──
+const PIE_COLORS = ["#0285FF", "#04B84C", "#FB6A22", "#AD7BF9", "#FFC300", "#339CFF", "#E25507", "#8046D9", "#00A240", "#0169CC"];
+
+/** innerRadius (recharts: px oder "50%") → Bruchteil des Radius (0..1). */
+function innerRadiusFrac(v: unknown): number {
+  const s = str(v, "0");
+  if (s.endsWith("%")) {
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? Math.max(0, Math.min(1, n / 100)) : 0;
+  }
+  const n = num(v, 0);
+  if (n <= 0) return 0;
+  if (n <= 1) return n;
+  return Math.max(0, Math.min(1, n / 100));
+}
+
+/** Polarkoordinaten: 0° = oben (12 Uhr), im Uhrzeigersinn (Screen-Koordinaten, y↓). */
+function polar(cx: number, cy: number, r: number, deg: number): { x: number; y: number } {
+  const rad = ((deg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+
+function slicePath(cx: number, cy: number, R: number, r: number, a0: number, a1: number): string {
+  const p0 = polar(cx, cy, R, a0);
+  const p1 = polar(cx, cy, R, a1);
+  const largeArc = a1 - a0 > 180 ? 1 : 0;
+  if (r <= 0.01) {
+    return `M ${p0.x},${p0.y} A ${R},${R} 0 ${largeArc} 1 ${p1.x},${p1.y} L ${cx},${cy} Z`;
+  }
+  const p2 = polar(cx, cy, r, a1);
+  const p3 = polar(cx, cy, r, a0);
+  return `M ${p0.x},${p0.y} A ${R},${R} 0 ${largeArc} 1 ${p1.x},${p1.y} L ${p2.x},${p2.y} A ${r},${r} 0 ${largeArc} 0 ${p3.x},${p3.y} Z`;
+}
+
+function PieChartWidget({ props }: { props: Props }) {
+  const { points } = useMemo(
+    () => resolveChartData(getProp(props, "data"), getProp(props, "series")),
+    [props],
+  );
+  const innerRadius = innerRadiusFrac(getProp(props, "innerRadius"));
+  const paddingAngle = Math.max(0, num(getProp(props, "paddingAngle"), 0));
+  const startAngle = num(getProp(props, "startAngle"), 0);
+  const endAngle = num(getProp(props, "endAngle"), 360);
+  // Hooks immer vor Early-Return aufrufen (Rules of Hooks) — computePieSlices([]) ist billig.
+  const slices = useMemo(
+    () => computePieSlices(points, { startAngle, endAngle, paddingAngle }),
+    [points, startAngle, endAngle, paddingAngle],
+  );
+  if (!points.length) return null;
+  const SIZE = 180;
+  const R = SIZE / 2 - 4;
+  const cx = SIZE / 2;
+  const cy = SIZE / 2;
+  const r = innerRadius * R;
+  return (
+    <View style={styles.chart}>
+      <View style={styles.pieRow}>
+        <Svg width={SIZE} height={SIZE}>
+          {slices.map((s, i) => (
+            <Path key={i} d={slicePath(cx, cy, R, r, s.startDeg, s.endDeg)} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke={colors.surface} strokeWidth={1} />
+          ))}
+        </Svg>
+        <View style={styles.pieLegend}>
+          {slices.map((s, i) => (
+            <View key={i} style={styles.pieLegendRow}>
+              <View style={[styles.pieLegendDot, { backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }]} />
+              <Text style={styles.chartLabel} numberOfLines={1}>{s.label}</Text>
+              <Text style={styles.chartValue}>{s.pct.toFixed(1)}%</Text>
+            </View>
+          ))}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ── Diff-Ansicht (markdown_diff.dec) ──
+function DiffWidget({ props }: { props: Props }) {
+  const oldText = str(getProp(props, "old"), str(getProp(props, "before"), ""));
+  const newText = str(getProp(props, "new"), str(getProp(props, "after"), ""));
+  const all = useMemo(() => classifyDiff(oldText, newText), [oldText, newText]);
+  if (!all.length) return null;
+  const lines = all.slice(0, 200); // Cap gegen DoS bei riesigen Diffs
+  const hidden = all.length - lines.length;
+  return (
+    <View style={styles.diff}>
+      <View style={styles.diffHeader}>
+        <Text style={styles.diffStat}>
+          {all.filter((l) => l.type === "added").length} hinzugefügt · {all.filter((l) => l.type === "removed").length} entfernt
+        </Text>
+      </View>
+      {lines.map((l, i) => (
+        <View
+          key={i}
+          style={[
+            styles.diffRow,
+            l.type === "added" ? styles.diffAddedRow : l.type === "removed" ? styles.diffRemovedRow : null,
+          ]}
+        >
+          <Text
+            style={[
+              styles.diffMarker,
+              l.type === "added"
+                ? { color: oaicolors.textStatusSuccess }
+                : l.type === "removed"
+                  ? { color: oaicolors.textStatusError }
+                  : { color: colors.muted },
+            ]}
+          >
+            {l.type === "added" ? "+" : l.type === "removed" ? "−" : " "}
+          </Text>
+          <Text
+            style={[
+              styles.diffText,
+              l.type === "added"
+                ? { color: oaicolors.textStatusSuccess }
+                : l.type === "removed"
+                  ? { color: oaicolors.textStatusError }
+                  : undefined,
+            ]}
+          >
+            {l.text || " "}
+          </Text>
+        </View>
+      ))}
+      {hidden > 0 ? <Text style={styles.tableNote}>{hidden} weitere Zeilen ausgeblendet</Text> : null}
     </View>
   );
 }
@@ -703,6 +887,19 @@ const styles = StyleSheet.create({
   hBarFill: { height: "100%", borderRadius: 7 },
   chartLabel: { color: colors.muted, fontSize: 11, flex: 1 },
   chartValue: { color: colors.text, fontSize: 12, fontFamily: monoFontFamily, minWidth: 30, textAlign: "right" },
+  axisRow: { flexDirection: "row", gap: 2, marginTop: 2 },
+  pieRow: { flexDirection: "row", alignItems: "center", gap: 12, flexWrap: "wrap" },
+  pieLegend: { flex: 1, minWidth: 120, gap: 4 },
+  pieLegendRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  pieLegendDot: { width: 10, height: 10, borderRadius: 3 },
+  diff: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surface },
+  diffHeader: { paddingHorizontal: 10, paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border, backgroundColor: colors.surface2 },
+  diffStat: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily },
+  diffRow: { flexDirection: "row", alignItems: "flex-start" },
+  diffAddedRow: { backgroundColor: oaicolors.bgStatusSuccess },
+  diffRemovedRow: { backgroundColor: oaicolors.bgStatusError },
+  diffMarker: { width: 20, paddingVertical: 3, paddingLeft: 6, fontFamily: monoFontFamily, fontSize: 12, lineHeight: 18, textAlign: "center" },
+  diffText: { flex: 1, paddingVertical: 3, paddingRight: 8, fontSize: 13, lineHeight: 18, fontFamily: monoFontFamily, color: colors.text },
   fallback: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, gap: 4 },
   fallbackText: { color: colors.muted, fontSize: 13 },
   fallbackRaw: { color: colors.muted, fontSize: 11, fontFamily: monoFontFamily },
