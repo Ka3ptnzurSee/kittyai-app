@@ -14,6 +14,7 @@ const EXT_GROUP_ID = process.env.ASC_EXT_GROUP_ID || "7a74c939-7521-4e6b-83f9-e2
 const KEY_PATH = process.env.ASC_KEY_PATH || "credentials/AscApiKey_26AXZ5M8UR.p8";
 const KEY_ID = process.env.ASC_KEY_ID || "26AXZ5M8UR";
 const ISSUER_ID = process.env.ASC_ISSUER_ID || "1a64f714-48a7-43dd-9737-f41c424b20ba";
+const FETCH_TIMEOUT_MS = 30_000;
 
 const arg = process.argv[2];
 if (!arg) {
@@ -21,7 +22,14 @@ if (!arg) {
   process.exit(1);
 }
 
-const key = fs.readFileSync(KEY_PATH, "utf8");
+let key;
+try {
+  key = fs.readFileSync(KEY_PATH, "utf8");
+} catch (e) {
+  console.error(`FEHLER: API-Key nicht lesbar unter ${KEY_PATH}: ${e.message}`);
+  process.exit(1);
+}
+
 const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
 function jwt() {
   const now = Math.floor(Date.now() / 1000);
@@ -32,21 +40,32 @@ function jwt() {
 }
 const H = { Authorization: `Bearer ${jwt()}`, "Content-Type": "application/json" };
 async function api(p, opts = {}) {
-  const r = await fetch("https://api.appstoreconnect.apple.com/v1" + p, { ...opts, headers: { ...H, ...(opts.headers || {}) } });
+  const r = await fetch("https://api.appstoreconnect.apple.com/v1" + p, {
+    ...opts,
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    headers: { ...H, ...(opts.headers || {}) },
+  });
   const txt = await r.text();
   let body = null;
   try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
   return { status: r.status, body };
 }
 
+function die(msg) {
+  console.error("FEHLER: " + msg);
+  process.exit(1);
+}
+
 // Build-ID auflösen (entweder direkt UUID oder Version → neuester VALID-Build)
 let buildId = arg;
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)) {
   const r = await api(`/builds?filter[app]=${APP_ID}&limit=30&sort=-uploadedDate`);
+  if (r.status < 200 || r.status >= 300) {
+    die(`Build-Liste nicht abrufbar (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
+  }
   const b = (r.body?.data || []).find((x) => String(x.attributes.version) === String(arg) && x.attributes.processingState === "VALID");
   if (!b) {
-    console.error(`FEHLER: Kein VALID-Build mit Version ${arg} gefunden.`);
-    process.exit(1);
+    die(`Kein VALID-Build mit Version ${arg} gefunden.`);
   }
   buildId = b.id;
   console.log(`Build ${arg} → ASC id=${buildId}`);
@@ -57,7 +76,10 @@ let r = await api(`/betaGroups/${EXT_GROUP_ID}/relationships/builds`, {
   method: "POST",
   body: JSON.stringify({ data: [{ id: buildId, type: "builds" }] }),
 });
-console.log(`Gruppen-Zuweisung → HTTP ${r.status}${r.body?.errors ? " | " + JSON.stringify(r.body.errors[0]) : ""}`);
+if (r.status < 200 || r.status >= 300) {
+  die(`Gruppen-Zuweisung fehlgeschlagen (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
+}
+console.log(`Gruppen-Zuweisung → HTTP ${r.status}`);
 
 // 2) Beta App Review anstoßen (nötig für externe Tester/Public Link)
 //    Fehlt betaBuildLocalizations, schlägt es fehl → dann Hinweis statt Crash.
