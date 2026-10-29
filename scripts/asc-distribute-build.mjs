@@ -21,6 +21,9 @@ if (!arg) {
   console.error("FEHLER: ascBuildId oder buildVersion als Argument nötig.");
   process.exit(1);
 }
+// Control-Chars/ANSI aus allen Log-Ausgaben entfernen (gegen Log-Injection)
+const sanitize = (v) => String(v).replace(/[\r\n\x1b]/g, "");
+const safeArg = sanitize(arg);
 
 let key;
 try {
@@ -56,7 +59,7 @@ async function api(p, opts = {}) {
 }
 
 function die(msg) {
-  console.error("FEHLER: " + msg);
+  console.error("FEHLER: " + sanitize(msg));
   process.exit(1);
 }
 
@@ -74,14 +77,21 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)
   if (r.status < 200 || r.status >= 300) {
     die(`Build-Liste nicht abrufbar (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
   }
-  const b = (r.body?.data || []).find((x) => String(x.attributes.version) === String(arg) && x.attributes.processingState === "VALID");
+  const b = (r.body?.data || []).find((x) => String(x.attributes.version) === String(arg));
   if (!b) {
-    // Build noch nicht VALID (EAS-Upload wird verarbeitet) → retrybarer Exit-Code 2
-    console.log(`Build ${arg} noch nicht VALID in ASC.`);
+    die(`Build-Version ${safeArg} nicht gefunden (zu alt oder falsch).`);
+  }
+  if (b.attributes.processingState !== "VALID") {
+    console.log(`Build ${safeArg} noch nicht VALID (${b.attributes.processingState}) in ASC.`);
     process.exit(2);
   }
   buildId = b.id;
-  console.log(`Build ${arg} → ASC id=${buildId}`);
+  console.log(`Build ${safeArg} → ASC id=${buildId}`);
+}
+
+// Build-ID defensiv als UUID validieren (stammt ggf. aus ASC-Antwort)
+if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(buildId)) {
+  die(`Ungültige Build-ID: ${buildId}`);
 }
 
 // 1) Build an die externe Beta-Gruppe hängen (idempotent; 204 = ok)
@@ -122,7 +132,7 @@ if (extState === "READY_FOR_BETA_SUBMISSION") {
     console.log(`⚠️ Beta-Review-Submission transient fehlgeschlagen (HTTP ${r.status}) — später erneut.`);
     process.exit(2);
   } else {
-    const detail = r.body?.errors?.[0]?.detail || JSON.stringify(r.body);
+    const detail = sanitize(r.body?.errors?.[0]?.detail || JSON.stringify(r.body));
     console.log(`⚠️ Beta-Review-Submission nicht durch (HTTP ${r.status}): ${detail}`);
     console.log(`   → Build ist trotzdem intern (IN_BETA_TESTING) für interne Tester verfügbar.`);
   }
