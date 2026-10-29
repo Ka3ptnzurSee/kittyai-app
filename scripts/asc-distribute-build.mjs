@@ -89,11 +89,11 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)
     die(`Build-Version ${safeArg} nicht gefunden (zu alt oder falsch).`);
   }
   if (b.attributes.processingState !== "VALID") {
-    console.log(`Build ${safeArg} noch nicht VALID (${b.attributes.processingState}) in ASC.`);
+    console.log(`Build ${safeArg} noch nicht VALID (${sanitize(b.attributes.processingState)}) in ASC.`);
     process.exit(2);
   }
   buildId = b.id;
-  console.log(`Build ${safeArg} → ASC id=${buildId}`);
+  console.log(`Build ${safeArg} → ASC id=${sanitize(buildId)}`);
 }
 
 // Build-ID defensiv als UUID validieren (stammt ggf. aus ASC-Antwort)
@@ -153,6 +153,8 @@ if (extState === "READY_FOR_BETA_SUBMISSION") {
   }
 } else if (extState === "IN_BETA_TESTING" || extState === "BETA_APPROVED" || extState === "IN_EXTERNAL_TESTING") {
   console.log("✅ Build ist extern bereits im Beta-Testing (keine neue Review nötig).");
+} else if (extState === "WAITING_FOR_BETA_REVIEW" || extState === "IN_BETA_REVIEW") {
+  console.log("✅ Beta App Review läuft/angemeldet (keine erneute Submission nötig).");
 } else {
   console.log("ℹ️ externalBuildState unerwartet — manuell prüfen.");
 }
