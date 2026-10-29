@@ -51,7 +51,7 @@ async function api(p, opts = {}) {
     try { body = txt ? JSON.parse(txt) : null; } catch { body = txt; }
     return { status: r.status, body };
   } catch (e) {
-    die(`API-Aufruf fehlgeschlagen (${p}): ${e.message}`);
+    return { status: -1, body: { error: e.message } }; // Transportfehler → transient
   }
 }
 
@@ -60,10 +60,17 @@ function die(msg) {
   process.exit(1);
 }
 
+// Transportfehler/Timeouts (status -1) und 5xx sind transient → retrybar (Exit 2).
+function isTransient(status) { return status < 0 || status >= 500; }
+
 // Build-ID auflösen (entweder direkt UUID oder Version → neuester VALID-Build)
 let buildId = arg;
 if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)) {
   const r = await api(`/builds?filter[app]=${APP_ID}&limit=30&sort=-uploadedDate`);
+  if (isTransient(r.status)) {
+    console.error(`Build-Liste transient nicht abrufbar (HTTP ${r.status}) — später erneut.`);
+    process.exit(2);
+  }
   if (r.status < 200 || r.status >= 300) {
     die(`Build-Liste nicht abrufbar (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
   }
@@ -82,6 +89,10 @@ let r = await api(`/betaGroups/${EXT_GROUP_ID}/relationships/builds`, {
   method: "POST",
   body: JSON.stringify({ data: [{ id: buildId, type: "builds" }] }),
 });
+if (isTransient(r.status)) {
+  console.error(`Gruppen-Zuweisung transient fehlgeschlagen (HTTP ${r.status}) — später erneut.`);
+  process.exit(2);
+}
 if (r.status < 200 || r.status >= 300) {
   die(`Gruppen-Zuweisung fehlgeschlagen (HTTP ${r.status}): ${JSON.stringify(r.body?.errors?.[0] || r.body).slice(0, 300)}`);
 }
@@ -90,6 +101,10 @@ console.log(`Gruppen-Zuweisung → HTTP ${r.status}`);
 // 2) Beta App Review anstoßen (nötig für externe Tester/Public Link).
 //    Ab hier ist der Build bereits verteilt → Fehler sind nicht fatal (Exit 0).
 const bbd = await api(`/builds/${buildId}/buildBetaDetail`);
+if (isTransient(bbd.status)) {
+  console.log(`⚠️ buildBetaDetail transient nicht abrufbar (HTTP ${bbd.status}) — später erneut.`);
+  process.exit(2);
+}
 if (bbd.status < 200 || bbd.status >= 300) {
   console.log(`⚠️ buildBetaDetail nicht abrufbar (HTTP ${bbd.status}) — Build ist trotzdem intern verteilt.`);
   process.exit(0);
@@ -103,6 +118,9 @@ if (extState === "READY_FOR_BETA_SUBMISSION") {
   });
   if (r.status >= 200 && r.status < 300) {
     console.log(`✅ Beta App Review eingereicht (HTTP ${r.status})`);
+  } else if (isTransient(r.status)) {
+    console.log(`⚠️ Beta-Review-Submission transient fehlgeschlagen (HTTP ${r.status}) — später erneut.`);
+    process.exit(2);
   } else {
     const detail = r.body?.errors?.[0]?.detail || JSON.stringify(r.body);
     console.log(`⚠️ Beta-Review-Submission nicht durch (HTTP ${r.status}): ${detail}`);
