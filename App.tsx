@@ -27,7 +27,6 @@ import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-spe
 import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
-import { fetch as streamFetch } from "expo/fetch";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
@@ -1353,7 +1352,7 @@ export default function App() {
       patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [] }));
     }
     try {
-    const res = await streamFetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
+    const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model: chatModel }),
