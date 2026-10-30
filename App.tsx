@@ -660,10 +660,24 @@ export default function App() {
       const serverUserCount = serverMsgs.filter((m) => m.role === "user").length;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
-      // Serverseitiger Fehler der letzten Runde (z. B. Zeitüberschreitung/Stall) sichtbar
-      // machen: ein fehlgeschlagener Turn hinterlässt lastError + letzte message = user (keine
-      // Assistant-Nachricht). VOR der „letzte Nachricht ist assistant“-Prüfung behandeln —
-      // sonst bleibt die Fehler-Karte unsichtbar und der Chat hängt dauerhaft im Busy-Status.
+      const localUserCount = chat.messages.filter((m) => m.role === "user").length;
+      // 1) Vorhandene komplette Antwort hat IMMER Vorrang — auch vor lastError (ein
+      // fehlgeschlagener Turn kann eine bereits geschriebene Antwort + angehängten Fehler
+      // hinterlassen; die Antwort darf nicht von der Fehler-Karte verdeckt werden).
+      if (lastServerMsg && lastServerMsg.role === "assistant" && serverLast?.text?.trim()) {
+        const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
+        if (!lastAi || (lastAi.text.trim() && !lastAi.error)) return false; // schon gefüllt
+        const answerText = serverLast.text || "";
+        patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
+        delete streamStateRef.current[chatId];
+        persistStreamState(chatId);
+        return true;
+      }
+      // 2) Turn hat den Server nie erreicht → ein evtl. vorhandenes lastError ist stale
+      // (aus einer früheren Runde) und darf NICHT auf diesen Turn angewandt werden.
+      if (serverUserCount < localUserCount) return false;
+      // 3) Erst JETZT lastError: serverseitig fehlgeschlagener Turn (Timeout/Stall/Prozess tot)
+      // hinterlässt lastError + letzte message = user. Fehler-Karte statt leerer Bubble setzen.
       const lastErr = data.lastError && typeof data.lastError === "object" && data.lastError.text ? String(data.lastError.text) : "";
       if (lastErr) {
         const errAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
@@ -674,19 +688,8 @@ export default function App() {
           return true;
         }
       }
-      // Turn ist erst „fertig“, wenn die LETZTE Server-Nachricht eine Assistant-Antwort ist
-      // (sonst würde die leere Live-Bubble mit der VORHERIGEN Antwort gefüllt).
-      if (!lastServerMsg || lastServerMsg.role !== "assistant") return false;
-      if (!serverLast || !serverLast.text?.trim()) return false;
-      const localUserCount = chat.messages.filter((m) => m.role === "user").length;
-      if (serverUserCount < localUserCount) return false; // Turn hat den Server nie erreicht
-      const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
-      if (!lastAi || (lastAi.text.trim() && !lastAi.error)) return false; // schon gefüllt
-      const answerText = serverLast.text || "";
-      patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
-      delete streamStateRef.current[chatId];
-      persistStreamState(chatId);
-      return true;
+      // 4) Kein Fehler, aber auch noch keine fertige Antwort → Turn läuft noch.
+      return false;
     } catch {
       return false;
     }
