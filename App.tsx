@@ -661,6 +661,9 @@ export default function App() {
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
       const localUserCount = chat.messages.filter((m) => m.role === "user").length;
+      // 0) Turn hat den Server nie erreicht → ALLES Server-seitige (Antwort + lastError)
+      // ist stale und darf NICHT auf diesen Turn angewandt werden.
+      if (serverUserCount < localUserCount) return false;
       // 1) Vorhandene komplette Antwort hat IMMER Vorrang — auch vor lastError (ein
       // fehlgeschlagener Turn kann eine bereits geschriebene Antwort + angehängten Fehler
       // hinterlassen; die Antwort darf nicht von der Fehler-Karte verdeckt werden).
@@ -673,10 +676,7 @@ export default function App() {
         persistStreamState(chatId);
         return true;
       }
-      // 2) Turn hat den Server nie erreicht → ein evtl. vorhandenes lastError ist stale
-      // (aus einer früheren Runde) und darf NICHT auf diesen Turn angewandt werden.
-      if (serverUserCount < localUserCount) return false;
-      // 3) Erst JETZT lastError: serverseitig fehlgeschlagener Turn (Timeout/Stall/Prozess tot)
+      // 2) Erst JETZT lastError: serverseitig fehlgeschlagener Turn (Timeout/Stall/Prozess tot)
       // hinterlässt lastError + letzte message = user. Fehler-Karte statt leerer Bubble setzen.
       const lastErr = data.lastError && typeof data.lastError === "object" && data.lastError.text ? String(data.lastError.text) : "";
       if (lastErr) {
@@ -706,6 +706,12 @@ export default function App() {
       if (!res.ok) return false;
       const data = await res.json();
       if (!Array.isArray(data.messages) || data.messages.length === 0) return false;
+      // Turn hat den Server nie erreicht (lokale user-Nachrichten > Server) → es läuft KEIN
+      // serverseitiger Turn, nicht busy halten (sonst hängt der Chat dauerhaft).
+      const serverUserCount = data.messages.filter((m: any) => m.role === "user").length;
+      const chat = chatsRef.current.find((c) => c.id === chatId);
+      const localUserCount = chat ? chat.messages.filter((m) => m.role === "user").length : 0;
+      if (serverUserCount < localUserCount) return false;
       // Ein serverseitig FEHLGESCHLAGENER Turn (Timeout/Stall/Prozess tot) hinterlässt lastError
       // + letzte message = user. Das ist KEIN laufender Turn → nicht busy halten, sonst hängt
       // der Chat dauerhaft (Fehler-Karte in reloadFromServer übernimmt).
