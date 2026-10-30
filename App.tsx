@@ -690,6 +690,24 @@ export default function App() {
     }
   }
 
+  // Prüft, ob der Server-Turn für diesen Chat noch läuft: die letzte Session-Nachricht
+  // ist noch die User-Nachricht (keine Assistant-Antwort) → Antwort kommt noch, das ist
+  // KEIN Netzwerkfehler. Wird im send()-Fallback genutzt, um statt „Verbindung unterbrochen"
+  // den Busy-Status beizubehalten und die Antwort per Session-Polling nachzuladen.
+  async function serverTurnStillRunning(chatId: string): Promise<boolean> {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (!Array.isArray(data.messages) || data.messages.length === 0) return false;
+      const last = data.messages[data.messages.length - 1];
+      return !!last && last.role !== "assistant";
+    } catch {
+      return false;
+    }
+  }
+
   function saveFolders(next: Folder[]) {
     setFolders(next);
     AsyncStorage.setItem(FOLDERS_KEY, JSON.stringify(next)).catch(() => { /* ignorieren */ });
@@ -1206,6 +1224,7 @@ export default function App() {
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
+    let turnStillRunning = false; // Server-Turn läuft noch → kein Fehler, Busy-Polling übernimmt
     const isFirst = !chats.find((c) => c.id === chatId)?.messages.length;
     let finalMessage = message;
     const replyTo = replyingTo ? { text: replyingTo.text.replace(/\n+/g, " ").trim().slice(0, 200) } : undefined;
@@ -1306,6 +1325,14 @@ export default function App() {
         // serverseitig doch fertig wurde). Nur wenn das fehlschlägt → Fehler-Karte.
         const filled = await reloadFromServer(chatId);
         if (filled) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
+        // Turn läuft serverseitig noch (letzte Session-Nachricht ist die User-Nachricht)?
+        // Dann ist das KEIN Netzwerkfehler — der Server verarbeitet weiter. Busy behalten,
+        // das Session-Polling lädt die Antwort, sobald sie fertig ist (kein „Verbindung unterbrochen").
+        if (await serverTurnStillRunning(chatId)) {
+          turnStillRunning = true;
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird auf dem Server verarbeitet — wird automatisch geladen …" }));
+          return;
+        }
         const rawMsg = e2 instanceof Error ? e2.message : String(e2);
         const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
           ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
@@ -1314,8 +1341,13 @@ export default function App() {
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(msg), retryable: isRetryable(msg) } }));
       }
     } finally {
-      markBusy(chatId, false);
       setChatThinking(chatId, "");
+      if (turnStillRunning) {
+        // Turn läuft serverseitig noch → busy behalten (Session-Polling holt die Antwort)
+        // und die leere KI-Bubble NICHT entfernen (reloadFromServer füllt sie gleich).
+        return;
+      }
+      markBusy(chatId, false);
       // Weißen Balken vermeiden: nach JEDEM Turn (normal, Fehler, Abbruch, Timeout)
       // verwaiste leere KI-Bubbles entfernen — Nachrichten ohne Text/Tool/Anhang
       // bleiben sonst als leerer weißer Block stehen, auch bei neuen Nachrichten.
