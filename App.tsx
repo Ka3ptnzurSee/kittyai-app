@@ -658,14 +658,12 @@ export default function App() {
       const lastServerMsg = serverMsgs[serverMsgs.length - 1];
       const serverLast = [...serverMsgs].reverse().find((m) => m.role === "assistant");
       const serverUserCount = serverMsgs.filter((m) => m.role === "user").length;
-      // Turn ist erst „fertig“, wenn die LETZTE Server-Nachricht eine Assistant-Antwort ist
-      // (sonst würde die leere Live-Bubble mit der VORHERIGEN Antwort gefüllt).
-      if (!lastServerMsg || lastServerMsg.role !== "assistant") return false;
-      if (!serverLast || !serverLast.text?.trim()) return false;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
-      // Server-Fehler der letzten Runde (z. B. Zeitüberschreitung) sichtbar machen:
-      // statt einer leeren/abgeschnittenen Bubble eine klare Fehler-Karte setzen.
+      // Serverseitiger Fehler der letzten Runde (z. B. Zeitüberschreitung/Stall) sichtbar
+      // machen: ein fehlgeschlagener Turn hinterlässt lastError + letzte message = user (keine
+      // Assistant-Nachricht). VOR der „letzte Nachricht ist assistant“-Prüfung behandeln —
+      // sonst bleibt die Fehler-Karte unsichtbar und der Chat hängt dauerhaft im Busy-Status.
       const lastErr = data.lastError && typeof data.lastError === "object" && data.lastError.text ? String(data.lastError.text) : "";
       if (lastErr) {
         const errAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
@@ -676,6 +674,10 @@ export default function App() {
           return true;
         }
       }
+      // Turn ist erst „fertig“, wenn die LETZTE Server-Nachricht eine Assistant-Antwort ist
+      // (sonst würde die leere Live-Bubble mit der VORHERIGEN Antwort gefüllt).
+      if (!lastServerMsg || lastServerMsg.role !== "assistant") return false;
+      if (!serverLast || !serverLast.text?.trim()) return false;
       const localUserCount = chat.messages.filter((m) => m.role === "user").length;
       if (serverUserCount < localUserCount) return false; // Turn hat den Server nie erreicht
       const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
@@ -701,6 +703,10 @@ export default function App() {
       if (!res.ok) return false;
       const data = await res.json();
       if (!Array.isArray(data.messages) || data.messages.length === 0) return false;
+      // Ein serverseitig FEHLGESCHLAGENER Turn (Timeout/Stall/Prozess tot) hinterlässt lastError
+      // + letzte message = user. Das ist KEIN laufender Turn → nicht busy halten, sonst hängt
+      // der Chat dauerhaft (Fehler-Karte in reloadFromServer übernimmt).
+      if (data.lastError && typeof data.lastError === "object" && data.lastError.text) return false;
       const last = data.messages[data.messages.length - 1];
       return !!last && last.role !== "assistant";
     } catch {
