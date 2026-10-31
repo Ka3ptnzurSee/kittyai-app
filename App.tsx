@@ -479,7 +479,7 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
-  const [chatModel, setChatModel] = useState<string>("pro"); // Modellwechsel (Zyklus durch CHAT_MODEL_OPTIONS)
+  const [chatModel, setChatModel] = useState<string>("flash"); // Default-Modell für neue Chats (flash = schnell, liefert direkt Text; pro = Reasoning, langsam + bei knappem Token-Budget leerer content)
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   const [apiToken, setApiToken] = useState("");
   const [cwd, setCwd] = useState("");
