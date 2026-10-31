@@ -37,7 +37,7 @@ import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from ".
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
-type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number; folderId?: string | null };
+type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number; folderId?: string | null; model?: string };
 type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
 type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
 type ConnectedPlatform = { id: string; name: string; status: "ok" | "error" | "warning"; detail: string };
@@ -592,6 +592,7 @@ export default function App() {
   }, [activeChatId]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
+  const activeModel = activeChat?.model || chatModel; // pro Chat einstellbares Modell (Default: "pro")
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
   const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
   const thisStatus = activeChatId ? statusByChat[activeChatId] || "" : "";
@@ -631,6 +632,10 @@ export default function App() {
 
   function patchChat(chatId: string, fn: (c: Chat) => Chat) {
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)));
+  }
+  function setActiveModel(key: string) {
+    if (activeChatId) patchChat(activeChatId, (c) => ({ ...c, model: key }));
+    setModelMenuOpen(false);
   }
   function patchMsg(chatId: string, msgId: string, fn: (m: Msg) => Msg) {
     setChats((cs) =>
@@ -1419,6 +1424,7 @@ export default function App() {
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
     let lastSeq = resume?.lastSeq ?? 0;
     let turnId = resume?.turnId ?? "";
+    const model = chatsRef.current.find((c) => c.id === chatId)?.model || chatModel;
     // Voll-Replay (lastSeq=0): bereits gestreamten Teiltext zurücksetzen, damit
     // die Deltas beim Replay nicht doppelt angehängt werden.
     if (resume && lastSeq === 0) {
@@ -1428,7 +1434,7 @@ export default function App() {
     const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model: chatModel }),
+      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model }),
       signal: controller.signal,
     });
 
@@ -2090,9 +2096,6 @@ export default function App() {
           <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
             <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
-          <Pressable onPress={() => setModelMenuOpen(true)} style={[styles.iconBtn, chatModel !== "pro" && styles.chipActive]} hitSlop={6}>
-            <Text style={[styles.modelChipText, chatModel !== "pro" ? { color: colors.accent } : { color: colors.muted }]} numberOfLines={1}>{modelOptions().find((o) => o.key === chatModel)?.label ?? "PRO"}</Text>
-          </Pressable>
         </View>
       </View>
 
@@ -2292,6 +2295,13 @@ export default function App() {
                   </Pressable>
                 </Animated.View>
               </View>
+              <View style={styles.modelBar}>
+                <Pressable onPress={() => setModelMenuOpen(true)} style={styles.modelBarChip} hitSlop={6}>
+                  <Ionicons name="hardware-chip-outline" size={13} color={colors.muted} />
+                  <Text style={styles.modelBarText} numberOfLines={1}>{modelOptions().find((o) => o.key === activeModel)?.label ?? "PRO"}</Text>
+                  <Ionicons name="chevron-down" size={12} color={colors.muted} />
+                </Pressable>
+              </View>
               <Text style={styles.disclaimer}>KittyAI kann Fehler machen — wichtige Informationen prüfen.</Text>
             </KeyboardAvoidingView>
           </>
@@ -2461,9 +2471,9 @@ export default function App() {
             <View style={styles.attachSheetHandle} />
             <Text style={styles.attachSheetTitle}>Modell auswählen</Text>
             {modelOptions().map((o) => (
-              <Pressable key={o.key} onPress={() => { setChatModel(o.key); setModelMenuOpen(false); }} style={[styles.modelMenuItem, chatModel === o.key && styles.modelMenuItemActive]}>
-                <Text style={[styles.modelMenuItemText, chatModel === o.key && styles.modelMenuItemTextActive]}>{o.label}</Text>
-                {chatModel === o.key ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : null}
+              <Pressable key={o.key} onPress={() => setActiveModel(o.key)} style={[styles.modelMenuItem, activeModel === o.key && styles.modelMenuItemActive]}>
+                <Text style={[styles.modelMenuItemText, activeModel === o.key && styles.modelMenuItemTextActive]}>{o.label}</Text>
+                {activeModel === o.key ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : null}
               </Pressable>
             ))}
           </Pressable>
@@ -2821,6 +2831,9 @@ const styles = StyleSheet.create({
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
   disclaimer: { textAlign: "center", color: colors.muted, fontSize: 11, paddingTop: 2, paddingBottom: 6 },
+  modelBar: { flexDirection: "row", paddingHorizontal: 12, paddingBottom: 4, backgroundColor: colors.surface },
+  modelBarChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1, borderColor: colors.border, alignSelf: "flex-start" },
+  modelBarText: { fontSize: 11, fontWeight: "700", color: colors.muted, letterSpacing: 0.4 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: colors.border },
   modalTitle: { fontSize: 18, fontWeight: "700", color: colors.text },
