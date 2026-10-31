@@ -160,8 +160,6 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
   { key: "coder", label: "CODER" },
   { key: "qwen", label: "QWEN" },
   // --goeran-options:end--
-  { key: "hz_flash", label: "HZ·FLASH" },
-  { key: "glm", label: "GLM" },
 ];
 
 // Plugins-Untertabs (Connectors/Skills/Agenten/Workflows/Tasks).
@@ -532,9 +530,14 @@ export default function App() {
   // App-Vordergrund/-Hintergrund: iOS beendet die Socket-Verbindung, sobald die App
   // in den Hintergrund geht. Retries deshalb erst im Vordergrund starten (siehe send()).
   const appStateRef = useRef(AppState.currentState);
+  const [foregroundTick, setForegroundTick] = useState(0);
   useEffect(() => {
     const sub = AppState.addEventListener("change", (s) => {
       appStateRef.current = s;
+      // Rückkehr in den Vordergrund: aktiven Chat vom Server neu laden. iOS hat
+      // die SSE-Verbindung im Hintergrund beendet — die Antwort kann serverseitig
+      // fertig geworden sein, ohne dass der Client das mitbekommen hat.
+      if (s === "active") setForegroundTick((t) => t + 1);
     });
     return () => sub.remove();
   }, []);
@@ -1019,7 +1022,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [activeChatId, serverUrl, busyChatIds]);
+  }, [activeChatId, serverUrl, busyChatIds, foregroundTick]);
 
   // Während ein Chat „busy“ ist (Turn läuft serverseitig, z. B. nach App-Wechsel in den
   // Hintergrund), die Server-Session regelmäßig pollen: sobald die finale Antwort vorliegt,
@@ -1419,6 +1422,8 @@ export default function App() {
     const parser = new SseParser(MAX_BUFFER_CHARS);
     let finalReply = "";
     let finalActivity: Activity[] = [];
+    let doneReceived = false;
+    let errorReceived = false;
 
     const apply = (evt: unknown) => {
       const e = evt as { type?: string; data?: unknown };
@@ -1481,6 +1486,7 @@ export default function App() {
       } else if (t === "auto_retry_end" || t === "summarization_retry_finished") {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
+        doneReceived = true;
         const d = (e.data || {}) as { reply?: string; activity?: Activity[] };
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
@@ -1492,6 +1498,7 @@ export default function App() {
         // Turn ist auf dem Server nicht mehr vorhanden → Voll-Replay erzwingen.
         throw new Error("resume_unavailable");
       } else if (t === "error") {
+        errorReceived = true;
         const raw = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
       }
@@ -1513,6 +1520,15 @@ export default function App() {
     }
     // Stream zu Ende: Rest im Puffer noch verarbeiten (Event ohne finales \n\n).
     for (const evt of parser.flush()) handle(evt);
+
+    // Weder "done" noch "error" empfangen → der Stream wurde still beendet
+    // (iOS tötet die SSE-Verbindung im Hintergrund; read() liefert dann oft ein
+    // sauberes EOF statt zu rejecten). Als Netzwerkfehler behandeln, damit send()
+    // die Resume-/Reload-Logik anstößt — statt die Antwort mit "(keine Antwort)"
+    // zu verwerfen. Der Server schreibt IMMER done ODER error vor Stream-Ende.
+    if (!doneReceived && !errorReceived) {
+      throw new Error("Stream vorzeitig beendet (network)");
+    }
 
     const finalText = finalReply.trim() || "(keine Antwort)";
     patchMsg(chatId, aiId, (m) => ({
