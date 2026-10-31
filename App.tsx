@@ -691,6 +691,20 @@ export default function App() {
           return true;
         }
       }
+      // 3) Autoritatives Busy-Signal vom Server: kein laufender Turn (turnRegistry
+      // leer/gesettled), keine Antwort, kein Fehler → der Turn ist tot (Server-Neustart/
+      // Kill). Fehler-Karte statt ewigem Polling. ChatGPT/Claude haben dafür ein
+      // explizites Terminal-Signal; hier ist es activeTurn === false.
+      if (data.activeTurn === false) {
+        const deadAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
+        if (deadAi && !deadAi.text?.trim() && !deadAi.error) {
+          patchMsg(chatId, deadAi.id, (m) => ({ ...m, error: { type: "Antwort abgebrochen — bitte erneut senden", retryable: true } }));
+          delete streamStateRef.current[chatId];
+          persistStreamState(chatId);
+          return true;
+        }
+        return false;
+      }
       // 4) Kein Fehler, aber auch noch keine fertige Antwort → Turn läuft noch.
       return false;
     } catch {
@@ -708,16 +722,19 @@ export default function App() {
       const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
       if (!res.ok) return false;
       const data = await res.json();
+      // Autoritative Busy-Signatur vom Server (turnRegistry): läuft gerade ein Turn?
+      // Robuster als die alte Heuristik "letzte Nachricht = user", die nach einem
+      // Server-Neustart fälschlich "läuft noch" meldete (Turn weg, Session-Datei hatte
+      // aber noch die letzte user-Nachricht → Chat hing ewig als "busy").
+      if (typeof data.activeTurn === "boolean") {
+        return data.activeTurn === true;
+      }
+      // Fallback (älterer Server ohne activeTurn-Feld): bisherige Heuristik.
       if (!Array.isArray(data.messages) || data.messages.length === 0) return false;
-      // Turn hat den Server nie erreicht (lokale user-Nachrichten > Server) → es läuft KEIN
-      // serverseitiger Turn, nicht busy halten (sonst hängt der Chat dauerhaft).
       const serverUserCount = data.messages.filter((m: any) => m.role === "user").length;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       const localUserCount = chat ? chat.messages.filter((m) => m.role === "user").length : 0;
       if (serverUserCount < localUserCount) return false;
-      // Ein serverseitig FEHLGESCHLAGENER Turn (Timeout/Stall/Prozess tot) hinterlässt lastError
-      // + letzte message = user. Das ist KEIN laufender Turn → nicht busy halten, sonst hängt
-      // der Chat dauerhaft (Fehler-Karte in reloadFromServer übernimmt).
       if (data.lastError && typeof data.lastError === "object" && data.lastError.text) return false;
       const last = data.messages[data.messages.length - 1];
       return !!last && last.role !== "assistant";
