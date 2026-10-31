@@ -673,11 +673,11 @@ export default function App() {
       if (lastServerMsg && lastServerMsg.role === "assistant" && serverLast?.text?.trim()) {
         const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
         if (!lastAi) return false;
-        const answerText = serverLast.text || "";
+        const answerText = (serverLast.text || "").slice(0, MAX_REPLY_CHARS);
         const localText = lastAi.text?.trim() || "";
         // Nur überschreiben, wenn die Server-Antwort VOLLSTÄNDIGER ist als die lokale
         // (Teiltext aus abgebrochenem Stream). Sonst ist die Bubble schon gefüllt.
-        if (localText && !lastAi.error && answerText.length <= localText.length) return false;
+        if (localText && !lastAi.error && answerText.trim().length <= localText.length) return false;
         patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
         delete streamStateRef.current[chatId];
         persistStreamState(chatId);
@@ -1026,13 +1026,13 @@ export default function App() {
             const serverUserCount = [...data.messages].filter((m) => m.role === "user").length;
             const localUserCount = c.messages.filter((m) => m.role === "user").length;
             const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim() && serverUserCount >= localUserCount;
-            const serverText = (serverLast?.text || "").trim();
+            const serverText = (serverLast?.text || "").trim().slice(0, MAX_REPLY_CHARS);
             const localText = lastAi?.text?.trim() || "";
             if (lastAi && serverHasFreshAnswer && serverText.length > localText.length) {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
-                  m.id === lastAi.id ? { ...m, text: serverLast.text, images: serverLast.images || m.images, error: undefined } : m,
+                  m.id === lastAi.id ? { ...m, text: serverText, images: serverLast.images || m.images, error: undefined } : m,
                 ),
                 updatedAt: Date.now(),
               };
@@ -1445,6 +1445,7 @@ export default function App() {
     const parser = new SseParser(MAX_BUFFER_CHARS);
     let finalReply = "";
     let finalActivity: Activity[] = [];
+    let finalDil: unknown[] | undefined;
     let doneReceived = false;
     let errorReceived = false;
 
@@ -1510,9 +1511,10 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
         doneReceived = true;
-        const d = (e.data || {}) as { reply?: string; activity?: Activity[] };
+        const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[] };
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
+        finalDil = Array.isArray(d.dil) ? d.dil : undefined;
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
         // Turn abgeschlossen: keinen Resume-Anker mehr hinterlassen (Auto-Resume idempotent).
         delete streamStateRef.current[chatId];
@@ -1560,6 +1562,7 @@ export default function App() {
       // dem evtl. unvollständigen Stream-Text (abgebrochener Stream/Resume-Lücke).
       text: finalReply.trim() ? finalText : (m.text || finalText),
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
+      dil: finalDil !== undefined ? finalDil : m.dil,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
     } catch (e) {
