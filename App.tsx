@@ -2122,12 +2122,15 @@ export default function App() {
                   ) : (
                     <View style={styles.thinking}>
                       <ActivityIndicator color={colors.accent} size="small" />
-                      {thisStatus ? (
-                        thisStatus.startsWith("kompaktiere Kontext") ? (
-                          <CompactionBar />
-                        ) : (
-                          <Text style={styles.thinkingText} numberOfLines={1}>{thisStatus}</Text>
-                        )
+                      {thisStatus.startsWith("kompaktiere Kontext") ? (
+                        <CompactionBar />
+                      ) : thisStatus === "pi denkt …" ? (
+                        // Standard-Denkphase (lange Prefill-/Reasoning-Stille bei den
+                        // Goeran-Modellen): tickende Sekunden statt statischem Text, damit
+                        // klar ist, dass die App lebt und NICHT die Verbindung abgebrochen ist.
+                        <ElapsedLabel style={styles.thinkingText} />
+                      ) : thisStatus ? (
+                        <Text style={styles.thinkingText} numberOfLines={1}>{thisStatus}</Text>
                       ) : listening ? (
                         <Text style={styles.thinkingText} numberOfLines={1}>höre zu …</Text>
                       ) : (
