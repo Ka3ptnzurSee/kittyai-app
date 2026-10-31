@@ -592,7 +592,7 @@ export default function App() {
   }, [activeChatId]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
-  const activeModel = activeChat?.model || chatModel; // pro Chat einstellbares Modell (Default: "pro")
+  const activeModel = activeChat?.model || chatModel; // pro Chat einstellbares Modell (Default: "flash")
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
   const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
   const thisStatus = activeChatId ? statusByChat[activeChatId] || "" : "";
