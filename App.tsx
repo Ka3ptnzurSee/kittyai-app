@@ -672,8 +672,12 @@ export default function App() {
       // hinterlassen; die Antwort darf nicht von der Fehler-Karte verdeckt werden).
       if (lastServerMsg && lastServerMsg.role === "assistant" && serverLast?.text?.trim()) {
         const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
-        if (!lastAi || (lastAi.text.trim() && !lastAi.error)) return false; // schon gefüllt
+        if (!lastAi) return false;
         const answerText = serverLast.text || "";
+        const localText = lastAi.text?.trim() || "";
+        // Nur überschreiben, wenn die Server-Antwort VOLLSTÄNDIGER ist als die lokale
+        // (Teiltext aus abgebrochenem Stream). Sonst ist die Bubble schon gefüllt.
+        if (localText && !lastAi.error && answerText.length <= localText.length) return false;
         patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
         delete streamStateRef.current[chatId];
         persistStreamState(chatId);
@@ -1022,7 +1026,9 @@ export default function App() {
             const serverUserCount = [...data.messages].filter((m) => m.role === "user").length;
             const localUserCount = c.messages.filter((m) => m.role === "user").length;
             const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim() && serverUserCount >= localUserCount;
-            if (lastAi && !lastAi.text.trim() && serverHasFreshAnswer) {
+            const serverText = (serverLast?.text || "").trim();
+            const localText = lastAi?.text?.trim() || "";
+            if (lastAi && serverHasFreshAnswer && serverText.length > localText.length) {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
@@ -1550,7 +1556,9 @@ export default function App() {
     const finalText = finalReply.trim() || "(keine Antwort)";
     patchMsg(chatId, aiId, (m) => ({
       ...m,
-      text: m.text || finalText,
+      // done-Event trägt die VOLLSTÄNDIGE Antwort (Snapshot) — die hat Vorrang vor
+      // dem evtl. unvollständigen Stream-Text (abgebrochener Stream/Resume-Lücke).
+      text: finalReply.trim() ? finalText : (m.text || finalText),
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
