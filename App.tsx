@@ -26,12 +26,14 @@ import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
+import { secureGet, secureSet, SecureStoreError } from "./secureStore";
 import Constants from "expo-constants";
 import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 
@@ -106,26 +108,7 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-// Fehler in menschenlesbare Kategorie übersetzen (statt rohem ⚠️-Text).
-const AUTH_PATTERN = /401|403|unauthor|forbidden|invalid api key|invalid token|expired token|bad token/i;
-
-function classifyError(raw: string): string {
-  const s = raw.toLowerCase();
-  if (/rate.?limit|429|too many|limit reached|fenster/i.test(s)) return "Limit erreicht";
-  if (/quota|credits|billing|zahlung|payment|out of credits/i.test(s)) return "Konto/Guthaben";
-  if (AUTH_PATTERN.test(s)) return "Zugriff verweigert";
-  if (/timeout|timed out|zeitüberschreitung/i.test(s)) return "Zeitüberschreitung";
-  if (/overload|busy|capacity|ausgelastet|überlast/i.test(s)) return "Server ausgelastet";
-  if (/context length|maximum context|token limit/i.test(s)) return "Kontext zu lang";
-  if (/network|fetch failed|connection|econnreset|socket|dns|netzwerk|verbindung/i.test(s)) return "Netzwerk unterbrochen";
-  return "Fehler";
-}
-
-function isRetryable(raw: string): boolean {
-  return !AUTH_PATTERN.test(raw)
-    && !/quota|credits|billing|zahlung|payment/i.test(raw)
-    && !/context length|maximum context|token limit/i.test(raw);
-}
+// Fehlerklassifikation & Titelableitung leben jetzt in ./lib (testbar).
 
 type Task = {
   id: string;
@@ -138,10 +121,13 @@ type Task = {
 type Schedule = { id: string; message: string; cron: string };
 
 const TOKEN_KEY = "pi-api-token";
-const CHATS_KEY = "pi-chats-v2";
-const FOLDERS_KEY = "pi-folders-v1";
+const CHATS_KEY = "pi-chats-v2"; // Legacy-Klartext (nur noch für Migration)
+const FOLDERS_KEY = "pi-folders-v1"; // Legacy-Klartext (nur noch für Migration)
 const CWD_KEY = "pi-cwd";
 const STREAM_STATE_KEY = "pi-stream-state-v1";
+// Verschlüsselte Ablagen (AES-GCM, Master-Key im Keychain/Keystore via secureStore.ts).
+const CHATS_ENC_KEY = "pi-chats-v2.enc";
+const FOLDERS_ENC_KEY = "pi-folders-v1.enc";
 const STREAM_TIMEOUT_MS = 65 * 60 * 1000; // 65 min – über PROMPT_TIMEOUT_MS (60 min), damit der Server-Timeout (fehlgeschlagener Turn) VOR dem Client-Abbruch als Fehler-Event ankommt
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
@@ -438,18 +424,6 @@ function MessageBubble({
   );
 }
 
-function deriveTitle(raw: string): string {
-  const cleaned = raw
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return "";
-  if (cleaned.length <= MAX_TITLE_CHARS) return cleaned;
-  const cut = cleaned.slice(0, MAX_TITLE_CHARS);
-  const lastSpace = cut.lastIndexOf(" ");
-  const truncated = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
-  return truncated ? `${truncated}…` : "";
-}
-
 // Leere KI-Nachricht (kein Text, keine Tools, keine Bilder) = „weißer Balken".
 function isEmptyAi(m: Msg): boolean {
   return (
@@ -460,6 +434,23 @@ function isEmptyAi(m: Msg): boolean {
     !(m.images && m.images.length) &&
     !m.error
   );
+}
+
+// secureGet mit begrenztem Retry: transiente Keychain-/Storage-Fehler (z. B. Keychain
+// beim Start kurz gesperrt) sollen nicht sofort zu einem permanenten Schreib-Block führen.
+async function secureGetWithRetry(key: string): Promise<string | null> {
+  let lastErr: unknown = null;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await secureGet(key);
+    } catch (e) {
+      // Permanenter Fehler (Chiffretext/Key korrupt) → kein Retry-Nutzen, sofort werfen.
+      if (e instanceof SecureStoreError) throw e;
+      lastErr = e;
+      if (i < 2) await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+  throw lastErr;
 }
 
 export default function App() {
@@ -513,6 +504,21 @@ export default function App() {
   const [connectorForm, setConnectorForm] = useState<{ name: string; agent: string; description: string }>({ name: "", agent: "", description: "" });
   const loadedRef = useRef(false);
   const chatsRef = useRef<Chat[]>([]);
+  // Storage-Keys, deren verschlüsselter Bestand vorhanden, aber nicht lesbar ist
+  // (Key weg/korrupt bzw. Lesefehler) → NICHT mit leerem Stand überschreiben (kein stiller Datenverlust).
+  const storageBlockedRef = useRef<Set<string>>(new Set());
+  const writeWarnedRef = useRef<Set<string>>(new Set());
+  // Einmaliger Hinweis pro Storage-Key, wenn lokales Speichern fehlschlägt (Quota voll/
+  // Storage-Fehler), statt still zu verlieren — Chats bleiben serverseitig erhalten.
+  function warnWriteFailure(key: string) {
+    if (writeWarnedRef.current.has(key)) return;
+    writeWarnedRef.current.add(key);
+    Alert.alert(
+      "Speichern fehlgeschlagen",
+      "Änderungen können lokal nicht gespeichert werden. " +
+      "Deine Chats bleiben serverseitig erhalten; Ordner werden nur lokal gespeichert.",
+    );
+  }
   const dictationBaseRef = useRef("");
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
@@ -644,11 +650,6 @@ export default function App() {
       ),
     );
   }
-  function appendMsg(chatId: string, msg: Msg) {
-    setChats((cs) =>
-      cs.map((c) => (c.id === chatId ? { ...c, updatedAt: Date.now(), messages: [...c.messages, msg] } : c)),
-    );
-  }
 
   // chatsRef aktuell halten (für Helfer, die außerhalb von State-Closures lesen müssen).
   useEffect(() => { chatsRef.current = chats; }, [chats]);
@@ -658,9 +659,12 @@ export default function App() {
   async function reloadFromServer(chatId: string): Promise<boolean> {
     try {
       const base = serverUrl.replace(/\/+$/, "");
-      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      const res = await fetch(`${base}/api/session/${encodeURIComponent(chatId)}`, { headers: authHeaders() });
       if (!res.ok) return false;
       const data = await res.json();
+      // Turn läuft noch → Session-Datei evtl. gerade lazy geschrieben (noch leer).
+      // Nichts anwenden — der User-Count-Guard unten würde sonst fälschlich greifen.
+      if (data.activeTurn === true) return false;
       if (!Array.isArray(data.messages)) return false;
       const serverMsgs = data.messages as { id?: string; role: string; text?: string; images?: { uri: string }[] }[];
       const lastServerMsg = serverMsgs[serverMsgs.length - 1];
@@ -728,7 +732,7 @@ export default function App() {
   async function serverTurnStillRunning(chatId: string): Promise<boolean> {
     try {
       const base = serverUrl.replace(/\/+$/, "");
-      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      const res = await fetch(`${base}/api/session/${encodeURIComponent(chatId)}`, { headers: authHeaders() });
       if (!res.ok) return false;
       const data = await res.json();
       // Autoritative Busy-Signatur vom Server (turnRegistry): läuft gerade ein Turn?
@@ -758,7 +762,7 @@ export default function App() {
   async function messageReachedServer(chatId: string): Promise<boolean> {
     try {
       const base = serverUrl.replace(/\/+$/, "");
-      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      const res = await fetch(`${base}/api/session/${encodeURIComponent(chatId)}`, { headers: authHeaders() });
       if (!res.ok) return true;
       const data = await res.json();
       // Autoritatives Busy-Signal: Turn läuft (Session-Datei evtl. noch leer —
@@ -776,7 +780,13 @@ export default function App() {
 
   function saveFolders(next: Folder[]) {
     setFolders(next);
-    AsyncStorage.setItem(FOLDERS_KEY, JSON.stringify(next)).catch(() => { /* ignorieren */ });
+    if (storageBlockedRef.current.has(FOLDERS_ENC_KEY)) {
+      warnWriteFailure(FOLDERS_ENC_KEY); // unlesbar → Ordner-Änderungen gehen verloren (lokal-only)
+      return;
+    }
+    secureSet(FOLDERS_ENC_KEY, JSON.stringify(next))
+      .then(() => { writeWarnedRef.current.delete(FOLDERS_ENC_KEY); })
+      .catch(() => warnWriteFailure(FOLDERS_ENC_KEY));
   }
 
   // Dynamische Modell-Liste vom Server laden (neue Goeran-Modelle ohne Rebuild).
@@ -913,7 +923,7 @@ export default function App() {
 
   async function deleteConnector(id: string) {
     try {
-      await fetch(`${serverUrl.replace(/\/+$/, "")}/api/connectors/${id}`, { method: "DELETE", headers: authHeaders() });
+      await fetch(`${serverUrl.replace(/\/+$/, "")}/api/connectors/${encodeURIComponent(id)}`, { method: "DELETE", headers: authHeaders() });
     } catch {
       // ignorieren
     }
@@ -927,21 +937,43 @@ export default function App() {
       // Server-URL ist fest verdrahtet (detectBase) — keine gespeicherte/manuelle URL mehr.
       const url = serverUrl;
       let savedToken = "";
+      let secureReadFailed = false;
+      // Token liegt im Keychain/Keystore (expo-secure-store), nicht mehr als Klartext
+      // in AsyncStorage. Migration: alter Klartext-Token wird einmalig übernommen.
       try {
-        savedToken = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
-        // Auto-Token aus Build-Zeit-Secret (EXPO_PUBLIC_API_TOKEN) hat VORRANG:
-        // nach einer Server-Token-Rotation übernimmt die App den neuen Token,
-        // auch wenn noch ein alter Token im Speicher liegt.
-        const cfgToken = ((process.env as any)?.EXPO_PUBLIC_API_TOKEN || "").trim();
-        if (cfgToken && cfgToken !== savedToken) {
-          savedToken = cfgToken;
-          setApiToken(cfgToken);
-          await AsyncStorage.setItem(TOKEN_KEY, cfgToken);
-        } else if (savedToken) {
-          setApiToken(savedToken);
-        }
+        savedToken = (await SecureStore.getItemAsync(TOKEN_KEY)) || "";
+      } catch {
+        secureReadFailed = true; // Keychain transient nicht verfügbar → Klartext-Fallback NICHT in Keychain zurückschreiben
+        savedToken = "";
+      }
+      try {
+        if (!savedToken) savedToken = (await AsyncStorage.getItem(TOKEN_KEY)) || "";
       } catch {
         // ignorieren
+      }
+      // Geteilter App-Token aus dem Build (EXPO_PUBLIC_API_TOKEN) hat VORRANG:
+      // nach einer Server-Token-Rotation übernimmt die App den neuen Token,
+      // auch wenn noch ein alter Token im Speicher liegt.
+      // HINWEIS: EXPO_PUBLIC_* wird zur Build-Zeit ins Bundle inlined und ist aus der
+      // IPA extrahierbar — kein echtes Secret, sondern ein Low-Value-Zugriffstoken.
+      const cfgToken = ((process.env as any)?.EXPO_PUBLIC_API_TOKEN || "").trim();
+      if (cfgToken && cfgToken !== savedToken) {
+        savedToken = cfgToken;
+        setApiToken(cfgToken);
+        SecureStore.setItemAsync(TOKEN_KEY, cfgToken, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY })
+          .then(() => AsyncStorage.removeItem(TOKEN_KEY).catch(() => {}))
+          .catch(() => {}); // Klartext behalten — nächster Start migriert erneut
+      } else if (savedToken) {
+        setApiToken(savedToken);
+        // Nur in den Keychain migrieren, wenn der SecureStore-Read sicher leer war
+        // (nicht transient fehlgeschlagen) — sonst könnte ein neuerer Keychain-Token
+        // mit dem älteren Klartext überschrieben werden. Klartext erst NACH erfolgreichem
+        // Keychain-Write löschen — sonst ist die einzige Kopie (AsyncStorage) weg.
+        if (!secureReadFailed) {
+          SecureStore.setItemAsync(TOKEN_KEY, savedToken, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY })
+            .then(() => AsyncStorage.removeItem(TOKEN_KEY).catch(() => {}))
+            .catch(() => {}); // Klartext behalten — nächster Start migriert erneut
+        }
       }
       try {
         const savedCwd = await AsyncStorage.getItem(CWD_KEY);
@@ -962,9 +994,42 @@ export default function App() {
         // ignorieren
       }
       try {
-        const savedChats = await AsyncStorage.getItem(CHATS_KEY);
+        // Chats liegen verschlüsselt (AES-GCM, Key im Keychain). Migration: alter
+        // Klartext-Bestand wird einmalig übernommen + neu verschlüsselt, dann entfernt.
+        let savedChats: string | null = null;
+        try {
+          savedChats = await secureGetWithRetry(CHATS_ENC_KEY);
+          if (savedChats != null) {
+            // Verschlüsselter Bestand lesbar → evtl. Legacy-Klartext-Rest miträumen.
+            await AsyncStorage.removeItem(CHATS_KEY).catch(() => {});
+          }
+        } catch {
+          storageBlockedRef.current.add(CHATS_ENC_KEY); // JEDER Lesefehler blockiert (nicht nur SecureStoreError)
+        }
+        if (savedChats == null && !storageBlockedRef.current.has(CHATS_ENC_KEY)) {
+          const legacy = await AsyncStorage.getItem(CHATS_KEY);
+          if (legacy != null) {
+            // Nur nach erfolgreicher Verschlüsselung den Klartext löschen — sonst Datenverlust.
+            const ok = await secureSet(CHATS_ENC_KEY, legacy).then(() => true).catch(() => false);
+            if (ok) {
+              savedChats = legacy;
+              await AsyncStorage.removeItem(CHATS_KEY).catch(() => {});
+            } else {
+              savedChats = legacy; // Verschlüsselung fehlgeschlagen → Klartext bleibt als Quelle
+              warnWriteFailure(CHATS_ENC_KEY);
+            }
+          }
+        }
         if (savedChats) {
-          const parsed = JSON.parse(savedChats);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(savedChats);
+          } catch {
+            // Verschlüsselter Bestand lesbar, aber Inhalt korrupt (torn write) → nicht überschreiben.
+            // (Der spätere Block-Alert weist darauf hin — kein Schreibfehler-Alert hier.)
+            storageBlockedRef.current.add(CHATS_ENC_KEY);
+            parsed = null;
+          }
           if (Array.isArray(parsed)) {
             // Verwaiste leere KI-Nachrichten entfernen (weiße Balken aus abgebrochenen Streams).
             // ABER: leere Bubble als Resume-Anker behalten, wenn ein Stream-State existiert.
@@ -999,6 +1064,9 @@ export default function App() {
                   // die Server-Session-Datei überlebt die turnRegistry-TTL und ist die Wahrheit.
                   const filled = await reloadFromServer(chat.id);
                   if (!filled) {
+                    // Turn läuft serverseitig noch (lazy Session-Write)? Dann kein Fehler —
+                    // das Busy-Polling lädt die Antwort, sobald sie fertig ist.
+                    if (await serverTurnStillRunning(chat.id)) return;
                     patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Verbindung unterbrochen", retryable: true } }));
                   }
                 })
@@ -1010,13 +1078,50 @@ export default function App() {
         // ignorieren
       }
       try {
-        const savedFolders = await AsyncStorage.getItem(FOLDERS_KEY);
+        let savedFolders: string | null = null;
+        try {
+          savedFolders = await secureGetWithRetry(FOLDERS_ENC_KEY);
+          if (savedFolders != null) {
+            await AsyncStorage.removeItem(FOLDERS_KEY).catch(() => {});
+          }
+        } catch {
+          storageBlockedRef.current.add(FOLDERS_ENC_KEY);
+        }
+        if (savedFolders == null && !storageBlockedRef.current.has(FOLDERS_ENC_KEY)) {
+          const legacy = await AsyncStorage.getItem(FOLDERS_KEY);
+          if (legacy != null) {
+            const ok = await secureSet(FOLDERS_ENC_KEY, legacy).then(() => true).catch(() => false);
+            if (ok) {
+              savedFolders = legacy;
+              await AsyncStorage.removeItem(FOLDERS_KEY).catch(() => {});
+            } else {
+              savedFolders = legacy;
+              warnWriteFailure(FOLDERS_ENC_KEY);
+            }
+          }
+        }
         if (savedFolders) {
-          const parsed = JSON.parse(savedFolders);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(savedFolders);
+          } catch {
+            storageBlockedRef.current.add(FOLDERS_ENC_KEY);
+            parsed = null;
+          }
           if (Array.isArray(parsed)) setFolders(parsed);
         }
       } catch {
         // ignorieren
+      }
+      if (storageBlockedRef.current.size > 0) {
+        // Verschlüsselter Bestand unlesbar (Key weg/korrupt). Daten NICHT still verwerfen:
+        // Schreiben blockieren + einmalig hinweisen. (Tritt z. B. nach einem Geräte-Restore
+        // ohne Key auf — die lokalen Chats sind dann technisch nicht wiederherstellbar.)
+        Alert.alert(
+          "Lokaler Verlauf nicht lesbar",
+          "Der verschlüsselte lokale Verlauf (Chats/Ordner) kann nicht entschlüsselt werden (Schlüssel fehlt). " +
+          "Er wird nicht überschrieben — Chats bleiben serverseitig erhalten, Ordner werden nur lokal gespeichert.",
+        );
       }
       loadModels();
       loadMeta();
@@ -1109,12 +1214,12 @@ export default function App() {
 
   // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
   useEffect(() => {
-    if (!loadedRef.current) return;
+    if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
     const t = setTimeout(() => {
       const trimmed = chats.slice(0, 50).map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-200) }));
-      AsyncStorage.setItem(CHATS_KEY, JSON.stringify(trimmed)).catch(() => {
-        // ignorieren
-      });
+      secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
+        .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
+        .catch(() => warnWriteFailure(CHATS_ENC_KEY));
     }, 800);
     return () => clearTimeout(t);
   }, [chats]);
@@ -1173,9 +1278,10 @@ export default function App() {
     if (activeChatId === chatId) setActiveChatId(null);
     // Server-seitig aufräumen: laufende Antwort abbrechen + Session zurücksetzen,
     // damit kein toter pi-Prozess/keine tote Session weiterläuft.
-    abortControllersRef.current.get(chatId)?.abort();
+    const running = abortControllersRef.current.get(chatId);
+    running?.abort();
     abortControllersRef.current.delete(chatId);
-    abortedRef.current.add(chatId);
+    if (running) abortedRef.current.add(chatId); // nur bei laufendem Stream signalisieren (kein Leak)
     fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
       method: "POST",
       headers: authHeaders(),
@@ -1195,11 +1301,12 @@ export default function App() {
         headers: authHeaders(),
         body: JSON.stringify({ text }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data.audioBase64) {
         const file = new File(Paths.cache, `tts-${Date.now()}.mp3`);
         file.create({ overwrite: true, intermediates: true });
-        file.write(data.audioBase64, { encoding: "base64" });
+        await file.write(data.audioBase64, { encoding: "base64" });
         player.replace({ uri: file.uri });
         player.play();
         return;
@@ -1225,6 +1332,10 @@ export default function App() {
         return;
       }
       const b64 = a.base64 ?? "";
+      if (b64 && b64.length > (5 * 1024 * 1024 * 4) / 3) {
+        Alert.alert("Bild zu groß", "Maximal 5 MB — bitte ein kleineres Bild wählen.");
+        return;
+      }
       if (b64) {
         setPendingImages((p) => [...p, { data: b64, mediaType: a.mimeType || "image/jpeg", uri: a.uri }]);
       }
@@ -1247,6 +1358,10 @@ export default function App() {
       const f = new File(a.uri);
       if (isPdf) {
         const b64 = await f.base64();
+        if (b64.length * 0.75 > maxBytes) {
+          Alert.alert("Datei zu groß", "Maximal 8 MB für PDFs");
+          return;
+        }
         setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: "application/pdf" }]);
       } else {
         const content = await f.text();
@@ -1285,12 +1400,25 @@ export default function App() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      const imgUri = `${serverUrl.replace(/\/+$/, "")}${data.url}`;
+      // Nur gültige Bild-URLs übernehmen (relativer Pfad oder http(s)) — kein Schema-/Host-Injection.
+      const rawUrl = typeof data.url === "string" ? data.url : "";
+      const imgUri = /^https?:\/\//i.test(rawUrl)
+        ? rawUrl
+        : rawUrl.startsWith("/")
+          ? `${serverUrl.replace(/\/+$/, "")}${rawUrl}`
+          : "";
+      if (!imgUri) throw new Error("Ungültige Bild-URL vom Server");
       patchMsg(chatId, aiId, (m) => ({ ...m, text: "", images: [{ uri: imgUri }] }));
       if (speak) speakReply("Hier ist das Bild.");
     } catch (e) {
-      const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
-      appendMsg(chatId, { id: uid("e"), role: "assistant", text: `Bild-Generierung fehlgeschlagen: ${classifyError(msg)}` });
+      if (abortedRef.current.has(chatId)) {
+        // Nutzer-Stop (nicht Timeout): leere KI-Bubble entfernen statt Fehlerkarte.
+        abortedRef.current.delete(chatId);
+        patchChat(chatId, (c) => ({ ...c, messages: c.messages.filter((m) => m.id !== aiId) }));
+      } else {
+        const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
+        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: `Bild-Generierung fehlgeschlagen: ${classifyError(msg)}`, retryable: false } }));
+      }
     } finally {
       clearTimeout(timer);
       if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
@@ -1312,13 +1440,19 @@ export default function App() {
       finalMessage = `[Antwort auf: "${replyTo.text}"]\n${finalMessage}`;
     }
     if (pendingFiles.length) {
-      const fileText = pendingFiles.map((f) => `### ${f.name}\n${f.content}`).join("\n\n");
-      finalMessage = message ? `${message}\n\n[Angehängte Dateien]\n${fileText}` : `[Angehängte Dateien]\n${fileText}`;
+      const fileText = pendingFiles.map((f) => {
+        // Dateinamen sind Nutzer-Eingaben → Control-Chars strippen + Länge deckeln,
+        // damit kein Prompt-Injection-/Formatierungs-Bruch über den Namen entsteht.
+        const name = (f.name || "Datei").replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 80) || "Datei";
+        return `### ${name}\n${f.content}`;
+      }).join("\n\n");
+      finalMessage = finalMessage ? `${finalMessage}\n\n[Angehängte Dateien]\n${fileText}` : `[Angehängte Dateien]\n${fileText}`;
     }
     const images = pendingImages.map((im) => ({ data: im.data, mediaType: im.mediaType }));
     const documents = pendingDocuments.map((d) => ({ name: d.name, data: d.data, mimeType: d.mimeType }));
-    if (!finalMessage && (images.length || documents.length)) {
-      finalMessage = images.length ? "[Bild angehängt – analysiere es]" : "[PDF-Dokument angehängt – analysiere es]";
+    if (!message && (images.length || documents.length)) {
+      const hint = images.length ? "[Bild angehängt – analysiere es]" : "[PDF-Dokument angehängt – analysiere es]";
+      finalMessage = finalMessage ? `${finalMessage}\n${hint}` : hint;
     }
     const imageUris = pendingImages.map((im) => ({ uri: im.uri }));
     setInput("");
@@ -1486,8 +1620,8 @@ export default function App() {
     });
 
     if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status} ${errText.slice(0, 200)}`);
+      const errText = (await res.text().catch(() => "")).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 200);
+      throw new Error(`HTTP ${res.status} ${errText}`);
     }
 
     const body = res.body;
@@ -1789,6 +1923,7 @@ export default function App() {
   }
 
   async function loadTasks() {
+    tasksAbortRef.current?.abort(); // vorherigen Poll abbrechen (kein konkurrierendes setTaskList)
     const ctrl = new AbortController();
     tasksAbortRef.current = ctrl;
     const timer = setTimeout(() => ctrl.abort(), 15000);
@@ -1837,6 +1972,10 @@ export default function App() {
       Alert.alert("Zeitplan fehlerhaft", "Bitte einen gültigen Cron-Ausdruck angeben (5 Felder: Minute Stunde Tag Monat Wochentag).");
       return;
     }
+    if (schedPreset === "custom" && !/^(\S+\s+){4}\S+$/.test(cron)) {
+      Alert.alert("Zeitplan fehlerhaft", "Ungültiger Cron-Ausdruck — 5 Felder erwartet (Minute Stunde Tag Monat Wochentag).");
+      return;
+    }
     try {
       const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/schedule`, {
         method: "POST",
@@ -1857,7 +1996,7 @@ export default function App() {
 
   async function deleteSchedule(id: string) {
     try {
-      await fetch(`${serverUrl.replace(/\/+$/, "")}/schedule/${id}`, {
+      await fetch(`${serverUrl.replace(/\/+$/, "")}/schedule/${encodeURIComponent(id)}`, {
         method: "DELETE",
         headers: authHeaders(),
       });
@@ -1878,12 +2017,20 @@ export default function App() {
     // Reine Anhang-Nachrichten ("Bild"/"PDF"/"Datei") können ohne
     // die Base64-Anhänge nicht korrekt wiederholt werden → Retry unterdrücken.
     if (!text || /^(Bild|PDF|Datei)$/.test(text)) return;
-    patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "", activity: [], error: undefined }));
+    // Reply-Kontext wiederherstellen (wie in send()) und die Bubble vollständig zurücksetzen
+    // (auch alte images/dil/permissions der vorherigen Antwort, sonst erscheinen sie erneut).
+    const fullText = userMsg.replyTo
+      ? `[Antwort auf: "${userMsg.replyTo.text.replace(/\n+/g, " ").trim().slice(0, 200)}"]\n${text}`
+      : text;
+    patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "", activity: [], images: undefined, dil: undefined, permissions: undefined, error: undefined }));
     markBusy(chat.id, true);
     setChatThinking(chat.id, "");
     abortedRef.current.delete(chat.id);
-    delete streamStateRef.current[chat.id];
-    streamChat(text, chat.id, aiMsg.id).catch((e) => {
+    // Resume-Anker setzen, damit ein abgebrochener Retry-Stream fortgesetzt werden kann.
+    const clientMessageId = uid("m");
+    streamStateRef.current[chat.id] = { turnId: "", lastSeq: 0, clientMessageId };
+    persistStreamState(chat.id);
+    streamChat(fullText, chat.id, aiMsg.id, [], [], undefined, clientMessageId).catch((e) => {
       const raw = e instanceof Error ? e.message : String(e);
       patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
     }).finally(() => {
@@ -2339,8 +2486,8 @@ export default function App() {
                     onPress={() => send()}
                     onPressIn={() => Animated.spring(sendScale, { toValue: 0.88, useNativeDriver: true, friction: 6 }).start()}
                     onPressOut={() => Animated.spring(sendScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start()}
-                    disabled={isThisChatBusy || !input.trim()}
-                    style={[styles.sendBtn, (isThisChatBusy || !input.trim()) && styles.sendBtnDisabled]}
+                    disabled={isThisChatBusy || (!input.trim() && !pendingImages.length && !pendingFiles.length && !pendingDocuments.length)}
+                    style={[styles.sendBtn, (isThisChatBusy || (!input.trim() && !pendingImages.length && !pendingFiles.length && !pendingDocuments.length)) && styles.sendBtnDisabled]}
                   >
                     <Ionicons name="arrow-up" size={20} color="#ffffff" />
                   </Pressable>

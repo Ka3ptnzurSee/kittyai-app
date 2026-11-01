@@ -363,3 +363,38 @@ export class SseParser {
     return out;
   }
 }
+
+// ── Fehlerklassifikation & Titelableitung (aus App.tsx extrahiert, damit testbar) ──
+
+const AUTH_PATTERN = /401|403|unauthor|forbidden|invalid api key|invalid token|expired token|bad token/i;
+
+/** Fehler in menschenlesbare Kategorie übersetzen (statt rohem ⚠️-Text). */
+export function classifyError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (/rate.?limit|429|too many|limit reached|fenster/i.test(s)) return "Limit erreicht";
+  if (/quota|credits|billing|zahlung|payment|out of credits/i.test(s)) return "Konto/Guthaben";
+  if (AUTH_PATTERN.test(s)) return "Zugriff verweigert";
+  if (/timeout|timed out|zeitüberschreitung/i.test(s)) return "Zeitüberschreitung";
+  if (/overload|busy|capacity|ausgelastet|überlast/i.test(s)) return "Server ausgelastet";
+  if (/context length|maximum context|token limit/i.test(s)) return "Kontext zu lang";
+  if (/network|fetch failed|connection|econnreset|socket|dns|netzwerk|verbindung/i.test(s)) return "Netzwerk unterbrochen";
+  return "Fehler";
+}
+
+/** Ob ein Fehler einen erneuten Versuch (Retry) erlaubt. */
+export function isRetryable(raw: string): boolean {
+  return !AUTH_PATTERN.test(raw)
+    && !/quota|credits|billing|zahlung|payment/i.test(raw)
+    && !/context length|maximum context|token limit/i.test(raw);
+}
+
+/** Chat-Titel aus der ersten Nutzernachricht ableiten (gekürzt, an Wortgrenze). */
+export function deriveTitle(raw: string, maxChars = 22): string {
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  if (cleaned.length <= maxChars) return cleaned;
+  const cut = cleaned.slice(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  const truncated = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+  return truncated ? `${truncated}…` : "";
+}

@@ -13,7 +13,7 @@
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
         "NSAppTransportSecurity": {
-          "NSAllowsArbitraryLoads": true
+          "NSAllowsLocalNetworking": true
         },
         "NSMicrophoneUsageDescription": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
         "NSSpeechRecognitionUsageDescription": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
@@ -66,7 +66,8 @@
             "assets/fonts/JetBrainsMono-Regular.ttf"
           ]
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {
