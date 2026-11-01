@@ -752,6 +752,25 @@ export default function App() {
     }
   }
 
+  // Hat die letzte lokale User-Nachricht den Server erreicht? true bei offline/unbekannt
+  // oder erreicht; false NUR wenn der Server nachweislich weniger User-Nachrichten hat
+  // als lokal (die Nachricht ist nie angekommen → kein Server-Turn vorhanden).
+  async function messageReachedServer(chatId: string): Promise<boolean> {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
+      if (!res.ok) return true;
+      const data = await res.json();
+      if (!Array.isArray(data.messages)) return true;
+      const serverUserCount = data.messages.filter((m: any) => m.role === "user").length;
+      const chat = chatsRef.current.find((c) => c.id === chatId);
+      const localUserCount = chat ? chat.messages.filter((m) => m.role === "user").length : 0;
+      return serverUserCount >= localUserCount;
+    } catch {
+      return true; // offline → nicht feststellbar → optimistisch als „erreicht" behandeln
+    }
+  }
+
   function saveFolders(next: Folder[]) {
     setFolders(next);
     AsyncStorage.setItem(FOLDERS_KEY, JSON.stringify(next)).catch(() => { /* ignorieren */ });
@@ -1064,6 +1083,17 @@ export default function App() {
       if (cancelled) return;
       const filled = await reloadFromServer(activeChatId);
       if (filled) {
+        setStatusByChat((prev) => ({ ...prev, [activeChatId]: "" }));
+        markBusy(activeChatId, false);
+        return;
+      }
+      // Nachricht hat den Server nie erreicht (Send während Offline): kein Turn da,
+      // der fertig werden könnte → Retry-Karte statt endlosem Polling.
+      if (!(await messageReachedServer(activeChatId))) {
+        const deadAi = [...(chatsRef.current.find((c) => c.id === activeChatId)?.messages || [])].reverse().find((m) => m.role === "assistant");
+        if (deadAi && !deadAi.text?.trim() && !deadAi.error) {
+          patchMsg(activeChatId, deadAi.id, (m) => ({ ...m, error: { type: "Nicht gesendet — bitte erneut senden.", retryable: true } }));
+        }
         setStatusByChat((prev) => ({ ...prev, [activeChatId]: "" }));
         markBusy(activeChatId, false);
         return;
@@ -1386,6 +1416,13 @@ export default function App() {
         // unterbrochen" den Chat busy halten und automatisch neu verbinden — das
         // Session-Polling (alle 3 s) holt die Antwort, sobald das Netz zurück ist.
         if (/network|fetch failed|connection lost|request failed|prematurely closed|econnreset|socket hang up|timed out/i.test(rawMsg)) {
+          // Ausnahme: die Nachricht hat den Server NACHWEISLICH nie erreicht (Send
+          // während Offline). Dann existiert kein Server-Turn, der weiterlaufen könnte —
+          // ewig pollen wäre falsch. Retry-Karte statt Reconnect.
+          if (!(await messageReachedServer(chatId))) {
+            patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: "Nicht gesendet — Netzwerk unterbrochen. Bitte erneut senden.", retryable: true } }));
+            return;
+          }
           turnStillRunning = true;
           setStatusByChat((prev) => ({ ...prev, [chatId]: "Verbindung verloren — verbinde automatisch neu …" }));
           return;
