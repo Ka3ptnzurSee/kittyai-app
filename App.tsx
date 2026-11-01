@@ -1064,6 +1064,7 @@ export default function App() {
       if (cancelled) return;
       const filled = await reloadFromServer(activeChatId);
       if (filled) {
+        setStatusByChat((prev) => ({ ...prev, [activeChatId]: "" }));
         markBusy(activeChatId, false);
         return;
       }
@@ -1380,11 +1381,17 @@ export default function App() {
           return;
         }
         const rawMsg = e2 instanceof Error ? e2.message : String(e2);
-        const msg = /network|fetch failed|connection lost|request failed/i.test(rawMsg)
-          ? "Verbindung unterbrochen (Netzwerk) — bitte erneut senden"
-          : rawMsg;
-        // Fehler als eigene Karte statt als Text-Suffix in die Antwort.
-        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(msg), retryable: isRetryable(msg) } }));
+        // Netzwerk-/Stream-Fehler: NICHT aufgeben. iOS tötet die SSE-Verbindung beim
+        // App-Wechsel, der Server-Turn läuft unabhängig weiter. Statt „Verbindung
+        // unterbrochen" den Chat busy halten und automatisch neu verbinden — das
+        // Session-Polling (alle 3 s) holt die Antwort, sobald das Netz zurück ist.
+        if (/network|fetch failed|connection lost|request failed|prematurely closed|econnreset|socket hang up|timed out/i.test(rawMsg)) {
+          turnStillRunning = true;
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Verbindung verloren — verbinde automatisch neu …" }));
+          return;
+        }
+        // Echter Server-Fehler (kein Netzproblem) → Fehler-Karte statt Text-Suffix.
+        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(rawMsg), retryable: isRetryable(rawMsg) } }));
       }
     } finally {
       setChatThinking(chatId, "");
@@ -1649,6 +1656,10 @@ export default function App() {
       abortedRef.current.add(chatId);
       abortControllersRef.current.get(chatId)?.abort();
       abortControllersRef.current.delete(chatId);
+      // Stop räumt auch den „verbinde automatisch neu"-Zustand auf (im Polling-Modus
+      // gibt es keinen aktiven AbortController) → busy + Status sofort beenden.
+      markBusy(chatId, false);
+      setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
     }
     try {
       await fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
