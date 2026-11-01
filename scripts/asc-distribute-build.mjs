@@ -86,7 +86,10 @@ if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(arg)
   }
   const b = (r.body?.data || []).find((x) => String(x.attributes.version) === String(arg));
   if (!b) {
-    die(`Build-Version ${safeArg} nicht gefunden (zu alt oder falsch).`);
+    // Build wurde gerade submitet, Apple verarbeitet ihn noch (~5-10 min) →
+    // "nicht gefunden" ist retrybar, NICHT fatal (sonst bricht der Poll-Loop ab).
+    console.log(`Build ${safeArg} noch nicht in ASC-Liste (Apple verarbeitet noch) — später erneut.`);
+    process.exit(2);
   }
   if (b.attributes.processingState !== "VALID") {
     console.log(`Build ${safeArg} noch nicht VALID (${sanitize(b.attributes.processingState)}) in ASC.`);
