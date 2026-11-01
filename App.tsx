@@ -761,6 +761,9 @@ export default function App() {
       const res = await fetch(`${base}/api/session/${chatId}`, { headers: authHeaders() });
       if (!res.ok) return true;
       const data = await res.json();
+      // Autoritatives Busy-Signal: Turn läuft (Session-Datei evtl. noch leer —
+      // Server schreibt sie lazy) → Nachricht hat den Server erreicht, KEIN „nie gesendet".
+      if (data.activeTurn === true) return true;
       if (!Array.isArray(data.messages)) return true;
       const serverUserCount = data.messages.filter((m: any) => m.role === "user").length;
       const chat = chatsRef.current.find((c) => c.id === chatId);
