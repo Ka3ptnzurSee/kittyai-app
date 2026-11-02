@@ -297,7 +297,7 @@ function MdImage({ uri, alt }: { uri: string; alt?: string }) {
   if (failed) {
     return (
       <Text selectable style={styles.imageFallback} onPress={() => Linking.openURL(uri).catch(() => {})}>
-        🖼 {alt || uri}
+        🖼 {breakUnbreakable(alt || uri)}
       </Text>
     );
   }
@@ -305,7 +305,7 @@ function MdImage({ uri, alt }: { uri: string; alt?: string }) {
     <Pressable onPress={() => Linking.openURL(uri).catch(() => {})} disabled={!uri}>
       <Image
         source={{ uri }}
-        style={[styles.mdImage, ratio ? { height: undefined, aspectRatio: ratio } : null]}
+        style={[styles.mdImage, ratio ? { height: undefined, aspectRatio: Math.min(3, Math.max(0.4, ratio)) } : null]}
         resizeMode="contain"
         accessibilityLabel={alt || "Bild"}
         onLoad={(e) => {
@@ -340,7 +340,7 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
           } else {
             out.push(
               <Text key={`${key}-img${n}`} selectable style={styles.imageFallback}>
-                🖼 {alt || "Bild"}
+                🖼 {breakUnbreakable(alt || "Bild")}
               </Text>,
             );
           }
@@ -533,8 +533,10 @@ const styles = StyleSheet.create({
   root: { gap: 2 },
   paragraph: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
   mdImage: {
-    width: "100%",
+    alignSelf: "stretch",
+    maxWidth: "100%",
     height: 220,
+    maxHeight: 460,
     borderRadius: 12,
     backgroundColor: colors.surface2,
     marginVertical: 6,
@@ -591,7 +593,7 @@ const styles = StyleSheet.create({
   codeLang: { fontSize: 12, color: colors.muted, fontFamily: monoFontFamily },
   codeCopy: { fontSize: 12, color: colors.accent, fontWeight: "600" },
   codeText: { fontFamily: monoFontFamily, fontSize: 13, lineHeight: 19, color: colors.text, padding: 10 },
-  table: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, marginVertical: 6, overflow: "hidden" },
+  table: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, marginVertical: 6, overflow: "hidden", maxWidth: "100%" },
   tableRow: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: colors.border },
   tableCell: { flex: 1, padding: 6 },
   tableCellText: { fontSize: 14, lineHeight: 20, color: colors.text, fontFamily: aiFontFamily },

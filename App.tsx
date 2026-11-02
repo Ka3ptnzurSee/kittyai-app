@@ -474,6 +474,30 @@ export default function App() {
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
   const [attachOpen, setAttachOpen] = useState(false);
+  // iOS kann keinen nativen Picker (PHPicker/Kamera/DocumentPicker/Alert.prompt) auf einen
+  // noch sichtbaren RN-<Modal> legen: UIKit präsentiert dann gar nichts — kein Fehler,
+  // Promise kommt einfach als `canceled` zurück. Genau das war das Symptom „es öffnet
+  // sich nichts" bei Bilder/Kamera/Datei. Deshalb: Sheet schließen, Aktion im
+  // onDismiss des Modals ausführen (mit Fallback-Timer, falls onDismiss nicht feuert).
+  const pendingAttachActionRef = useRef<null | (() => void)>(null);
+  const presentAfterSheet = (action: () => void) => {
+    pendingAttachActionRef.current = action;
+    setAttachOpen(false);
+    setTimeout(() => {
+      const fn = pendingAttachActionRef.current;
+      if (fn === action) {
+        pendingAttachActionRef.current = null;
+        fn();
+      }
+    }, 500);
+  };
+  const runPendingAttachAction = () => {
+    const fn = pendingAttachActionRef.current;
+    if (!fn) return;
+    pendingAttachActionRef.current = null;
+    // Kurz warten, bis der Modal-Controller wirklich weg ist (Dismiss-Animation).
+    setTimeout(fn, 60);
+  };
   const micPulse = useRef(new Animated.Value(1)).current;
   const sendScale = useRef(new Animated.Value(1)).current;
   const [replyingTo, setReplyingTo] = useState<Msg | null>(null);
@@ -683,8 +707,13 @@ export default function App() {
       if (data.activeTurn === true) return false;
       if (!Array.isArray(data.messages)) return false;
       const serverMsgs = data.messages as { id?: string; role: string; text?: string; images?: { uri: string }[] }[];
-      const lastServerMsg = serverMsgs[serverMsgs.length - 1];
-      const serverLast = [...serverMsgs].reverse().find((m) => m.role === "assistant");
+      // Nur Assistant-Nachrichten MIT Text zählen: Zwischenschritte (nur Tool-Calls)
+      // haben leeren Text und würden die echte Antwort verdecken.
+      const serverLast = [...serverMsgs].reverse().find((m) => m.role === "assistant" && String(m.text || "").trim());
+      // Turn fertig = Antwort steht NACH der letzten User-Nachricht (danach dürfen leere
+      // Zwischenschritte folgen, ohne die Antwort zu verdecken).
+      const lastUserIdxS = serverMsgs.map((m) => m.role).lastIndexOf("user");
+      const serverLastIdxS = serverLast ? serverMsgs.lastIndexOf(serverLast) : -1;
       const serverUserCount = serverMsgs.filter((m) => m.role === "user").length;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
@@ -695,7 +724,7 @@ export default function App() {
       // 1) Vorhandene komplette Antwort hat IMMER Vorrang — auch vor lastError (ein
       // fehlgeschlagener Turn kann eine bereits geschriebene Antwort + angehängten Fehler
       // hinterlassen; die Antwort darf nicht von der Fehler-Karte verdeckt werden).
-      if (lastServerMsg && lastServerMsg.role === "assistant" && serverLast?.text?.trim()) {
+      if (serverLast && serverLastIdxS > lastUserIdxS && serverLast.text?.trim()) {
         const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
         if (!lastAi) return false;
         const answerText = (serverLast.text || "").slice(0, MAX_REPLY_CHARS);
@@ -1055,20 +1084,38 @@ export default function App() {
           }
           if (Array.isArray(parsed)) {
             // Verwaiste leere KI-Nachrichten entfernen (weiße Balken aus abgebrochenen Streams).
-            // ABER: leere Bubble als Resume-Anker behalten, wenn ein Stream-State existiert.
-            const cleaned = parsed.map((c: any) => ({
-              ...c,
-              messages: (Array.isArray(c.messages) ? c.messages : []).filter(
-                (m: any) =>
-                  m.role !== "assistant" ||
-                  (m.text && String(m.text).trim()) ||
-                  (m.activity && m.activity.length) ||
-                  (m.permissions && m.permissions.length) ||
-                  (m.images && m.images.length) ||
-                  m.error ||
-                  !!streamStateRef.current[c.id],
-              ),
-            }));
+            // ABER: NUR die LETZTE leere Bubble als Resume-Anker behalten, wenn ein Stream-State
+            // existiert. Alle älteren leeren Bubbles sind weiße Balken aus abgebrochenen Turns und
+            // werden entfernt — sonst füllen sie den Verlauf mit 100+ weißen Blöcken.
+            const cleaned = parsed.map((c: any) => {
+              const msgs = Array.isArray(c.messages) ? c.messages : [];
+              let anchorId: string | null = null;
+              if (streamStateRef.current[c.id]) {
+                const lastEmpty = [...msgs].reverse().find(
+                  (m: any) =>
+                    m.role === "assistant" &&
+                    !(m.text && String(m.text).trim()) &&
+                    !(m.activity && m.activity.length) &&
+                    !(m.permissions && m.permissions.length) &&
+                    !(m.images && m.images.length) &&
+                    !m.error,
+                );
+                if (lastEmpty) anchorId = lastEmpty.id;
+              }
+              return {
+                ...c,
+                messages: msgs.filter(
+                  (m: any) =>
+                    m.role !== "assistant" ||
+                    (m.text && String(m.text).trim()) ||
+                    (m.activity && m.activity.length) ||
+                    (m.permissions && m.permissions.length) ||
+                    (m.images && m.images.length) ||
+                    m.error ||
+                    m.id === anchorId,
+                ),
+              };
+            });
             setChats((prev) => (prev.length ? prev : cleaned));
             // Auto-Resume: für jeden Chat mit Stream-State + leerer KI-Bubble + User-Nachricht
             // den letzten Turn am Server fortsetzen (kompletter App-Kill -> Antwort wiederherstellen).
@@ -1171,16 +1218,20 @@ export default function App() {
           cs.map((c) => {
             if (c.id !== activeChatId) return c;
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
-            const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant");
+            const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant" && String(m.text || "").trim());
             // Server-Session ist die Wahrheit: eine (Resume-)Fehler-Karte auffüllen, wenn der
             // Server die finale Antwort WIRKLICH hat. Zwei Guards gegen veraltete Antworten:
             // (1) letzte Server-Nachricht ist eine Assistant-Antwort (Turn fertig),
             // (2) der Server kennt mindestens so viele User-Nachrichten wie lokal — der
             //     fehlgeschlagene Turn hat den Server erreicht (kein reiner Send-Netzwerkfehler).
-            const lastServerMsg = data.messages[data.messages.length - 1];
             const serverUserCount = [...data.messages].filter((m) => m.role === "user").length;
             const localUserCount = c.messages.filter((m) => m.role === "user").length;
-            const serverHasFreshAnswer = !!serverLast && !!lastServerMsg && lastServerMsg.role === "assistant" && !!serverLast.text?.trim() && serverUserCount >= localUserCount;
+            // „Frische Antwort" = letzte Text-tragende Assistant-Nachricht steht NACH der
+            // letzten User-Nachricht (Turn ist durch) — unabhängig davon, ob danach noch
+            // leere Zwischenschritte in der Session stehen.
+            const lastUserIdx = (data.messages as { role?: string }[]).map((m) => m.role).lastIndexOf("user");
+            const serverLastIdx = serverLast ? data.messages.lastIndexOf(serverLast) : -1;
+            const serverHasFreshAnswer = !!serverLast && serverLastIdx > lastUserIdx && serverUserCount >= localUserCount;
             const serverText = (serverLast?.text || "").trim().slice(0, MAX_REPLY_CHARS);
             const localText = lastAi?.text?.trim() || "";
             if (lastAi && serverHasFreshAnswer && serverText.length > localText.length) {
@@ -2569,6 +2620,7 @@ export default function App() {
                 visible={attachOpen}
                 transparent
                 animationType="fade"
+                onDismiss={runPendingAttachAction}
                 onRequestClose={() => setAttachOpen(false)}
               >
                 <Pressable style={styles.sheetBackdrop} onPress={() => setAttachOpen(false)}>
@@ -2576,19 +2628,19 @@ export default function App() {
                     <View style={styles.attachSheetHandle} />
                     <Text style={styles.attachSheetTitle}>Anhang hinzufügen</Text>
                     <View style={styles.attachSheetRow}>
-                      <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickImage(); })} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="image-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Bilder</Text>
                       </Pressable>
-                      <Pressable onPress={() => { pickCameraImage(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickCameraImage(); })} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="camera-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Kamera</Text>
                       </Pressable>
-                      <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickFile(); })} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="attach-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Datei</Text>
                       </Pressable>
-                      <Pressable onPress={() => { generateImageInChat(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void generateImageInChat(); })} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="color-palette-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Bild erstellen</Text>
                       </Pressable>
@@ -2950,7 +3002,9 @@ const styles = StyleSheet.create({
   tabRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   list: { flex: 1 },
   listContent: { padding: 12, paddingBottom: 16 },
-  bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8 },
+  // overflow:hidden ist der letzte Schutz: ein Kind mit zu großer intrinsischer Breite
+  // (langer unbrechbarer String in einem Widget) darf nicht mehr aus der Blase malen.
+  bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8, overflow: "hidden" },
   // ChatGPT-Look: User rechts in hellgrauer Blase (oai-bg-user-message #0000000D), KI flach.
   userBubble: { alignSelf: "flex-end", backgroundColor: oaicolors.bgUserMessage },
   aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },

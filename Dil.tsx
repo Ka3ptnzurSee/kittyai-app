@@ -19,6 +19,16 @@ import type { ChartPoint } from "./dilviz";
 import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
 import { breakUnbreakable } from "./lib";
 
+// Obergrenze für Medien in Widgets: ein Modell kann height: 100000 liefern — ohne Cap
+// wächst die Zelle zur „unendlich langen weißen Nachricht".
+const MAX_MEDIA_H = 460;
+
+// Text aus (Modell-gelieferten) DIL-Props: Steuerzeichen raus, unbrechbare Riesen-Läufe
+// umbrechen. Ohne das sprengt ein einziger 5000-Zeichen-String das iOS-Layout.
+function t(v: unknown, fallback = ""): string {
+  return breakUnbreakable(str(v, fallback));
+}
+
 // ───────────────────────────── RN-Renderer für DIL (GenUI) ─────────────────────────────
 // Wandelt den von `resolveDilRoot` erzeugten Baum in native Widgets um.
 // MVP-Widgets (siehe docs/kittyai-perfektion.md Phase A): Layout, Text, Formular,
@@ -152,7 +162,7 @@ function CheckboxWidget({ props }: { props: Props }) {
       <View style={[styles.checkbox, checked && { backgroundColor: colors.accent, borderColor: colors.accent }]}>
         {checked ? <Text style={{ color: "#fff", fontSize: 12, lineHeight: 16 }}>✓</Text> : null}
       </View>
-      <Text style={styles.checkboxLabel}>{str(getProp(props, "label"), "")}</Text>
+      <Text style={styles.checkboxLabel}>{t(getProp(props, "label"))}</Text>
     </Pressable>
   );
 }
@@ -176,7 +186,7 @@ function RadioGroupWidget({ props }: { props: Props }) {
             <View style={[styles.radio, active && { borderColor: colors.accent }]}>
               {active ? <View style={styles.radioDot} /> : null}
             </View>
-            <Text style={styles.checkboxLabel}>{label}</Text>
+            <Text style={styles.checkboxLabel}>{breakUnbreakable(label)}</Text>
           </Pressable>
         );
       })}
@@ -296,7 +306,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return (
         <View style={styles.select}>
           {opts.map((o, i) => (
-            <Text key={i} style={styles.selectItem}>{str(o, "?")}</Text>
+            <Text key={i} style={styles.selectItem}>{t(o, "?")}</Text>
           ))}
         </View>
       );
@@ -327,7 +337,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         <Image
           source={{ uri: src }}
           resizeMode="cover"
-          style={{ width: w || "100%", height: h || 220, borderRadius: radius, backgroundColor: colors.surface2 }}
+          style={{ width: w || "100%", maxWidth: "100%", height: Math.min(h || 220, MAX_MEDIA_H), borderRadius: radius, backgroundColor: colors.surface2 }}
         />
       );
     }
@@ -338,7 +348,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       const bg = /^#[0-9a-f]{6}$/i.test(c) ? c + "22" : c;
       return (
         <View style={[styles.badge, { backgroundColor: bg, borderColor: c }]}>
-          <Text style={{ color: c, fontWeight: "700", fontSize: 12 }}>{label}</Text>
+          <Text style={{ color: c, fontWeight: "700", fontSize: 12 }}>{breakUnbreakable(label)}</Text>
         </View>
       );
     }
@@ -373,8 +383,8 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "ListItem":
       return (
         <View style={styles.listRow}>
-          <Text style={styles.listMarker}>{str(getProp(props, "marker"), "•")}</Text>
-          <Text style={styles.listText}>{str(getProp(props, "label"), "")}</Text>
+          <Text style={styles.listMarker}>{t(getProp(props, "marker"), "•")}</Text>
+          <Text style={styles.listText}>{t(getProp(props, "label"))}</Text>
         </View>
       );
     case "Table": {
@@ -388,7 +398,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
           {headers.some((h) => h) ? (
             <View style={styles.tableRow}>
               {headers.map((h, i) => (
-                <Text key={i} style={styles.tableHeaderCell} numberOfLines={2}>{h}</Text>
+                <Text key={i} style={styles.tableHeaderCell} numberOfLines={2}>{breakUnbreakable(h)}</Text>
               ))}
             </View>
           ) : null}
@@ -401,7 +411,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
             return (
               <View key={ri} style={styles.tableRow}>
                 {cells.map((c, ci) => (
-                  <Text key={ci} style={styles.tableCell} numberOfLines={3}>{c}</Text>
+                  <Text key={ci} style={styles.tableCell} numberOfLines={3}>{breakUnbreakable(c)}</Text>
                 ))}
               </View>
             );
@@ -499,7 +509,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       );
     case "TableHeader":
     case "TableCell":
-      return <Text style={styles.text}>{str(getProp(props, "label"), str(getProp(props, "header"), ""))}</Text>;
+      return <Text style={styles.text}>{t(getProp(props, "label"), str(getProp(props, "header"), ""))}</Text>;
     case "SearchImage": {
       const src = str(getProp(props, "src"), str(getProp(props, "searchImage"), ""));
       if (!src || !isSafeImageSrc(src)) return null;
@@ -507,7 +517,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         <Image
           source={{ uri: src }}
           resizeMode="cover"
-          style={{ width: Math.max(0, num(getProp(props, "width"), 0)) || "100%", height: Math.max(0, num(getProp(props, "height"), 0)) || 220, borderRadius: Math.max(0, num(getProp(props, "radius"), 12)), backgroundColor: colors.surface2 }}
+          style={{ width: Math.max(0, num(getProp(props, "width"), 0)) || "100%", maxWidth: "100%", height: Math.min(Math.max(0, num(getProp(props, "height"), 0)) || 220, MAX_MEDIA_H), borderRadius: Math.max(0, num(getProp(props, "radius"), 12)), backgroundColor: colors.surface2 }}
         />
       );
     }
@@ -524,7 +534,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return (
         <View style={styles.fallback}>
           <Text style={styles.fallbackText}>
-            {str(getProp(props, "fallback"), "Interaktive Ansicht (nicht verfügbar)")}
+            {t(getProp(props, "fallback"), "Interaktive Ansicht (nicht verfügbar)")}
           </Text>
         </View>
       );
@@ -596,7 +606,7 @@ function BarChart({ points, horizontal }: { points: ChartPoint[]; horizontal?: b
         {points.map((p, i) => (
           <View key={i} style={styles.vBarCol}>
             <View style={styles.vBarTrack}>
-              <View style={[styles.vBarFill, { height: `${Math.round((p.value / max) * 100)}%`, backgroundColor: barColor }]} />
+              <View style={[styles.vBarFill, { height: `${Math.min(100, Math.max(0, Math.round(((Number.isFinite(p.value) ? p.value : 0) / max) * 100)))}%`, backgroundColor: barColor }]} />
             </View>
             <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
           </View>
