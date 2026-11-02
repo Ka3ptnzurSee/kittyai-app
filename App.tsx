@@ -34,7 +34,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 
@@ -425,6 +425,16 @@ function MessageBubble({
   );
 }
 
+// Bild-Liste vom Server normalisieren (absolute URIs, Fremdschemata raus).
+function resolveImageList(list: unknown, base: string): { uri: string }[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const out = list
+    .map((im) => absoluteImageUri(String((im as { uri?: string } | null)?.uri || ""), base))
+    .filter((u): u is string => !!u)
+    .map((u) => ({ uri: u }));
+  return out.length ? out : undefined;
+}
+
 // Leere KI-Nachricht (kein Text, keine Tools, keine Bilder) = „weißer Balken".
 function isEmptyAi(m: Msg): boolean {
   return (
@@ -473,6 +483,11 @@ export default function App() {
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
   const [chatModel, setChatModel] = useState<string>("flash"); // Default-Modell für neue Chats (flash = schnell, liefert direkt Text; pro = Reasoning, langsam + bei knappem Token-Budget leerer content)
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
+  // Server-Basis für relative Bild-URLs (/generated/…) global bekannt machen —
+  // der Markdown-Renderer löst damit `![](/generated/…)` zu einer ladbaren URL auf.
+  useEffect(() => {
+    setImageBaseUrl(serverUrl);
+  }, [serverUrl]);
   const [apiToken, setApiToken] = useState("");
   const [cwd, setCwd] = useState("");
   const [taskList, setTaskList] = useState<Task[]>([]);
@@ -688,7 +703,7 @@ export default function App() {
         // Nur überschreiben, wenn die Server-Antwort VOLLSTÄNDIGER ist als die lokale
         // (Teiltext aus abgebrochenem Stream). Sonst ist die Bubble schon gefüllt.
         if (localText && !lastAi.error && answerText.trim().length <= localText.length) return false;
-        patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: serverLast.images || m.images, error: undefined }));
+        patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: resolveImageList(serverLast.images, serverUrl) || m.images, error: undefined }));
         delete streamStateRef.current[chatId];
         persistStreamState(chatId);
         return true;
@@ -761,6 +776,13 @@ export default function App() {
   // oder erreicht; false NUR wenn der Server nachweislich weniger User-Nachrichten hat
   // als lokal (die Nachricht ist nie angekommen → kein Server-Turn vorhanden).
   async function messageReachedServer(chatId: string): Promise<boolean> {
+    // Stream-State mit turnId = der Server hat den Turn NACHWEISLICH gestartet
+    // (turn_start empfangen). „Nicht gesendet" wäre dann immer falsch — die Nachricht
+    // ist angekommen, der Turn ist höchstens abgebrochen/fertig. Verhindert das
+    // voreilige „Nicht gesendet — bitte erneut senden" beim Öffnen eines Chats,
+    // BEVOR die Auto-Resume die Antwort nachgeladen hat (Race mit dem Busy-Poller).
+    const st = streamStateRef.current[chatId];
+    if (st && st.turnId) return true;
     try {
       const base = serverUrl.replace(/\/+$/, "");
       const res = await fetch(`${base}/api/session/${encodeURIComponent(chatId)}`, { headers: authHeaders() });
@@ -1165,7 +1187,7 @@ export default function App() {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
-                  m.id === lastAi.id ? { ...m, text: serverText, images: serverLast.images || m.images, error: undefined } : m,
+                  m.id === lastAi.id ? { ...m, text: serverText, images: resolveImageList(serverLast.images, serverUrl) || m.images, error: undefined } : m,
                 ),
                 updatedAt: Date.now(),
               };
@@ -1743,6 +1765,7 @@ export default function App() {
     let finalReply = "";
     let finalActivity: Activity[] = [];
     let finalDil: unknown[] | undefined;
+    let finalImages: { uri: string }[] | undefined;
     let doneReceived = false;
     let errorReceived = false;
 
@@ -1808,10 +1831,13 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
         doneReceived = true;
-        const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[] };
+        const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[]; images?: { uri?: string }[] };
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         finalDil = Array.isArray(d.dil) ? d.dil : undefined;
+        // Vom Server aus dem Antworttext gehobene Bilder (/generated/…) — relative
+        // URIs gegen die Server-URL auflösen, sonst lädt iOS das Bild nicht.
+        finalImages = resolveImageList(d.images, serverUrl);
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
         // Turn abgeschlossen: keinen Resume-Anker mehr hinterlassen (Auto-Resume idempotent).
         delete streamStateRef.current[chatId];
@@ -1860,6 +1886,7 @@ export default function App() {
       text: finalReply.trim() ? finalText : (m.text || finalText),
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
       dil: finalDil !== undefined ? finalDil : m.dil,
+      images: finalImages && finalImages.length ? finalImages : m.images,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
     } catch (e) {

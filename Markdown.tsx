@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Linking, Pressable, ScrollView, StyleSheet, Text, View, Image } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
@@ -28,7 +28,7 @@ import plaintext from "highlight.js/lib/languages/plaintext";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 import { MathView } from "./MathView";
 import { splitMathSegments, escapeInlineMathMeta } from "./dilviz";
-import { breakLongLines, breakUnbreakable } from "./lib";
+import { breakLongLines, breakUnbreakable, absoluteImageUri, getImageBaseUrl } from "./lib";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
 
@@ -285,6 +285,39 @@ function CodeBlock({ code, lang }: { code: string; lang: string }) {
   );
 }
 
+// --- Bilder (Markdown `![alt](url)`) ---
+//
+// In React Native darf ein <Image> NICHT in einem <Text> stecken — deshalb wird ein
+// Absatz, der nur aus Bildern besteht, auf Block-Ebene als echtes Bild gerendert.
+// Erlaubt sind ausschließlich https-URLs und data:image/*-Base64 (kein file://, kein
+// http://, keine Steuerzeichen). Alles andere bleibt der bisherige Platzhalter.
+function MdImage({ uri, alt }: { uri: string; alt?: string }) {
+  const [failed, setFailed] = useState(false);
+  const [ratio, setRatio] = useState<number | null>(null);
+  if (failed) {
+    return (
+      <Text selectable style={styles.imageFallback} onPress={() => Linking.openURL(uri).catch(() => {})}>
+        🖼 {alt || uri}
+      </Text>
+    );
+  }
+  return (
+    <Pressable onPress={() => Linking.openURL(uri).catch(() => {})} disabled={!uri}>
+      <Image
+        source={{ uri }}
+        style={[styles.mdImage, ratio ? { height: undefined, aspectRatio: ratio } : null]}
+        resizeMode="contain"
+        accessibilityLabel={alt || "Bild"}
+        onLoad={(e) => {
+          const s = (e?.nativeEvent as { source?: { width?: number; height?: number } } | undefined)?.source;
+          if (s?.width && s?.height) setRatio(s.width / s.height);
+        }}
+        onError={() => setFailed(true)}
+      />
+    </Pressable>
+  );
+}
+
 // --- Block-Renderer ---
 
 function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
@@ -294,6 +327,27 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
     const t = tokens[i];
     const key = `${keyPrefix}-b${i}`;
     if (t.type === "inline") {
+      const kids = t.children || [];
+      // Absatz besteht NUR aus Bildern (+ Leerraum) → Block-Bild statt Platzhalter.
+      const imgs = kids.filter((c) => c.type === "image");
+      const rest = kids.filter((c) => c.type !== "image" && !(c.type === "text" && !String(c.content || "").trim()));
+      if (imgs.length && rest.length === 0) {
+        imgs.forEach((img, n) => {
+          const uri = absoluteImageUri(img.attrGet("src") || "", getImageBaseUrl());
+          const alt = img.content || "";
+          if (uri) {
+            out.push(<MdImage key={`${key}-img${n}`} uri={uri} alt={alt} />);
+          } else {
+            out.push(
+              <Text key={`${key}-img${n}`} selectable style={styles.imageFallback}>
+                🖼 {alt || "Bild"}
+              </Text>,
+            );
+          }
+        });
+        i++;
+        continue;
+      }
       out.push(
         <Text key={key} selectable style={styles.paragraph}>
           {renderInline(t.children || [], key)}
@@ -478,6 +532,14 @@ export function Markdown({ text }: { text: string }) {
 const styles = StyleSheet.create({
   root: { gap: 2 },
   paragraph: { color: colors.text, fontSize: 17, lineHeight: 26, fontFamily: aiFontFamily },
+  mdImage: {
+    width: "100%",
+    height: 220,
+    borderRadius: 12,
+    backgroundColor: colors.surface2,
+    marginVertical: 6,
+  },
+  imageFallback: { color: colors.muted, fontSize: 15, fontStyle: "italic", marginVertical: 4 },
   h1: { color: colors.text, fontSize: 24, lineHeight: 30, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 10, marginBottom: 2 },
   h2: { color: colors.text, fontSize: 21, lineHeight: 27, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 8, marginBottom: 2 },
   h3: { color: colors.text, fontSize: 18, lineHeight: 24, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 6, marginBottom: 1 },

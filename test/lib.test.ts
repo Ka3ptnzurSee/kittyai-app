@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -179,4 +179,43 @@ test("SseParser deckelt einen hängenden Puffer ohne Chunks zu verlieren", () =>
   // 1000 Zeichen ohne Delimiter → Puffer wird intern gekürzt, kein Crash
   assert.deepStrictEqual(p.push("x".repeat(1000)), []);
   assert.deepStrictEqual(p.flush(), []); // kein data:-Feld → nichts Verwertbares
+});
+
+// --- Bilder in Chat-Antworten (Markdown-Bilder + Server-Anlagen) ---
+
+test("safeImageUri erlaubt https und data:image, blockt den Rest", () => {
+  assert.strictEqual(safeImageUri("https://h.de:8446/generated/IMG_1_a.jpg"), "https://h.de:8446/generated/IMG_1_a.jpg");
+  assert.strictEqual(safeImageUri("  https://h.de/x.png  "), "https://h.de/x.png");
+  const b64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+  assert.strictEqual(safeImageUri(b64), b64);
+  // Angriffe / Fremdschemata
+  for (const bad of [
+    "",
+    null,
+    undefined,
+    "http://h.de/x.jpg",
+    "file:///etc/passwd",
+    "ph://ABCD-1234",
+    "javascript:alert(1)",
+    "https://h.de/x.jpg\nX-Injected: 1",
+    "https://h.de/a b.jpg",
+    "data:text/html;base64,PHNjcmlwdD4=",
+    `https://h.de/${"a".repeat(3000)}.jpg`,
+  ]) {
+    assert.strictEqual(safeImageUri(bad as unknown as string), null, `unerwartet erlaubt: ${String(bad)}`);
+  }
+});
+
+test("absoluteImageUri macht /generated/-Pfade absolut, blockt Fremdschemata", () => {
+  assert.strictEqual(absoluteImageUri("/generated/IMG_1_a.jpg", "https://h.de:8446"), "https://h.de:8446/generated/IMG_1_a.jpg");
+  assert.strictEqual(absoluteImageUri("/generated/IMG_1_a.jpg", "https://h.de:8446/"), "https://h.de:8446/generated/IMG_1_a.jpg");
+  assert.strictEqual(absoluteImageUri("https://cdn/x.jpg", "https://h.de"), "https://cdn/x.jpg");
+  // Ohne (gültige) Basis bleibt der Pfad relativ → null (iOS würde ihn nicht laden)
+  assert.strictEqual(absoluteImageUri("/generated/IMG_1_a.jpg", ""), null);
+  assert.strictEqual(absoluteImageUri("/generated/IMG_1_a.jpg", "h.de"), null);
+  // Protokoll-relative und fremde Schemata
+  assert.strictEqual(absoluteImageUri("//evil/x.jpg", "https://h.de"), null);
+  assert.strictEqual(absoluteImageUri("file:///etc/passwd", "https://h.de"), null);
+  assert.strictEqual(absoluteImageUri("javascript:alert(1)", "https://h.de"), null);
+  assert.strictEqual(absoluteImageUri("", "https://h.de"), null);
 });

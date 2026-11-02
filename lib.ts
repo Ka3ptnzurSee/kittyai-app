@@ -398,3 +398,53 @@ export function deriveTitle(raw: string, maxChars = 22): string {
   const truncated = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
   return truncated ? `${truncated}…` : "";
 }
+
+// ───────────────────────────── Bilder in Chat-Antworten ─────────────────────────────
+// Der Server hängt erzeugte Bilder sowohl als Markdown (`![](/generated/…)`) als auch
+// als Anlage (`images: [{uri}]`) an. RN lädt nur absolute URIs — und nur harmlose Schemata:
+// kein file://, kein http://, keine Steuerzeichen, kein javascript:. Beide Pfade hier
+// bündeln die Prüfung, damit Markdown-Renderer und Bild-Anlagen identisch filtern.
+
+const MD_IMAGE_MAX_B64 = 2_000_000;
+
+/** data:image/*-Base64 (nur echte Bildtypen, begrenzte Länge). */
+export function isDataImage(uri: string): boolean {
+  const s = String(uri || "").trim();
+  if (!s || s.length > MD_IMAGE_MAX_B64) return false;
+  return /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(s);
+}
+
+/** Nur https-URLs und data:image/*-Base64 sind als Bild erlaubt. */
+export function safeImageUri(src: string): string | null {
+  const s = String(src || "").trim();
+  if (!s) return null;
+  if (isDataImage(s)) return s;
+  if (s.length > 2048) return null;
+  if (/\s/.test(s)) return null;
+  if (/^https:\/\/[^\s"'<>]+$/i.test(s)) return s;
+  return null;
+}
+
+/** Relative Server-Pfade (/generated/…) gegen die Server-URL absolut machen. */
+export function absoluteImageUri(raw: string, base: string): string | null {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  const direct = safeImageUri(s);
+  if (direct) return direct;
+  if (!s.startsWith("/") || s.startsWith("//")) return null;
+  if (/\s/.test(s)) return null;
+  const b = String(base || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\/[^\s"'<>]+$/i.test(b)) return null;
+  return `${b}${s}`;
+}
+
+// Server-Basis für relative Bild-URLs (/generated/…). Einmal beim Start gesetzt,
+// damit der Markdown-Renderer sie ohne Prop-Durchreichung (App → DilRichText →
+// Markdown) auflösen kann.
+let imageBaseUrl = "";
+export function setImageBaseUrl(base: string): void {
+  imageBaseUrl = String(base || "").trim();
+}
+export function getImageBaseUrl(): string {
+  return imageBaseUrl;
+}
