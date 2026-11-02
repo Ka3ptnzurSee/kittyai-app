@@ -8,6 +8,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   PanResponder,
   Platform,
@@ -1317,30 +1318,98 @@ export default function App() {
     Speech.speak(text, { language: "de-DE" });
   }
 
+  const MAX_IMG_BYTES = 5 * 1024 * 1024;
+
+  // Läuft NUR, wenn der PHPicker gar nicht erst öffnet (Fehler/fehlende Berechtigung).
+  function offerPhotoSettings(err?: unknown) {
+    const detail = err instanceof Error && err.message ? `\n\n${err.message}` : "";
+    Alert.alert(
+      "Galerie lässt sich nicht öffnen",
+      `Wenn der Foto-Picker nicht erscheint: iOS-Einstellungen → KittyAI → Fotos → „Alle Fotos“ erlauben.${detail}`,
+      [
+        { text: "Einstellungen öffnen", onPress: () => Linking.openSettings().catch(() => {}) },
+        { text: "Abbrechen", style: "cancel" },
+      ],
+    );
+  }
+
   async function pickImage() {
     try {
+      // WICHTIG (iOS): `allowsEditing: true` zwingt expo-image-picker auf den alten
+      // UIImagePickerController — der BRAUCHT die Foto-Berechtigung. Ist sie früher
+      // verweigert oder auf „limitiert“ gesetzt worden, öffnet er stumm nichts.
+      // Ohne allowsEditing nutzt expo-image-picker den PHPickerViewController: der läuft
+      // out-of-process und zeigt die Galerie IMMER (auch ohne/bei verweigerter Freigabe).
       const res = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        mediaTypes: ["images"],
         base64: true,
         quality: 0.7,
-        allowsEditing: true,
+        allowsEditing: false,
+        allowsMultipleSelection: true,
+        selectionLimit: 5,
+        exif: false,
       });
       if (res.canceled || !res.assets?.length) return;
+
+      const added: { data: string; mediaType: string; uri: string }[] = [];
+      let tooBig = 0;
+      let unreadable = 0;
+      for (const a of res.assets) {
+        if (a.fileSize && a.fileSize > MAX_IMG_BYTES) {
+          tooBig += 1;
+          continue;
+        }
+        const b64 = a.base64 ?? "";
+        if (!b64) {
+          unreadable += 1;
+          continue;
+        }
+        if (b64.length > (MAX_IMG_BYTES * 4) / 3) {
+          tooBig += 1;
+          continue;
+        }
+        added.push({ data: b64, mediaType: a.mimeType || "image/jpeg", uri: a.uri });
+      }
+      if (added.length) setPendingImages((p) => [...p, ...added].slice(0, 5));
+      if (tooBig) {
+        Alert.alert("Bild zu groß", `${tooBig} Bild(er) über 5 MB wurden übersprungen — bitte kleinere wählen.`);
+      } else if (unreadable) {
+        Alert.alert("Bild konnte nicht gelesen werden", "Bitte ein anderes Bild wählen (JPG/PNG/HEIC).");
+      }
+    } catch (e) {
+      offerPhotoSettings(e);
+    }
+  }
+
+  async function pickCameraImage() {
+    try {
+      const perm = await ImagePicker.requestCameraPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert(
+          "Keine Kamera-Freigabe",
+          "iOS-Einstellungen → KittyAI → Kamera erlauben, dann Foto aufnehmen.",
+          [
+            { text: "Einstellungen öffnen", onPress: () => Linking.openSettings().catch(() => {}) },
+            { text: "Abbrechen", style: "cancel" },
+          ],
+        );
+        return;
+      }
+      const res = await ImagePicker.launchCameraAsync({ base64: true, quality: 0.7, exif: false });
+      if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
-      if (a.fileSize && a.fileSize > 5 * 1024 * 1024) {
-        Alert.alert("Bild zu groß", "Maximal 5 MB — bitte ein kleineres Bild wählen.");
-        return;
-      }
       const b64 = a.base64 ?? "";
-      if (b64 && b64.length > (5 * 1024 * 1024 * 4) / 3) {
-        Alert.alert("Bild zu groß", "Maximal 5 MB — bitte ein kleineres Bild wählen.");
+      if (!b64) {
+        Alert.alert("Foto konnte nicht gelesen werden", "Bitte nochmal aufnehmen.");
         return;
       }
-      if (b64) {
-        setPendingImages((p) => [...p, { data: b64, mediaType: a.mimeType || "image/jpeg", uri: a.uri }]);
+      if (b64.length > (MAX_IMG_BYTES * 4) / 3) {
+        Alert.alert("Foto zu groß", "Maximal 5 MB — bitte näher heran / niedrigere Auflösung.");
+        return;
       }
-    } catch {
-      // Galerie nicht verfügbar
+      setPendingImages((p) => [...p, { data: b64, mediaType: a.mimeType || "image/jpeg", uri: a.uri }].slice(0, 5));
+    } catch (e) {
+      Alert.alert("Foto aufnehmen fehlgeschlagen", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -1367,30 +1436,42 @@ export default function App() {
         const content = await f.text();
         setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
       }
-    } catch {
-      // Datei nicht lesbar
+    } catch (e) {
+      Alert.alert("Datei anhängen fehlgeschlagen", e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function generateImageInChat() {
-    const prompt = input.trim();
-    if (!prompt || isThisChatBusy) return;
-    let chatId = activeChatId;
-    if (!chatId) chatId = newChat();
-    setInput("");
-    const userMsg: Msg = { id: uid("u"), role: "user", text: prompt };
-    const aiId = uid("a");
-    const aiMsg: Msg = { id: aiId, role: "assistant", text: "", images: [] };
-    patchChat(chatId, (c) => ({
-      ...c,
-      title: c.messages.length === 0 ? (deriveTitle(prompt) || c.title) : c.title,
-      messages: [...c.messages, userMsg, aiMsg],
-      updatedAt: Date.now(),
-    }));
+  // Kleiner Text-Dialog (iOS Alert.prompt); Fallback: Hinweis, wenn nicht verfügbar.
+  function askText(title: string, placeholder: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const anyAlert = Alert as unknown as {
+        prompt?: (
+          t: string,
+          p?: string,
+          cb?: (text: string) => void,
+          type?: { placeholder?: string; cancelButtonText?: string; okButtonText?: string },
+        ) => void;
+      };
+      if (typeof anyAlert.prompt === "function") {
+        anyAlert.prompt(
+          title,
+          placeholder,
+          (text: string) => resolve(text && text.trim() ? text.trim() : null),
+          { placeholder, cancelButtonText: "Abbrechen", okButtonText: "Erstellen" },
+        );
+      } else {
+        resolve(null);
+      }
+    });
+  }
+
+  // Führt den Bild-Request aus und befüllt eine BESTEHENDE Bubble (auch für „Erneut versuchen“).
+  async function regenerateImage(chatId: string, aiId: string, prompt: string) {
     markBusy(chatId, true);
     const ctrl = new AbortController();
     abortControllersRef.current.set(chatId, ctrl);
-    const timer = setTimeout(() => ctrl.abort(), 180000);
+    // Der Server wiederholt selbst (Pollinations-Limit: 1 Bild / 45 s) → großzügiger Timeout.
+    const timer = setTimeout(() => ctrl.abort(), 300000);
     try {
       const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/image`, {
         method: "POST",
@@ -1398,8 +1479,11 @@ export default function App() {
         body: JSON.stringify({ prompt }),
         signal: ctrl.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await res.json().catch(() => ({} as { url?: string; error?: string; retryable?: boolean }));
+      if (!res.ok) {
+        const hint = typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`;
+        throw new Error(hint);
+      }
       // Nur gültige Bild-URLs übernehmen (relativer Pfad oder http(s)) — kein Schema-/Host-Injection.
       const rawUrl = typeof data.url === "string" ? data.url : "";
       const imgUri = /^https?:\/\//i.test(rawUrl)
@@ -1408,7 +1492,7 @@ export default function App() {
           ? `${serverUrl.replace(/\/+$/, "")}${rawUrl}`
           : "";
       if (!imgUri) throw new Error("Ungültige Bild-URL vom Server");
-      patchMsg(chatId, aiId, (m) => ({ ...m, text: "", images: [{ uri: imgUri }] }));
+      patchMsg(chatId, aiId, (m) => ({ ...m, text: "", images: [{ uri: imgUri }], error: undefined }));
       if (speak) speakReply("Hier ist das Bild.");
     } catch (e) {
       if (abortedRef.current.has(chatId)) {
@@ -1417,13 +1501,39 @@ export default function App() {
         patchChat(chatId, (c) => ({ ...c, messages: c.messages.filter((m) => m.id !== aiId) }));
       } else {
         const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
-        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: `Bild-Generierung fehlgeschlagen: ${classifyError(msg)}`, retryable: false } }));
+        patchMsg(chatId, aiId, (m) => ({ ...m, text: "", error: { type: `Bild-Generierung fehlgeschlagen: ${msg}`, retryable: true } }));
       }
     } finally {
       clearTimeout(timer);
       if (abortControllersRef.current.get(chatId) === ctrl) abortControllersRef.current.delete(chatId);
       markBusy(chatId, false);
     }
+  }
+
+  async function generateImageInChat() {
+    let prompt = input.trim();
+    if (!prompt) {
+      const asked = await askText("Was soll ich zeichnen?", "z. B. eine Katze auf einem Skateboard");
+      if (!asked) {
+        Alert.alert("Kein Motiv", "Schreibe kurz ins Textfeld, was ich zeichnen soll – dann nochmal auf „Bild erstellen“ tippen.");
+        return;
+      }
+      prompt = asked;
+    }
+    if (isThisChatBusy) return;
+    let chatId = activeChatId;
+    if (!chatId) chatId = newChat();
+    setInput("");
+    const userMsg: Msg = { id: uid("u"), role: "user", text: prompt };
+    const aiId = uid("a");
+    const aiMsg: Msg = { id: aiId, role: "assistant", text: "Bild wird erstellt …", images: [] };
+    patchChat(chatId, (c) => ({
+      ...c,
+      title: c.messages.length === 0 ? (deriveTitle(prompt) || c.title) : c.title,
+      messages: [...c.messages, userMsg, aiMsg],
+      updatedAt: Date.now(),
+    }));
+    await regenerateImage(chatId, aiId, prompt);
   }
 
   async function send(text?: string) {
@@ -2013,6 +2123,12 @@ export default function App() {
     const idx = chat.messages.findIndex((m) => m.id === aiMsg.id);
     const userMsg = [...chat.messages.slice(0, idx)].reverse().find((m) => m.role === "user");
     if (!userMsg) return;
+    // Bild-Generierung: nicht als Chat-Turn wiederholen, sondern Bild neu erzeugen.
+    if (aiMsg.error?.type?.startsWith("Bild-Generierung")) {
+      patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, text: "Bild wird erstellt …", images: undefined, error: undefined }));
+      regenerateImage(chat.id, aiMsg.id, userMsg.text.trim());
+      return;
+    }
     const text = userMsg.text.trim();
     // Reine Anhang-Nachrichten ("Bild"/"PDF"/"Datei") können ohne
     // die Base64-Anhänge nicht korrekt wiederholt werden → Retry unterdrücken.
@@ -2435,7 +2551,11 @@ export default function App() {
                     <View style={styles.attachSheetRow}>
                       <Pressable onPress={() => { pickImage(); setAttachOpen(false); }} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="image-outline" size={22} color={colors.accent} /></View>
-                        <Text style={styles.attachSheetLabel}>Bild</Text>
+                        <Text style={styles.attachSheetLabel}>Bilder</Text>
+                      </Pressable>
+                      <Pressable onPress={() => { pickCameraImage(); setAttachOpen(false); }} style={styles.attachSheetItem}>
+                        <View style={styles.attachSheetIcon}><Ionicons name="camera-outline" size={22} color={colors.accent} /></View>
+                        <Text style={styles.attachSheetLabel}>Kamera</Text>
                       </Pressable>
                       <Pressable onPress={() => { pickFile(); setAttachOpen(false); }} style={styles.attachSheetItem}>
                         <View style={styles.attachSheetIcon}><Ionicons name="attach-outline" size={22} color={colors.accent} /></View>
@@ -2981,7 +3101,7 @@ const styles = StyleSheet.create({
   attachSheet: { backgroundColor: colors.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingTop: 10, paddingBottom: 30, paddingHorizontal: 20 },
   attachSheetHandle: { alignSelf: "center", width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border, marginBottom: 14 },
   attachSheetTitle: { fontSize: 13, fontWeight: "600", color: colors.muted, textAlign: "center", marginBottom: 18 },
-  attachSheetRow: { flexDirection: "row", justifyContent: "space-around", marginBottom: 18 },
+  attachSheetRow: { flexDirection: "row", justifyContent: "space-around", flexWrap: "wrap", rowGap: 14, marginBottom: 18 },
   attachSheetItem: { alignItems: "center", gap: 8 },
   attachSheetIcon: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },
   attachSheetLabel: { fontSize: 13, color: colors.text },
