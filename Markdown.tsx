@@ -570,7 +570,7 @@ const styles = StyleSheet.create({
   list: { gap: 4, marginVertical: 4 },
   listItem: { flexDirection: "row", gap: 8 },
   listBullet: { color: colors.muted, fontFamily: aiFontFamily, fontSize: 17, lineHeight: 26 },
-  listItemContent: { flex: 1 },
+  listItemContent: { flex: 1, minWidth: 0 },
   blockquote: { borderLeftWidth: 3, borderLeftColor: colors.border, paddingLeft: 12, marginVertical: 4 },
   hr: { height: 1, backgroundColor: colors.border, marginVertical: 10 },
   codeBlock: {
@@ -595,7 +595,7 @@ const styles = StyleSheet.create({
   codeText: { fontFamily: monoFontFamily, fontSize: 13, lineHeight: 19, color: colors.text, padding: 10 },
   table: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, marginVertical: 6, overflow: "hidden", maxWidth: "100%" },
   tableRow: { flexDirection: "row", borderBottomWidth: 1, borderBottomColor: colors.border },
-  tableCell: { flex: 1, padding: 6 },
+  tableCell: { flex: 1, padding: 6, minWidth: 0 },
   tableCellText: { fontSize: 14, lineHeight: 20, color: colors.text, fontFamily: aiFontFamily },
   tableNote: { fontSize: 12, color: colors.muted, fontFamily: aiFontFamily, padding: 6, fontStyle: "italic" },
 });

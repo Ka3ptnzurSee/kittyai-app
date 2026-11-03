@@ -3091,9 +3091,9 @@ const styles = StyleSheet.create({
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8, overflow: "hidden" },
   // ChatGPT-Look: User rechts in hellgrauer Blase (oai-bg-user-message #0000000D), KI flach.
   userBubble: { alignSelf: "flex-end", backgroundColor: oaicolors.bgUserMessage },
-  aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },
-  aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: "transparent" },
-  aiBubbleDone: { alignSelf: "flex-start", backgroundColor: "transparent" },
+  aiBubble: { backgroundColor: "transparent", borderBottomLeftRadius: 5 },
+  aiBubbleRunning: { backgroundColor: "transparent" },
+  aiBubbleDone: { backgroundColor: "transparent" },
   msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: "transparent" },
   imgFailedRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
   imgFailedText: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
