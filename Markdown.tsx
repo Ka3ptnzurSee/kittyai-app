@@ -538,7 +538,7 @@ const styles = StyleSheet.create({
     height: 220,
     maxHeight: 460,
     borderRadius: 12,
-    backgroundColor: colors.surface2,
+    backgroundColor: "transparent",
     marginVertical: 6,
   },
   imageFallback: { color: colors.muted, fontSize: 15, fontStyle: "italic", marginVertical: 4 },

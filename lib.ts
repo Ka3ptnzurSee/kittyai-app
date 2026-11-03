@@ -94,6 +94,64 @@ export function breakUnbreakable(s: string, max = 120): string {
   return clean.replace(re, (run) => breakRun(run, max));
 }
 
+// ── Layout-Schutz gegen „unendlich lange weiße Balken" ─────────────────────
+// Ein einzelner Message-Block, der höher rendert als ein paar Bildschirme, macht
+// die FlatList unscrollbar: er schiebt alles andere weg und zeigt nur noch leere
+// Fläche („keine Nachrichten mehr lesbar"). Deshalb wird JEDE Blase gemessen und
+// oberhalb der Grenze eingeklappt (aufklappbar) — egal WELCHE Daten sie aufblähen.
+export const MAX_BUBBLE_PT = 6000; // ≈ 6–8 Bildschirmhöhen (normale Antworten bleiben unangetastet)
+export const BUBBLE_PREVIEW_PT = 1200; // eingeklappte Höhe, wenn eine Blase zu groß ist
+
+/** Ist die gemessene Höhe so groß, dass sie den Chat unlesbar macht? */
+export function tooTall(height: number, limit = MAX_BUBBLE_PT): boolean {
+  const n = Number(height);
+  return Number.isFinite(n) && n > limit;
+}
+
+/**
+ * Langen Leerzeilen-Lauf zusammenfassen. Hunderte Leerzeilen (z. B. aus einer
+ * kaputten Tool-Ausgabe) rendern als riesige leere Fläche, obwohl „nichts" da ist.
+ * Normale Formatierung (bis `max` Zeilen) bleibt unverändert.
+ */
+export function normalizeBlankRuns(s: string, max = 6): string {
+  const clean = stripControl(s);
+  const n = Math.max(1, Math.min(20, Math.floor(Number(max)) || 6));
+  return clean.replace(new RegExp(`\\n{${n + 1},}`, "g"), "\n".repeat(n));
+}
+
+/**
+ * ```dil```-Fences (JSON-Widgets) aus einem Text entfernen — übrig bleibt nur die
+ * Prosa. Damit lässt sich unterscheiden, ob eine Nachricht ÜBERHAUPT etwas
+ * Sichtbares enthält (die Widgets werden separat gerendert).
+ */
+export function stripDilFences(text: string): string {
+  return String(text ?? "").replace(/```dil\b[^\n]*\n?([\s\S]*?)```/g, "");
+}
+
+/**
+ * Leere KI-Nachricht = „weißer Balken": kein sichtbarer Text (DIL-Fences zählen
+ * NICHT — sie werden als Widget separat gerendert), keine Widgets, keine Bilder,
+ * kein Fehler, keine Werkzeug-/Freigabe-Karten. Genau dieselbe Regel nutzen
+ * Chat-Öffnen und Turn-Ende, damit sich nichts widerspricht.
+ */
+export function isBlankAiMessage(m: {
+  role?: string;
+  text?: string | null;
+  dil?: unknown;
+  images?: unknown;
+  error?: unknown;
+  activity?: unknown;
+  permissions?: unknown;
+}): boolean {
+  if (!m || m.role !== "assistant") return false;
+  if (m.error) return false;
+  if (Array.isArray(m.dil) && m.dil.length > 0) return false;
+  if (Array.isArray(m.images) && m.images.length > 0) return false;
+  if (Array.isArray(m.activity) && m.activity.length > 0) return false;
+  if (Array.isArray(m.permissions) && m.permissions.length > 0) return false;
+  return !stripDilFences(m.text || "").trim();
+}
+
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──
 export type ToolCategory = "system" | "file" | "web" | "memory" | "search" | "agent" | "calendar" | "github" | "media" | "other";
 export type ToolMeta = { label: string; icon: string; category: ToolCategory };

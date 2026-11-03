@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useRef } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Animated,
@@ -18,6 +18,9 @@ import { normalizeChart, computePieSlices, classifyDiff } from "./dilviz";
 import type { ChartPoint } from "./dilviz";
 import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
 import { breakUnbreakable } from "./lib";
+import { applyAction, collectActionProps, createRuntime, runtimeScope, seedDefaults } from "./dilstate";
+import type { DilActionContext, DilRuntime } from "./dilstate";
+import { evalCel } from "./dil";
 
 // Obergrenze für Medien in Widgets: ein Modell kann height: 100000 liefern — ohne Cap
 // wächst die Zelle zur „unendlich langen weißen Nachricht".
@@ -35,6 +38,57 @@ function t(v: unknown, fallback = ""): string {
 // Badge/Card/List/Table/Image + Balken-Chart. v2 (`code`) wird NICHT ausgeführt.
 
 type Props = Record<string, unknown>;
+
+// ───────────────────────────── DIL-Runtime (State + Actions) ─────────────────────────────
+// ChatGPT/Valdi-Vertrag: `gap` statisch, `$gap` CEL-Ausdruck, `gapAction` Sandbox-Callback.
+// Wir führen Actions NICHT als Fremd-JS aus, sondern über den geprüften Interpreter in
+// ./dilstate (nur state-Zuweisungen + Callbacks → Follow-up-Nachricht an das Modell).
+
+type DilDispatch = (action: string, ctx?: DilActionContext) => void;
+
+const DilRuntimeCtx = createContext<{ rt: DilRuntime; dispatch: DilDispatch } | null>(null);
+
+/** Fallback, wenn ein Baum ohne Provider gerendert wird (z. B. einzelnes Widget im Test). */
+const NOOP_DISPATCH: DilDispatch = () => {};
+
+/** Dispatch aus dem Runtime-Kontext — `null`, wenn der Baum ohne Provider gerendert wird. */
+function useDilDispatch(): DilDispatch | null {
+  const ctx = useContext(DilRuntimeCtx);
+  return ctx ? ctx.dispatch : null;
+}
+
+/** Sieht ein Prop-Wert wie eine DIL-Action aus? (`onClick`/`onChange` sind bei ChatGPT Callback-Namen.) */
+function looksLikeAction(v: unknown): v is string {
+  return (
+    typeof v === "string" &&
+    /state\.[\w$.]+\s*(=|\+=|-=)|invokeDILCallbackWithResult\s*\(|sendMessage\s*\(|askModel\s*\(/.test(v)
+  );
+}
+
+/** Action-Strings eines Widgets: alle `*Action`-Props + action-förmige `onChange`/`onClick`. */
+function actionsOf(props: Props): string[] {
+  const out = collectActionProps(props).map(([, a]) => a);
+  for (const k of ["onChange", "onClick", "onSelect", "onValueChange", "onSubmit"]) {
+    const v = props[k];
+    if (looksLikeAction(v) && !out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * Wertänderung eines Formular-Widgets in die Runtime geben:
+ * erst echte Actions, sonst Fallback `state.<id> = value` (wenn das Widget ein `id`/`name` hat).
+ */
+function fireControl(dispatch: DilDispatch | null, props: Props, value: unknown): void {
+  if (!dispatch) return;
+  const actions = actionsOf(props);
+  if (actions.length) {
+    for (const a of actions) dispatch(a, { value });
+    return;
+  }
+  const id = str(props.id, str(props.name, ""));
+  if (id && /^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/.test(id)) dispatch(`state.${id} = value`, { value });
+}
 
 // Properties können statisch (`gap`) oder bereits aufgelöst als `$gap` vorliegen
 // (resolveDil setzt den Key mit `$`-Präfix). Wir lesen beides.
@@ -131,6 +185,7 @@ function textStyle(props: Props): Record<string, unknown> {
 // ── Formular-Widgets als EIGENE Komponenten (Rules of Hooks: useState darf nicht
 //    bedingt im switch der Widget-Komponente aufgerufen werden). ──
 function InputWidget({ props, multiline }: { props: Props; multiline: boolean }) {
+  const dispatch = useDilDispatch();
   const [val, setVal] = useState(str(getProp(props, "value"), str(getProp(props, "defaultValue"), "")));
   const multi = multiline || bool(getProp(props, "multiline"), false);
   const valueProp = getProp(props, "value");
@@ -141,7 +196,10 @@ function InputWidget({ props, multiline }: { props: Props; multiline: boolean })
   return (
     <TextInput
       value={val}
-      onChangeText={setVal}
+      onChangeText={(next) => {
+        setVal(next);
+        fireControl(dispatch, props, next);
+      }}
       placeholder={str(getProp(props, "placeholder"), "")}
       placeholderTextColor={colors.muted}
       multiline={multi}
@@ -152,13 +210,21 @@ function InputWidget({ props, multiline }: { props: Props; multiline: boolean })
 }
 
 function CheckboxWidget({ props }: { props: Props }) {
+  const dispatch = useDilDispatch();
   const [checked, setChecked] = useState(bool(getProp(props, "checked"), bool(getProp(props, "defaultChecked"), false)));
   const checkedProp = getProp(props, "checked");
   useEffect(() => {
     if (typeof checkedProp === "boolean") setChecked(checkedProp);
   }, [checkedProp]);
   return (
-    <Pressable style={styles.checkboxRow} onPress={() => setChecked((c) => !c)}>
+    <Pressable
+      style={styles.checkboxRow}
+      onPress={() => {
+        const next = !checked;
+        setChecked(next);
+        fireControl(dispatch, props, next);
+      }}
+    >
       <View style={[styles.checkbox, checked && { backgroundColor: colors.accent, borderColor: colors.accent }]}>
         {checked ? <Text style={{ color: "#fff", fontSize: 12, lineHeight: 16 }}>✓</Text> : null}
       </View>
@@ -168,6 +234,7 @@ function CheckboxWidget({ props }: { props: Props }) {
 }
 
 function RadioGroupWidget({ props }: { props: Props }) {
+  const dispatch = useDilDispatch();
   const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 200) : [];
   const [value, setValue] = useState(str(getProp(props, "value"), str(getProp(props, "defaultValue"), "")));
   const valueProp = getProp(props, "value");
@@ -182,7 +249,14 @@ function RadioGroupWidget({ props }: { props: Props }) {
         const val = typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, label);
         const active = value === val;
         return (
-          <Pressable key={i} style={styles.checkboxRow} onPress={() => setValue(val)}>
+          <Pressable
+            key={i}
+            style={styles.checkboxRow}
+            onPress={() => {
+              setValue(val);
+              fireControl(dispatch, props, val);
+            }}
+          >
             <View style={[styles.radio, active && { borderColor: colors.accent }]}>
               {active ? <View style={styles.radioDot} /> : null}
             </View>
@@ -242,6 +316,9 @@ function LoadingWidget({ props }: { props: Props }) {
 }
 
 function Widget({ type, props, children }: { type: string; props: Props; children: ResolvedNode[] }) {
+  // Hook MUSS unbedingt vor dem switch laufen (Rules of Hooks).
+  const dilCtx = useContext(DilRuntimeCtx);
+  const dispatch: DilDispatch = dilCtx ? dilCtx.dispatch : NOOP_DISPATCH;
   switch (type) {
     // ── Layout ──
     case "Box":
@@ -283,9 +360,14 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       const variant = str(getProp(props, "variant"), "");
       const bg = variant === "secondary" || variant === "ghost" ? colors.surface2 : colors.accent;
       const fg = variant === "secondary" || variant === "ghost" ? colors.text : "#ffffff";
+      const actions = actionsOf(props);
       return (
         <Pressable
           disabled={disabled || loading}
+          onPress={() => {
+            // Follow-up-Frage: Action → Effekt „message" → App schickt sie als Turns an das Modell.
+            for (const a of actions) dispatch(a, { value: label });
+          }}
           style={({ pressed }) => [
             styles.button,
             { backgroundColor: bg, borderRadius: bool(getProp(props, "pill"), false) ? 999 : 10, opacity: pressed ? 0.85 : 1 },
@@ -303,10 +385,22 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
     case "Select": {
       const options = Array.isArray(getProp(props, "options")) ? (getProp(props, "options") as unknown[]).slice(0, 50) : [];
       const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>)?.label ?? (o as Record<string, unknown>)?.value ?? String(o)));
+      const values = options.map((o, i) => (typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, str(opts[i], String(i)))));
+      const id = str(getProp(props, "id"), str(getProp(props, "name"), ""));
+      const selected = str(getProp(props, "value"), "") || (id ? str(dilCtx?.rt.state[id], "") : "");
       return (
         <View style={styles.select}>
           {opts.map((o, i) => (
-            <Text key={i} style={styles.selectItem}>{t(o, "?")}</Text>
+            <Pressable
+              key={i}
+              onPress={() => {
+                fireControl(dispatch, props, values[i]);
+              }}
+            >
+              <Text style={[styles.selectItem, selected === values[i] ? { color: colors.accent, fontWeight: "600" } : null]}>
+                {(selected === values[i] ? "● " : "○ ") + t(o, "?")}
+              </Text>
+            </Pressable>
           ))}
         </View>
       );
@@ -566,22 +660,33 @@ function resolveChartData(data: unknown, series: unknown): ChartData {
 
 // ── Chart / ValdiChart (bar | line | area) ──
 function ChartWidget({ props }: { props: Props }) {
+  const dispatch = useDilDispatch();
   const { points, type: seriesType } = useMemo(
     () => resolveChartData(getProp(props, "data"), getProp(props, "series")),
     [props],
   );
   const explicitType = str(getProp(props, "type"), "").toLowerCase();
   const kind = explicitType || seriesType.toLowerCase();
+  // Chart-Interaktivität wie ValdiChart: onHover/onSelect → Action mit `event`-Objekt.
+  const pointActions = ["onSelectAction", "onPointAction", "onHoverAction", "onClickAction"]
+    .map((k) => getProp(props, k))
+    .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  const onPick =
+    dispatch && pointActions.length
+      ? (p: ChartPoint, i: number) => {
+          for (const a of pointActions) dispatch(a, { event: { label: p.label, value: p.value, index: i } });
+        }
+      : undefined;
   if (!points.length) return null;
   if (kind === "line" || kind === "area") {
     return <LineChart points={points} area={kind === "area"} />;
   }
   const horizontal = str(getProp(props, "layout"), "") === "vertical";
-  return <BarChart points={points} horizontal={horizontal} />;
+  return <BarChart points={points} horizontal={horizontal} onPick={onPick} />;
 }
 
-// ── Balken-Chart (View-basiert) ──
-function BarChart({ points, horizontal }: { points: ChartPoint[]; horizontal?: boolean }) {
+// ── Balken-Chart (View-basiert, optional antippbar) ──
+function BarChart({ points, horizontal, onPick }: { points: ChartPoint[]; horizontal?: boolean; onPick?: (p: ChartPoint, i: number) => void }) {
   if (!points.length) return null;
   const max = Math.max(1, ...points.map((p) => p.value));
   const barColor = colors.accent;
@@ -589,13 +694,13 @@ function BarChart({ points, horizontal }: { points: ChartPoint[]; horizontal?: b
     return (
       <View style={styles.chart}>
         {points.map((p, i) => (
-          <View key={i} style={styles.hBarRow}>
+          <Pressable key={i} style={styles.hBarRow} disabled={!onPick} onPress={() => onPick?.(p, i)}>
             <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
             <View style={styles.hBarTrack}>
               <View style={[styles.hBarFill, { width: `${Math.round((p.value / max) * 100)}%`, backgroundColor: barColor }]} />
             </View>
             <Text style={styles.chartValue}>{p.value}</Text>
-          </View>
+          </Pressable>
         ))}
       </View>
     );
@@ -604,12 +709,12 @@ function BarChart({ points, horizontal }: { points: ChartPoint[]; horizontal?: b
     <View style={styles.chart}>
       <View style={styles.vBarArea}>
         {points.map((p, i) => (
-          <View key={i} style={styles.vBarCol}>
+          <Pressable key={i} style={styles.vBarCol} disabled={!onPick} onPress={() => onPick?.(p, i)}>
             <View style={styles.vBarTrack}>
               <View style={[styles.vBarFill, { height: `${Math.min(100, Math.max(0, Math.round(((Number.isFinite(p.value) ? p.value : 0) / max) * 100)))}%`, backgroundColor: barColor }]} />
             </View>
             <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
-          </View>
+          </Pressable>
         ))}
       </View>
     </View>
@@ -809,23 +914,78 @@ function renderNodes(nodes: ResolvedNode[]): ReactNode[] {
 // ───────────────────────────── Öffentliche Komponente ─────────────────────────────
 
 /** Eine DIL-Antwort (bereits geparstes JSON) rendern. */
-export function Dil({ json }: { json: unknown }) {
+export function Dil({
+  json,
+  onAction,
+}: {
+  json: unknown;
+  /** Callback aus der Sandbox (invokeDILCallbackWithResult) → App schickt Text als neuen Turn. */
+  onAction?: (text: string, name: string) => void;
+}) {
+  // Runtime pro Antwort: `state` (aus defaultValue geseedet) + appData/constants als CEL-Scope.
+  const [model, setModel] = useState<{ json: unknown; rt: DilRuntime }>(() => {
+    const seed = extractRuntimeSeed(json);
+    return { json, rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) } };
+  });
+  // Neue Antwort (neues JSON) → frischer Runtime-Zustand, ohne Render-Phase-Mutation.
+  if (model.json !== json) {
+    const seed = extractRuntimeSeed(json);
+    setModel({
+      json,
+      rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) },
+    });
+  }
+  const rt = model.rt;
+
+  // Refs, damit der Dispatch keine stale Closures hat (Actions halten den Turn über).
+  const rtRef = useRef(rt);
+  rtRef.current = rt;
+  const onActionRef = useRef(onAction);
+  onActionRef.current = onAction;
+
+  const dispatch = useCallback<DilDispatch>((action, ctx) => {
+    const res = applyAction(rtRef.current, action, evalCel, ctx);
+    if (res.rt !== rtRef.current) {
+      rtRef.current = res.rt;
+      setModel((m) => ({ ...m, rt: res.rt }));
+    }
+    for (const eff of res.effects) onActionRef.current?.(eff.text, eff.name);
+    if (res.error) console.warn("[dil] action", action, "→", res.error);
+  }, []);
+
   const nodes = useMemo(() => {
     try {
-      return resolveDilRoot(json);
+      return resolveDilRoot(json, runtimeScope(model.rt));
     } catch {
       return [];
     }
-  }, [json]);
+  }, [json, model.rt]);
+
   if (!nodes.length) return null;
-  return <View style={styles.root}>{renderNodes(nodes)}</View>;
+  const value = { rt: model.rt, dispatch };
+  return (
+    <DilRuntimeCtx.Provider value={value}>
+      <View style={styles.root}>{renderNodes(nodes)}</View>
+    </DilRuntimeCtx.Provider>
+  );
+}
+
+/** appData/constants aus der (evtl. v2-)Wurzel ziehen. */
+function extractRuntimeSeed(json: unknown): { appData: unknown; constants: Record<string, unknown> } {
+  const root = json && typeof json === "object" && !Array.isArray(json) ? (json as Record<string, unknown>) : {};
+  const appData = "appData" in root ? root.appData : null;
+  const constants =
+    root.constants && typeof root.constants === "object" && !Array.isArray(root.constants)
+      ? (root.constants as Record<string, unknown>)
+      : {};
+  return { appData, constants };
 }
 
 /**
  * Antworttext rendern: zerlegt ihn in Markdown- und ```dil```-Blöcke.
  * DIL-JSON → Widgets, restlicher Text → Markdown. Kaputtes DIL → Code-Block-Fallback.
  */
-export function DilRichText({ text }: { text: string }) {
+export function DilRichText({ text, onAction }: { text: string; onAction?: (text: string, name: string) => void }) {
   const blocks = useMemo(() => splitDilBlocks(text), [text]);
   if (!blocks.length) return <Markdown text={text} />;
   return (
@@ -833,6 +993,12 @@ export function DilRichText({ text }: { text: string }) {
       {blocks.map((b, i) => {
         if (b.kind === "md") {
           return <Markdown key={i} text={b.text} />;
+        }
+        if (b.pending) {
+          // Antwort streamt noch: geparster Teil schon rendern, sonst stiller Platzhalter
+          // (kein „Interaktive Ansicht fehlerhaft"-Blitz bei halbem JSON).
+          if (b.json != null) return <Dil key={i} json={b.json} onAction={onAction} />;
+          return <Text key={i} style={styles.fallbackText}>…</Text>;
         }
         if (b.parseError || b.json == null) {
           return (
@@ -842,7 +1008,7 @@ export function DilRichText({ text }: { text: string }) {
             </View>
           );
         }
-        return <Dil key={i} json={b.json} />;
+        return <Dil key={i} json={b.json} onAction={onAction} />;
       })}
     </View>
   );

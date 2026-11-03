@@ -219,3 +219,59 @@ test("absoluteImageUri macht /generated/-Pfade absolut, blockt Fremdschemata", (
   assert.strictEqual(absoluteImageUri("javascript:alert(1)", "https://h.de"), null);
   assert.strictEqual(absoluteImageUri("", "https://h.de"), null);
 });
+
+// ── Layout-Schutz: „unendlich lange weiße Balken" ──────────────────────────
+import { tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT } from "../lib.ts";
+
+test("tooTall: Schwelle greift, Müll-Werte crashen nicht", () => {
+  assert.strictEqual(tooTall(0), false);
+  assert.strictEqual(tooTall(1200), false);
+  assert.strictEqual(tooTall(MAX_BUBBLE_PT), false);
+  assert.strictEqual(tooTall(MAX_BUBBLE_PT + 1), true);
+  assert.strictEqual(tooTall(50000), true);
+  // feindliche Eingaben
+  assert.strictEqual(tooTall(NaN), false);
+  assert.strictEqual(tooTall(Infinity), false);
+  assert.strictEqual(tooTall(-1), false);
+  assert.strictEqual(tooTall("4999" as unknown as number), false);
+  assert.strictEqual(tooTall("9000" as unknown as number), true);
+  assert.ok(BUBBLE_PREVIEW_PT < MAX_BUBBLE_PT);
+});
+
+test("normalizeBlankRuns: hunderte Leerzeilen werden zusammengefasst", () => {
+  const monster = "Zeile 1" + "\n".repeat(500) + "Zeile 2";
+  const out = normalizeBlankRuns(monster, 6);
+  assert.ok(out.split("\n").length <= 8, `zu viele Zeilen: ${out.split("\n").length}`);
+  assert.ok(out.startsWith("Zeile 1"));
+  assert.ok(out.endsWith("Zeile 2"));
+  // normale Formatierung bleibt unangetastet
+  const normal = "a\n\n\nb";
+  assert.strictEqual(normalizeBlankRuns(normal, 6), normal);
+  // kaputte Parameter
+  assert.strictEqual(typeof normalizeBlankRuns("a\n\nb", NaN as unknown as number), "string");
+  assert.strictEqual(normalizeBlankRuns("", 6), "");
+});
+
+test("stripDilFences: JSON-Widgets zählen nicht als sichtbarer Text", () => {
+  assert.strictEqual(stripDilFences("Hallo ```dil\n{\"type\":\"Text\"}\n``` Welt").trim(), "Hallo  Welt");
+  assert.strictEqual(stripDilFences(undefined as unknown as string), "");
+  assert.strictEqual(stripDilFences("nur Prosa"), "nur Prosa");
+});
+
+test("isBlankAiMessage: erkennt echte weiße Blasen, schont Inhalte", () => {
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "" }), true);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "   \n\n " }), true);
+  // nur ein DIL-Fence = nichts sichtbares → weiße Blase
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "```dil\n{\"type\":\"Text\"}\n```" }), true);
+  // Inhalte schützen die Blase
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "Antwort" }), false);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "", activity: [{ id: "t" }] }), false);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "", images: [{ uri: "https://x/y.png" }] }), false);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "", dil: [{ type: "Text" }] }), false);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: "", error: { type: "Timeout" } }), false);
+  // User-Nachrichten sind nie „leere KI-Blasen"
+  assert.strictEqual(isBlankAiMessage({ role: "user", text: "" }), false);
+  // Müll
+  assert.strictEqual(isBlankAiMessage(null as unknown as { role: string }), false);
+  assert.strictEqual(isBlankAiMessage({ role: "assistant", text: null }), true);
+});

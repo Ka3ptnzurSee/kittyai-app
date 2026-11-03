@@ -34,7 +34,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 
@@ -316,10 +316,22 @@ function StreamingCursor() {
   );
 }
 
-// ```dil```-Fences aus einem Text entfernen (nur Prosa bleibt übrig), damit die
-// strukturierten DIL-Widgets separat über das dil-Array gerendert werden können.
-function stripDilFences(text: string): string {
-  return text.replace(/```dil\b[^\n]*\n?([\s\S]*?)```/g, "");
+// ```dil```-Fences () werden in ./lib entfernt (stripDilFences) — dort testbar.
+
+// Bild in einer Nachricht: lädt es nicht (toter /generated-Link, gelöschte Datei),
+// bleibt KEIN 260pt hoher leerer Kasten stehen (das war ein „weißer Block"),
+// sondern nur eine schmale Hinweiszeile.
+function MessageImage({ uri }: { uri: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!uri || failed) {
+    return (
+      <View style={styles.imgFailedRow}>
+        <Ionicons name="image-outline" size={14} color={colors.muted} />
+        <Text style={styles.imgFailedText}>Bild nicht verfügbar</Text>
+      </View>
+    );
+  }
+  return <Image source={{ uri }} style={styles.msgImage} resizeMode="cover" onError={() => setFailed(true)} />;
 }
 
 function MessageBubble({
@@ -329,6 +341,8 @@ function MessageBubble({
   onReply,
   onRetry,
   onPermission,
+  onDilAction,
+  onTooBig,
 }: {
   item: Msg;
   isLast: boolean;
@@ -336,8 +350,19 @@ function MessageBubble({
   onReply: (m: Msg) => void;
   onRetry?: (m: Msg) => void;
   onPermission?: (p: PermissionRequest, decision: "allow" | "deny") => void;
+  /** Follow-up aus einem DIL-Widget (invokeDILCallbackWithResult) → als neuer Turn senden. */
+  onDilAction?: (text: string) => void;
+  /** Blase hat die Höhengrenze überschritten → an den Server melden (Selbst-Diagnose). */
+  onTooBig?: (m: Msg, height: number) => void;
 }) {
   const isUser = item.role === "user";
+  // Höhen-Wächter: überschreitet die Blase die Höhengrenze, wird sie EINMAL
+  // eingeklappt (aufklappbar) und einmalig an den Server gemeldet — damit ein
+  // aufblähender Block NIE mehr den ganzen Verlauf unlesbar macht.
+  const rawHRef = useRef(0);
+  const [bigH, setBigH] = useState(0); // 0 = normal; > 0 = gemessene Riesenhöhe
+  const [forceOpen, setForceOpen] = useState(false);
+  const tooBig = bigH > 0 && !forceOpen;
   const activity = !isUser ? item.activity || [] : [];
   const bubbleStyle = isUser
     ? styles.userBubble
@@ -365,7 +390,22 @@ function MessageBubble({
   ).current;
 
   return (
-    <View style={[styles.bubble, bubbleStyle]} {...panResponder.panHandlers}>
+    <>
+    <View
+      style={[styles.bubble, bubbleStyle, tooBig && { height: BUBBLE_PREVIEW_PT, overflow: "hidden" }]}
+      {...panResponder.panHandlers}
+      onLayout={(e) => {
+        const h = e.nativeEvent.layout.height;
+        // Nur nach oben nachführen und nur EINMAL State setzen (sonst Layout-Loop
+        // bzw. Re-Render bei jedem Streaming-Delta).
+        if (!Number.isFinite(h) || h <= rawHRef.current) return;
+        rawHRef.current = h;
+        if (bigH === 0 && tooTall(h)) {
+          setBigH(h);
+          onTooBig?.(itemRef.current, h);
+        }
+      }}
+    >
       {item.replyTo ? (
         <View style={styles.replyQuote}>
           <Text style={styles.replyQuoteText} numberOfLines={2}>{breakUnbreakable(item.replyTo.text)}</Text>
@@ -379,13 +419,13 @@ function MessageBubble({
         <>
           {Array.isArray(item.dil) && item.dil.length > 0 ? (
             <View style={{ gap: 8 }}>
-              <DilRichText text={stripDilFences(item.text || "")} />
+              <DilRichText text={stripDilFences(item.text || "")} onAction={(t) => onDilAction?.(t)} />
               {item.dil.map((block, i) => (
-                <Dil key={i} json={block} />
+                <Dil key={i} json={block} onAction={(t) => onDilAction?.(t)} />
               ))}
             </View>
           ) : (
-            <DilRichText text={item.text || ""} />
+            <DilRichText text={normalizeBlankRuns(item.text || "")} onAction={(t) => onDilAction?.(t)} />
           )}
           {isLast && isBusy && item.text ? <StreamingCursor /> : null}
           {item.error ? (
@@ -407,9 +447,7 @@ function MessageBubble({
         </>
       )}
       {item.images && item.images.length > 0 ? (
-        item.images.map((img, i) => (
-          <Image key={i} source={{ uri: img.uri }} style={styles.msgImage} resizeMode="cover" />
-        ))
+        item.images.map((img, i) => <MessageImage key={i} uri={img.uri} />)
       ) : null}
       {activity.length > 0 ? (
         <ActivityList activity={activity} />
@@ -422,6 +460,15 @@ function MessageBubble({
         </View>
       ) : null}
     </View>
+    {tooBig ? (
+      <Pressable onPress={() => setForceOpen(true)} style={styles.tooBigRow} hitSlop={8}>
+        <Ionicons name="chevron-down" size={14} color={colors.accent} />
+        <Text style={styles.tooBigText}>
+          Nachricht ist ungewöhnlich groß ({Math.round(bigH)} pt) und wurde eingeklappt — antippen zum Aufklappen
+        </Text>
+      </Pressable>
+    ) : null}
+    </>
   );
 }
 
@@ -435,16 +482,11 @@ function resolveImageList(list: unknown, base: string): { uri: string }[] | unde
   return out.length ? out : undefined;
 }
 
-// Leere KI-Nachricht (kein Text, keine Tools, keine Bilder) = „weißer Balken".
+// Leere KI-Nachricht (kein sichtbarer Text, keine Widgets, keine Bilder, kein
+// Fehler) = „weißer Balken". Implementierung liegt in ./lib (isBlankAiMessage /
+// stripDilFences) — dort ohne Expo testbar.
 function isEmptyAi(m: Msg): boolean {
-  return (
-    m.role === "assistant" &&
-    !(m.text && m.text.trim()) &&
-    !(m.activity && m.activity.length) &&
-    !(m.permissions && m.permissions.length) &&
-    !(m.images && m.images.length) &&
-    !m.error
-  );
+  return isBlankAiMessage(m);
 }
 
 // secureGet mit begrenztem Retry: transiente Keychain-/Storage-Fehler (z. B. Keychain
@@ -1338,10 +1380,25 @@ export default function App() {
     }
   }
 
+  // Anhänge hängen am COMPOSER, nicht am Chat. Wechselt man den Chat, dürfen
+  // alte Anhänge nicht mitwandern — sonst gehen sie beim nächsten Senden mit
+  // (z. B. altes Foto + neues Foto in einem Turn, ohne dass man es merkt).
+  function clearPendingAttachments() {
+    setPendingImages([]);
+    setPendingFiles([]);
+    setPendingDocuments([]);
+  }
+
+  function openChat(id: string | null) {
+    clearPendingAttachments();
+    setActiveChatId(id);
+  }
+
   function newChat(): string {
     const id = uid("c");
     const chat: Chat = { id, title: "Neuer Chat", messages: [], createdAt: Date.now(), updatedAt: Date.now() };
     setChats((cs) => [chat, ...cs]);
+    clearPendingAttachments();
     setActiveChatId(id);
     setTab("chats");
     return id;
@@ -1349,7 +1406,10 @@ export default function App() {
 
   function deleteChat(chatId: string) {
     setChats((cs) => cs.filter((c) => c.id !== chatId));
-    if (activeChatId === chatId) setActiveChatId(null);
+    if (activeChatId === chatId) {
+      setActiveChatId(null);
+      clearPendingAttachments();
+    }
     // Server-seitig aufräumen: laufende Antwort abbrechen + Session zurücksetzen,
     // damit kein toter pi-Prozess/keine tote Session weiterläuft.
     const running = abortControllersRef.current.get(chatId);
@@ -1759,23 +1819,12 @@ export default function App() {
       }
       markBusy(chatId, false);
       // Weißen Balken vermeiden: nach JEDEM Turn (normal, Fehler, Abbruch, Timeout)
-      // verwaiste leere KI-Bubbles entfernen — Nachrichten ohne Text/Tool/Anhang
+      // verwaiste leere KI-Bubbles entfernen — Nachrichten ohne sichtbaren Inhalt
       // bleiben sonst als leerer weißer Block stehen, auch bei neuen Nachrichten.
       setChats((cs) =>
         cs.map((c) =>
           c.id === chatId
-            ? {
-                ...c,
-                messages: c.messages.filter(
-                  (m) =>
-                    m.role !== "assistant" ||
-                    (m.text && m.text.trim()) ||
-                    (m.activity && m.activity.length) ||
-                    (m.permissions && m.permissions.length) ||
-                    (m.images && m.images.length) ||
-                    m.error,
-                ),
-              }
+            ? { ...c, messages: c.messages.filter((m) => !isEmptyAi(m)) }
             : c,
         ),
       );
@@ -2233,6 +2282,39 @@ export default function App() {
     });
   }
 
+  // Selbst-Diagnose: eine Blase, die die Höhengrenze reißt, wird EINMAL an den
+  // Server gemeldet (Log: /opt/pi-app/logs/app-diag.log). Damit ist ohne Screenshot
+  // nachweisbar, WELCHE Nachricht den weißen Riesenblock erzeugt.
+  const diagSentRef = useRef<Set<string>>(new Set());
+  function reportTooBig(m: Msg, height: number) {
+    const chatId = activeChatId || "";
+    const key = `${chatId}:${m.id}`;
+    if (diagSentRef.current.has(key)) return;
+    diagSentRef.current.add(key);
+    const text = m.text || "";
+    const payload = {
+      chatId,
+      msgId: m.id,
+      role: m.role,
+      height: Math.round(height),
+      textLen: text.length,
+      lineCount: text.split("\n").length,
+      maxToken: Math.max(0, ...text.split(/\s+/).map((w) => w.length)),
+      activity: (m.activity || []).length,
+      permissions: (m.permissions || []).length,
+      dil: Array.isArray(m.dil) ? m.dil.length : 0,
+      images: (m.images || []).length,
+      head: text.slice(0, 160),
+    };
+    fetch(`${serverUrl.replace(/\/+$/, "")}/api/diag`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    }).catch(() => {
+      // Diagnose darf die UI nie stören
+    });
+  }
+
   function renderMessage({ item }: { item: Msg }) {
     const messages = activeChat?.messages || [];
     const isLast = messages.length > 0 && messages[messages.length - 1].id === item.id;
@@ -2243,6 +2325,8 @@ export default function App() {
         isBusy={isThisChatBusy}
         onReply={setReplyingTo}
         onRetry={retryMessage}
+        onDilAction={(t) => void send(t)}
+        onTooBig={reportTooBig}
         onPermission={(p, decision) => decidePermission(activeChat?.id || "", p.turnId, p.permissionId, decision)}
       />
     );
@@ -2257,7 +2341,7 @@ export default function App() {
     const hasMessages = item.messages.length > 0;
     const statusColor = isBusy ? colors.danger : hasMessages ? colors.success : "#ffffff";
     return (
-      <Pressable onPress={() => setActiveChatId(item.id)} onLongPress={() => setAssignChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
+      <Pressable onPress={() => openChat(item.id)} onLongPress={() => setAssignChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
         <View style={styles.chatAvatar}>
           <Ionicons name="chatbubbles-outline" size={20} color={colors.accent} />
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
@@ -2459,7 +2543,7 @@ export default function App() {
 
       <View style={styles.header}>
         {activeChatId && tab === "chats" ? (
-          <Pressable onPress={() => setActiveChatId(null)} style={styles.backBtn} hitSlop={8}>
+          <Pressable onPress={() => openChat(null)} style={styles.backBtn} hitSlop={8}>
             <Ionicons name="chevron-back" size={24} color={colors.accent} />
           </Pressable>
         ) : (
@@ -2611,7 +2695,7 @@ export default function App() {
                       <Text style={styles.attachChip} numberOfLines={1}>{f.name}</Text>
                     </View>
                   ))}
-                  <Pressable onPress={() => { setPendingImages([]); setPendingFiles([]); setPendingDocuments([]); }} hitSlop={8}>
+                  <Pressable onPress={clearPendingAttachments} hitSlop={8}>
                     <Ionicons name="close" size={16} color={colors.danger} />
                   </Pressable>
                 </View>
@@ -3010,7 +3094,11 @@ const styles = StyleSheet.create({
   aiBubble: { alignSelf: "flex-start", backgroundColor: "transparent", borderBottomLeftRadius: 5 },
   aiBubbleRunning: { alignSelf: "flex-start", backgroundColor: "transparent" },
   aiBubbleDone: { alignSelf: "flex-start", backgroundColor: "transparent" },
-  msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: colors.surface2 },
+  msgImage: { width: "100%", height: 260, borderRadius: 12, marginTop: 8, backgroundColor: "transparent" },
+  imgFailedRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  imgFailedText: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
+  tooBigRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 6, marginBottom: 8, maxWidth: "86%", paddingHorizontal: 4 },
+  tooBigText: { flex: 1, color: colors.accent, fontSize: 12, lineHeight: 16 },
   userText: { color: colors.text, fontSize: 16, lineHeight: 22, fontFamily: uiFontFamily },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 24, fontFamily: aiFontFamily },
   activityWrap: { gap: 6, marginTop: 8, borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 8 },

@@ -241,6 +241,19 @@ function tokenize(src: string): Tok[] {
       continue;
     }
     // Operatoren (längste zuerst)
+    // JS-Gewohnheiten: `===`/`!==` → CEL `==`/`!=`. Nur als OPERATOR — ein globaler
+    // String-Replace würde String-Literale korrumpieren ('a===b' → 'a==b').
+    const three = src.slice(i, i + 3);
+    if (three === "===") {
+      toks.push({ t: "op", v: "==" });
+      i += 3;
+      continue;
+    }
+    if (three === "!==") {
+      toks.push({ t: "op", v: "!=" });
+      i += 3;
+      continue;
+    }
     const two = src.slice(i, i + 2);
     if (["==", "!=", "<=", ">=", "&&", "||"].includes(two)) {
       toks.push({ t: "op", v: two });
@@ -445,6 +458,8 @@ export function resolveValueAtPath(scope: unknown, path: string): unknown {
 /** CEL-Ausdruck gegen einen Scope evaluieren (sicherer Mini-Evaluator). */
 export function evalCel(expression: string, scope: Record<string, unknown> = {}): unknown {
   if (expression.length > 1000) throw new DilCelError(expression, "Ausdruck zu lang (max 1000 Zeichen)");
+  // Lenient bleibt: `===`/`!==` werden im Tokenizer zu `==`/`!=` (nicht per String-Replace,
+  // sonst würden String-Literale wie 'a===b' verfälscht).
   const parser = new CelParser(expression);
   parser.scope = scope;
   return parser.parse();
@@ -502,12 +517,14 @@ export function resolveDil(node: DilNode, scope: Record<string, unknown> = {}, d
 
   // Show konsumiert seine ShowElse-Kinder (if/else-Semantik aus dem Contract).
   if (type === "Show") {
-    let when = root.when ?? root.visible;
-    if (when === undefined) when = root.$when ?? root.$visible;
-    if (typeof when === "string") {
-      try { when = evalCel(when, scope); } catch { when = true; } // defekter Ausdruck → Inhalt zeigen (fail-open)
+    // BUGFIX: "kein when-Prop" (immer zeigen) und "when ergibt undefined" (nichts zeigen)
+    // wurden vorher gleich behandelt — dadurch war JEDES `when: state.x` ohne Wert wahr.
+    const rawWhen = root.when ?? root.visible ?? root.$when ?? root.$visible;
+    let when: unknown = rawWhen;
+    if (typeof rawWhen === "string") {
+      try { when = evalCel(rawWhen, scope); } catch { when = true; } // defekter Ausdruck → Inhalt zeigen (fail-open)
     }
-    const show = when === undefined ? true : truthy(when);
+    const show = rawWhen === undefined ? true : truthy(when);
     const children = root.children ?? [];
     if (show) {
       const branch = children.filter((c) => !(isDilObject(c) && c.type === "ShowElse"));
@@ -597,7 +614,7 @@ function collectProps(node: DilObject): DilProps {
 
 export type DilBlock =
   | { kind: "md"; text: string }
-  | { kind: "dil"; json: unknown; raw: string; parseError?: string };
+  | { kind: "dil"; json: unknown; raw: string; parseError?: string; pending?: boolean };
 
 /**
  * Antworttext in Markdown- und DIL-Blöcke zerlegen.
@@ -626,7 +643,26 @@ export function splitDilBlocks(text: string): DilBlock[] {
     last = m.index + m[0].length;
   }
   const rest = text.slice(last);
-  if (rest) out.push({ kind: "md", text: rest });
+  if (rest) {
+    // Noch nicht geschlossener ```dil-Fence (Antwort streamt gerade): kein roher JSON-Text
+    // ins Markdown leaken, sondern als pending-Block melden — der Renderer zeigt den
+    // geparsten Teil schon an und sonst einen stillen Platzhalter.
+    const open = rest.indexOf("```dil");
+    if (open >= 0) {
+      const before = rest.slice(0, open);
+      if (before) out.push({ kind: "md", text: before });
+      const tail = rest.slice(open).replace(/^```dil\b[^\n]*\n?/, "");
+      let json: unknown = null;
+      try {
+        json = JSON.parse(tail.trim());
+      } catch {
+        json = null; // unvollständig — normal beim Streamen
+      }
+      out.push({ kind: "dil", json, raw: tail, pending: true });
+    } else {
+      out.push({ kind: "md", text: rest });
+    }
+  }
   return out;
 }
 

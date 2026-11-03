@@ -1,0 +1,167 @@
+{
+  "type": "Col",
+  "props": {
+    "gap": 14,
+    "padding": 16
+  },
+  "appData": {
+    "series": {
+      "sales": [
+        {
+          "label": "W1",
+          "value": 120
+        },
+        {
+          "label": "W2",
+          "value": 135
+        },
+        {
+          "label": "W3",
+          "value": 150
+        },
+        {
+          "label": "W4",
+          "value": 165
+        },
+        {
+          "label": "W5",
+          "value": 140
+        }
+      ],
+      "users": [
+        {
+          "label": "W1",
+          "value": 800
+        },
+        {
+          "label": "W2",
+          "value": 920
+        },
+        {
+          "label": "W3",
+          "value": 1010
+        },
+        {
+          "label": "W4",
+          "value": 1150
+        },
+        {
+          "label": "W5",
+          "value": 1080
+        }
+      ],
+      "churn": [
+        {
+          "label": "W1",
+          "value": 5.2
+        },
+        {
+          "label": "W2",
+          "value": 4.8
+        },
+        {
+          "label": "W3",
+          "value": 5.5
+        },
+        {
+          "label": "W4",
+          "value": 6.1
+        },
+        {
+          "label": "W5",
+          "value": 5.9
+        }
+      ]
+    }
+  },
+  "children": [
+    {
+      "type": "Text",
+      "props": {
+        "text": "Interaktiver Graph + Auswahl + Follow-up"
+      }
+    },
+    {
+      "type": "SegmentedControl",
+      "props": {
+        "id": "metric",
+        "defaultValue": "sales",
+        "options": [
+          {
+            "label": "Umsatz",
+            "value": "sales"
+          },
+          {
+            "label": "Nutzer",
+            "value": "users"
+          },
+          {
+            "label": "Churn",
+            "value": "churn"
+          }
+        ]
+      },
+      "onChangeAction": "state.metric = value"
+    },
+    {
+      "type": "ValdiChart",
+      "props": {
+        "id": "mainChart",
+        "type": "bar",
+        "$data": "appData.series[state.metric]",
+        "showTooltip": true,
+        "showLegend": true,
+        "aspectRatio": 1.78
+      },
+      "onSelectAction": "state.picked = event.label"
+    },
+    {
+      "type": "Show",
+      "when": "state.picked",
+      "children": [
+        {
+          "type": "Card",
+          "props": {
+            "padding": 12
+          },
+          "children": [
+            {
+              "type": "Text",
+              "props": {
+                "$text": "'Ausgewählt: ' + state.picked"
+              }
+            },
+            {
+              "type": "Button",
+              "props": {
+                "label": "Warum dieser Wert?"
+              },
+              "onClickAction": "invokeDILCallbackWithResult('askModel', 'Erkläre den Wert ' + state.picked + ' in der Reihe ' + state.metric)"
+            }
+          ]
+        },
+        {
+          "type": "ShowElse",
+          "props": {
+            "when": "state.picked"
+          },
+          "children": [
+            {
+              "type": "Text",
+              "props": {
+                "text": "Tippe einen Balken an, um Details zu sehen."
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "Button",
+      "props": {
+        "label": "Trend erklären"
+      },
+      "onClickAction": "invokeDILCallbackWithResult('askModel', 'Erkläre den Trend für ' + state.metric + ' und nenne 3 mögliche Ursachen.')"
+    }
+  ]
+}
