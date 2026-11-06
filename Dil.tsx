@@ -431,7 +431,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         <Image
           source={{ uri: src }}
           resizeMode="cover"
-          style={{ width: w || "100%", maxWidth: "100%", height: Math.min(h || 220, MAX_MEDIA_H), borderRadius: radius, backgroundColor: colors.surface2 }}
+          style={{ width: w || "100%", maxWidth: "100%", height: Math.min(h || 220, MAX_MEDIA_H), borderRadius: radius, backgroundColor: "transparent" }}
         />
       );
     }
@@ -611,7 +611,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         <Image
           source={{ uri: src }}
           resizeMode="cover"
-          style={{ width: Math.max(0, num(getProp(props, "width"), 0)) || "100%", maxWidth: "100%", height: Math.min(Math.max(0, num(getProp(props, "height"), 0)) || 220, MAX_MEDIA_H), borderRadius: Math.max(0, num(getProp(props, "radius"), 12)), backgroundColor: colors.surface2 }}
+          style={{ width: Math.max(0, num(getProp(props, "width"), 0)) || "100%", maxWidth: "100%", height: Math.min(Math.max(0, num(getProp(props, "height"), 0)) || 220, MAX_MEDIA_H), borderRadius: Math.max(0, num(getProp(props, "radius"), 12)), backgroundColor: "transparent" }}
         />
       );
     }

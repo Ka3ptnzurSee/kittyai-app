@@ -447,7 +447,7 @@ export function isRetryable(raw: string): boolean {
 }
 
 /** Chat-Titel aus der ersten Nutzernachricht ableiten (gekürzt, an Wortgrenze). */
-export function deriveTitle(raw: string, maxChars = 22): string {
+export function deriveTitle(raw: string, maxChars = 18): string {
   const cleaned = raw.replace(/\s+/g, " ").trim();
   if (!cleaned) return "";
   if (cleaned.length <= maxChars) return cleaned;

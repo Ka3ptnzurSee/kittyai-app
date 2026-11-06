@@ -130,6 +130,7 @@ const STREAM_STATE_KEY = "pi-stream-state-v1";
 const CHATS_ENC_KEY = "pi-chats-v2.enc";
 const FOLDERS_ENC_KEY = "pi-folders-v1.enc";
 const STREAM_TIMEOUT_MS = 65 * 60 * 1000; // 65 min – über PROMPT_TIMEOUT_MS (60 min), damit der Server-Timeout (fehlgeschlagener Turn) VOR dem Client-Abbruch als Fehler-Event ankommt
+const STREAM_STALL_MS = 45 * 1000; // Kein-Datenfluss-Watchdog: Server pingt alle 15 s → 45 s Stille = Verbindung still gestorben (iOS/Netz tötet Socket ohne EOF). Reconnect/Resume statt ewig hängen.
 const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
 const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
 const MAX_THINKING_CHARS = 16000; // Denk-Text deckeln (vorher 800 → schnitt Reasoning sichtbar ab)
@@ -613,7 +614,16 @@ export default function App() {
   const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number; clientMessageId?: string }>>({});
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
-  const nearBottomRef = useRef(true); // ob der Nutzer am Listenende ist (für Auto-Scroll)
+  // true, solange ein programmatischer scrollToEnd (animated) läuft: onScroll darf
+  // währenddessen nearBottom nicht auf false setzen (Animations-Zwischenwerte).
+  const isAutoScrollingRef = useRef(false);
+  const contentSizeDebounceRef = useRef<Map<string, number | null>>(new Map());
+  // pro Chat: ob der Nutzer am Listenende ist (für Auto-Scroll). Map statt eines
+  // einzelnen Booleans, damit beim Chat-Wechsel nicht der false-Wert des vorherigen
+  // Chats in den neuen Chat übernommen wird.
+  const nearBottomRef = useRef<Map<string, boolean>>(new Map());
+  const isNearBottom = (chatId: string) => nearBottomRef.current.get(chatId) ?? true;
+  const setNearBottom = (chatId: string, v: boolean) => nearBottomRef.current.set(chatId, v);
 
   // App-Vordergrund/-Hintergrund: iOS beendet die Socket-Verbindung, sobald die App
   // in den Hintergrund geht. Retries deshalb erst im Vordergrund starten (siehe send()).
@@ -659,9 +669,17 @@ export default function App() {
     return () => loop.stop();
   }, [listening, micPulse]);
 
+  const activeChat = chats.find((c) => c.id === activeChatId) || null;
+
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
   useEffect(() => {
+    // Ausstehende contentSize-Debounce-Timeouts verwerfen, wenn der aktive Chat wechselt:
+    // sonst scrollt der verzögerte Callback des vorherigen Chats die neu geöffnete Liste ans Ende.
+    for (const [id, t] of contentSizeDebounceRef.current) {
+      if (t) clearTimeout(t);
+      contentSizeDebounceRef.current.set(id, null);
+    }
     if (!activeChatId) return;
     // Leere KI-Bubbles („weiße Balken“) beim Öffnen entfernen — auch aus bestehenden Chats.
     // ABER nie, während der Chat streamt: die Live-Bubble ist anfangs leer und würde sonst
@@ -672,20 +690,33 @@ export default function App() {
         return next.length === c.messages.length ? c : { ...c, messages: next };
       });
     }
-    nearBottomRef.current = true; // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
-    const t = setTimeout(() => {
+    setNearBottom(activeChatId, true); // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
+    // Während der programmatischen Initial-Scrolls onScroll unterdrücken (isAutoScrollingRef),
+    // sonst setzt der Zwischenwert nearBottom wieder auf false und Auto-Scroll klemmt.
+    isAutoScrollingRef.current = true;
+    const t1 = setTimeout(() => {
       listRef.current?.scrollToEnd({ animated: false });
-    }, 60);
-    return () => clearTimeout(t);
+      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
+    }, 80);
+    const t2 = setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 300);
+    const t3 = setTimeout(() => {
+      listRef.current?.scrollToEnd({ animated: false });
+      setNearBottom(activeChatId, true);
+      isAutoScrollingRef.current = false;
+    }, 800);
+    return () => {
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
+      isAutoScrollingRef.current = false;
+    };
   }, [activeChatId]);
 
-  const activeChat = chats.find((c) => c.id === activeChatId) || null;
   const activeModel = activeChat?.model || chatModel; // pro Chat einstellbares Modell (Default: "flash")
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
   const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
   const thisStatus = activeChatId ? statusByChat[activeChatId] || "" : "";
 
   function markBusy(chatId: string, busy: boolean) {
+    if (busy) setNearBottom(chatId, true); // beim Senden ans Listenende hängen (Auto-Scroll)
     setBusyChatIds((prev) => {
       const next = new Set(prev);
       if (busy) next.add(chatId);
@@ -1045,12 +1076,10 @@ export default function App() {
       } catch {
         // ignorieren
       }
-      // Geteilter App-Token aus dem Build (EXPO_PUBLIC_API_TOKEN) hat VORRANG:
-      // nach einer Server-Token-Rotation übernimmt die App den neuen Token,
-      // auch wenn noch ein alter Token im Speicher liegt.
-      // HINWEIS: EXPO_PUBLIC_* wird zur Build-Zeit ins Bundle inlined und ist aus der
-      // IPA extrahierbar — kein echtes Secret, sondern ein Low-Value-Zugriffstoken.
-      const cfgToken = ((process.env as any)?.EXPO_PUBLIC_API_TOKEN || "").trim();
+      // Geteilter App-Token aus dem Build (EXPO_PUBLIC_API_TOKEN) wird NICHT mehr verwendet:
+      // EXPO_PUBLIC_* wird zur Build-Zeit ins Bundle inlined und ist aus der IPA extrahierbar.
+      // Token wird ausschließlich über SecureStore/AsyncStorage bezogen (Pairing/Login).
+      const cfgToken = "";
       if (cfgToken && cfgToken !== savedToken) {
         savedToken = cfgToken;
         setApiToken(cfgToken);
@@ -1140,6 +1169,7 @@ export default function App() {
                     !(m.activity && m.activity.length) &&
                     !(m.permissions && m.permissions.length) &&
                     !(m.images && m.images.length) &&
+                    !(m.dil && m.dil.length) &&
                     !m.error,
                 );
                 if (lastEmpty) anchorId = lastEmpty.id;
@@ -1153,6 +1183,7 @@ export default function App() {
                     (m.activity && m.activity.length) ||
                     (m.permissions && m.permissions.length) ||
                     (m.images && m.images.length) ||
+                    (m.dil && m.dil.length) ||
                     m.error ||
                     m.id === anchorId,
                 ),
@@ -1722,7 +1753,13 @@ export default function App() {
     persistStreamState(chatId);
     markBusy(chatId, true);
     // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 60);
+    setTimeout(() => {
+      isAutoScrollingRef.current = true;
+      listRef.current?.scrollToEnd({ animated: true });
+      // nach Animationsende Flag zurücksetzen, damit Nutzer-Scrolls wieder erkannt werden
+      setTimeout(() => { isAutoScrollingRef.current = false; }, 800);
+      setNearBottom(chatId, true);
+    }, 60);
 
     try {
       await streamChat(finalMessage, chatId, aiId, images, documents, undefined, clientMessageId);
@@ -1961,8 +1998,23 @@ export default function App() {
       apply(evt);
     };
 
+    // Watchdog gegen still gestorbene Verbindungen: Der Server sendet alle 15 s
+    // ein Keepalive (SSE-Kommentar `: ping`). Kommen 45 s lang keinerlei Bytes an,
+    // ist die Socket-Verbindung still weg (iOS-Hintergrund, Mobilfunk-NAT, WLAN-Roaming)
+    // — reader.read() würde sonst ewig hängen. Dann lieber als Netzwerkfehler
+    // abbrechen, damit send() den Resume-/Reconnect-Flow anstößt.
+    const readWithStallGuard = () => {
+      let stallTimer: ReturnType<typeof setTimeout> | null = null;
+      const stall = new Promise<never>((_, reject) => {
+        stallTimer = setTimeout(() => reject(new Error("Kein Datenfluss — Verbindung still beendet (network)")), STREAM_STALL_MS);
+      });
+      return Promise.race([reader.read(), stall]).finally(() => {
+        if (stallTimer) clearTimeout(stallTimer);
+      });
+    };
+
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithStallGuard();
       if (done) break;
       for (const evt of parser.push(decoder.decode(value as Uint8Array))) handle(evt);
     }
@@ -2596,17 +2648,36 @@ export default function App() {
             <FlatList
               ref={listRef}
               data={activeChat.messages}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
               style={styles.list}
               contentContainerStyle={styles.listContent}
               onScroll={(e) => {
+                if (isAutoScrollingRef.current) return;
                 const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
                 const dist = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-                nearBottomRef.current = dist < 80;
+                setNearBottom(activeChat.id, dist < 80);
+              }}
+              onMomentumScrollEnd={() => {
+                isAutoScrollingRef.current = false;
               }}
               onContentSizeChange={() => {
-                if (nearBottomRef.current) listRef.current?.scrollToEnd({ animated: false });
+                if (!isNearBottom(activeChat.id)) return;
+                const chatId = activeChat.id;
+                const prev = contentSizeDebounceRef.current.get(chatId);
+                if (prev) clearTimeout(prev);
+                const t = setTimeout(() => {
+                  isAutoScrollingRef.current = true;
+                  requestAnimationFrame(() => {
+                    listRef.current?.scrollToEnd({ animated: false });
+                    setNearBottom(chatId, true);
+                    isAutoScrollingRef.current = false;
+                  });
+                  contentSizeDebounceRef.current.set(chatId, null);
+                }, 40);
+                contentSizeDebounceRef.current.set(chatId, t);
               }}
               scrollEventThrottle={32}
               ListEmptyComponent={
