@@ -138,6 +138,32 @@ const MAX_TITLE_CHARS = 22;
 const MAX_FOLDER_NAME_CHARS = 40;
 const MAX_FOLDER_DESC_CHARS = 200;
 
+// Stream still beendet (EOF ohne terminales done/error, z. B. iOS tötet die
+// SSE-Verbindung im Hintergrund): eigener Fehlertyp, damit send() gezielt mit
+// Resume an der Abbruchstelle fortsetzt statt eine „Netzwerk unterbrochen"-Karte
+// zu zeigen. lastSeq = zuletzt gesehene Sequenznummer (für den Resume-Anker).
+class StreamInterrupted extends Error {
+  readonly lastSeq?: number;
+  constructor(lastSeq?: number) {
+    super("Stream vorzeitig beendet (network)");
+    this.name = "StreamInterrupted";
+    this.lastSeq = lastSeq;
+  }
+}
+
+/**
+ * Die App wurde vom Betriebssystem suspendiert (Hintergrund) und hat die Verbindung
+ * deshalb SELBST getrennt. Das ist KEIN Netzwerkfehler — der Server-Turn läuft
+ * unabhängig weiter (turnRegistry) und wird beim Zurückkehren per REST nachgeladen.
+ * ChatGPT und Claude behandeln diesen Fall genauso: stiller Sync statt Fehlerkarte.
+ */
+class BackgroundDetached extends Error {
+  constructor() {
+    super("App im Hintergrund — Verbindung bewusst getrennt");
+    this.name = "BackgroundDetached";
+  }
+}
+
 // Auswählbare Chat-Modelle (Key = Server-Slug, Label = kurze Anzeige).
 // Reihenfolge = Zyklus beim Tippen auf den Chip.
 const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
@@ -148,6 +174,9 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
   { key: "coder", label: "CODER" },
   { key: "qwen", label: "QWEN" },
   // --goeran-options:end--
+  // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
+  { key: "robotron", label: "ROBOTRON" },
+  { key: "robotron2", label: "ROBOTRON2" },
 ];
 
 // Plugins-Untertabs (Connectors/Skills/Agenten/Workflows/Tasks).
@@ -627,15 +656,83 @@ export default function App() {
 
   // App-Vordergrund/-Hintergrund: iOS beendet die Socket-Verbindung, sobald die App
   // in den Hintergrund geht. Retries deshalb erst im Vordergrund starten (siehe send()).
+  // --- Client-Fehler-Telemetrie ------------------------------------------------
+  // Meldet Fehlerkarten an den Server, damit sichtbar wird, wie oft sie beim Nutzer
+  // wirklich erscheinen (nginx sieht nur 499/502, nicht den Grund). Es gehen NUR
+  // Kategorie/Phase/App-Version/Zeit raus — kein Nachrichtentext, keine Inhalte.
+  const APP_VERSION = `${Constants.expoConfig?.version || "?"}+${Constants.expoConfig?.ios?.buildNumber || "?"}`;
+  const reportedRef = useRef<Set<string>>(new Set());
+  function reportClientError(kind: string, source: string, detail?: string, chatId?: string) {
+    try {
+      // Dedup pro App-Lauf: dieselbe Karte nicht mehrfach zählen.
+      const key = `${source}|${kind}|${chatId || ""}`;
+      if (reportedRef.current.has(key)) return;
+      reportedRef.current.add(key);
+      if (reportedRef.current.size > 200) reportedRef.current.clear();
+      const base = serverUrl.replace(/\/+$/, "");
+      if (!base) return;
+      fetch(`${base}/api/client-error`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ kind, source, phase: "chat", chatId: chatId || "", appVersion: APP_VERSION, detail: (detail || "").slice(0, 160) }),
+      }).catch(() => { /* Telemetrie darf nie stören */ });
+    } catch { /* ignorieren */ }
+  }
+
+  // Ordnet einen Fehlertext einer festen Telemetrie-Kategorie zu.
+  function errorKindOf(raw: string): string {
+    const s = String(raw || "").toLowerCase();
+    if (/nicht gesendet/.test(s)) return "not_sent";
+    if (/netzwerk|network|connection|verbindung|econnreset|socket/.test(s)) return "network";
+    if (/timeout|zeitüberschreitung|zu lange/.test(s)) return "timeout";
+    if (/limit|429/.test(s)) return "rate_limit";
+    if (/guthaben|quota|credits/.test(s)) return "quota";
+    if (/zugriff|auth|401|403/.test(s)) return "auth";
+    if (/kontext zu lang|context/.test(s)) return "context_too_long";
+    if (/kompaktier/.test(s)) return "compaction_busy";
+    if (/keine antwort/.test(s)) return "progress_timeout";
+    if (/zurückgesetzt/.test(s)) return "session_reset";
+    if (/server nicht bereit/.test(s)) return "engine_down";
+    if (/ausgelastet/.test(s)) return "capacity";
+    if (/bild-generierung/.test(s)) return "image_failed";
+    if (/abgebrochen/.test(s)) return "aborted";
+    return "other";
+  }
+
+  // Setzt eine Fehlerkarte UND meldet sie (einheitlicher Pfad für alle Stellen).
+  function setErrorCard(chatId: string, msgId: string, type: string, retryable: boolean, source: string, detail?: string) {
+    patchMsg(chatId, msgId, (m) => ({ ...m, error: { type, retryable } }));
+    reportClientError(errorKindOf(type), source, detail || type, chatId);
+  }
+
   const appStateRef = useRef(AppState.currentState);
+  // true, wenn die App seit dem letzten Turn-Start im Hintergrund war. Damit kann der
+  // Client "ich wurde selbst suspendiert" von "das Netz ist weg" unterscheiden — und
+  // zeigt dann KEINE Fehlerkarte (so machen es ChatGPT und Claude auch).
+  const wentBackgroundRef = useRef(false);
   const [foregroundTick, setForegroundTick] = useState(0);
   useEffect(() => {
     const sub = AppState.addEventListener("change", (s) => {
+      const prev = appStateRef.current;
       appStateRef.current = s;
-      // Rückkehr in den Vordergrund: aktiven Chat vom Server neu laden. iOS hat
-      // die SSE-Verbindung im Hintergrund beendet — die Antwort kann serverseitig
-      // fertig geworden sein, ohne dass der Client das mitbekommen hat.
-      if (s === "active") setForegroundTick((t) => t + 1);
+      if (s === "background" || s === "inactive") {
+        if (prev === "active") wentBackgroundRef.current = true;
+        // Nur bei echtem Hintergrund selbst trennen. `inactive` feuert auch bei
+        // kurzem Kontrollzentrum/Anruf — dort wäre ein Abbruch unnötig aggressiv.
+        if (s !== "background") return;
+        // Bewusst trennen statt auf iOS zu warten: iOS suspendiert die JS-Ausführung
+        // und tötet den Socket still. Ein offener Fetch würde beim Zurückkehren als
+        // "Netzwerkfehler" auftauchen, obwohl der Server-Turn unabhängig weiterläuft.
+        // Also selbst abbrechen — das ist KEIN Fehler (siehe BackgroundDetached).
+        for (const ctrl of abortControllersRef.current.values()) {
+          try { ctrl.abort(); } catch { /* ignorieren */ }
+        }
+        return;
+      }
+      if (s === "active") {
+        // Rückkehr in den Vordergrund: alle busy Chats vom Server neu laden.
+        setForegroundTick((t) => t + 1);
+      }
     });
     return () => sub.remove();
   }, []);
@@ -816,7 +913,7 @@ export default function App() {
       if (lastErr) {
         const errAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
         if (errAi && !errAi.error) {
-          patchMsg(chatId, errAi.id, (m) => ({ ...m, error: { type: classifyError(lastErr), retryable: isRetryable(lastErr) } }));
+          setErrorCard(chatId, errAi.id, classifyError(lastErr), isRetryable(lastErr), "reload_server", lastErr);
           delete streamStateRef.current[chatId];
           persistStreamState(chatId);
           return true;
@@ -829,7 +926,7 @@ export default function App() {
       if (data.activeTurn === false) {
         const deadAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
         if (deadAi && !deadAi.text?.trim() && !deadAi.error) {
-          patchMsg(chatId, deadAi.id, (m) => ({ ...m, error: { type: "Antwort abgebrochen — bitte erneut senden", retryable: true } }));
+          setErrorCard(chatId, deadAi.id, "Antwort abgebrochen — bitte erneut senden", true, "turn_dead");
           delete streamStateRef.current[chatId];
           persistStreamState(chatId);
           return true;
@@ -1202,7 +1299,7 @@ export default function App() {
               if (!aiMsg || !userMsg) continue;
               markBusy(chat.id, true);
               streamChat(userMsg.text, chat.id, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId)
-                .catch(async () => {
+                .catch(async (err) => {
                   // Resume nicht möglich (Turn aufgeräumt) -> erst Session-Reload versuchen:
                   // die Server-Session-Datei überlebt die turnRegistry-TTL und ist die Wahrheit.
                   const filled = await reloadFromServer(chat.id);
@@ -1210,7 +1307,9 @@ export default function App() {
                     // Turn läuft serverseitig noch (lazy Session-Write)? Dann kein Fehler —
                     // das Busy-Polling lädt die Antwort, sobald sie fertig ist.
                     if (await serverTurnStillRunning(chat.id)) return;
-                    patchMsg(chat.id, aiMsg.id, (m) => ({ ...m, error: { type: "Verbindung unterbrochen", retryable: true } }));
+                    // Echte Ursache anzeigen statt pauschal "Verbindung unterbrochen".
+                    const raw = err instanceof Error ? err.message : String(err || "");
+                    setErrorCard(chat.id, aiMsg.id, classifyError(raw), isRetryable(raw), "auto_resume", raw);
                   }
                 })
                 .finally(() => markBusy(chat.id, false));
@@ -1330,34 +1429,44 @@ export default function App() {
   // Hintergrund), die Server-Session regelmäßig pollen: sobald die finale Antwort vorliegt,
   // die lokale (leere/teilweise) Bubble auffüllen und busy aufheben.
   useEffect(() => {
-    if (!activeChatId || !loadedRef.current) return;
-    if (!busyChatIds.has(activeChatId)) return;
+    if (!loadedRef.current) return;
+    const ids = [...busyChatIds];
+    if (ids.length === 0) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // ALLE busy Chats pollen, nicht nur den aktiven: sonst bleibt eine im Hintergrund
+    // fertig gewordene Antwort in einem anderen Chat für immer „busy" hängen.
     const poll = async () => {
       if (cancelled) return;
-      const filled = await reloadFromServer(activeChatId);
-      if (filled) {
-        setStatusByChat((prev) => ({ ...prev, [activeChatId]: "" }));
-        markBusy(activeChatId, false);
-        return;
-      }
-      // Nachricht hat den Server nie erreicht (Send während Offline): kein Turn da,
-      // der fertig werden könnte → Retry-Karte statt endlosem Polling.
-      if (!(await messageReachedServer(activeChatId))) {
-        const deadAi = [...(chatsRef.current.find((c) => c.id === activeChatId)?.messages || [])].reverse().find((m) => m.role === "assistant");
-        if (deadAi && !deadAi.text?.trim() && !deadAi.error) {
-          patchMsg(activeChatId, deadAi.id, (m) => ({ ...m, error: { type: "Nicht gesendet — bitte erneut senden.", retryable: true } }));
+      let stillBusy = false;
+      for (const id of ids) {
+        if (cancelled) return;
+        if (!busyChatIds.has(id)) continue; // inzwischen fertig
+        const filled = await reloadFromServer(id);
+        if (cancelled) return;
+        if (filled) {
+          setStatusByChat((prev) => ({ ...prev, [id]: "" }));
+          markBusy(id, false);
+          continue;
         }
-        setStatusByChat((prev) => ({ ...prev, [activeChatId]: "" }));
-        markBusy(activeChatId, false);
-        return;
+        // Nachricht hat den Server nie erreicht (Send während Offline): kein Turn da,
+        // der fertig werden könnte → Retry-Karte statt endlosem Polling.
+        if (!(await messageReachedServer(id))) {
+          const deadAi = [...(chatsRef.current.find((c) => c.id === id)?.messages || [])].reverse().find((m) => m.role === "assistant");
+          if (deadAi && !deadAi.text?.trim() && !deadAi.error) {
+            setErrorCard(id, deadAi.id, "Nicht gesendet — bitte erneut senden.", true, "poll_not_sent");
+          }
+          setStatusByChat((prev) => ({ ...prev, [id]: "" }));
+          markBusy(id, false);
+          continue;
+        }
+        stillBusy = true;
       }
-      if (!cancelled) timer = setTimeout(poll, 3000);
+      if (!cancelled && stillBusy) timer = setTimeout(poll, 3000);
     };
     timer = setTimeout(poll, 3000);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [activeChatId, busyChatIds, serverUrl]);
+  }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
 
   // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
   useEffect(() => {
@@ -1410,6 +1519,24 @@ export default function App() {
       // In Expo Go sind Push-Benachrichtigungen nicht verfügbar – ignorieren.
     }
   }
+
+  // Push-Antipp öffnet den richtigen Chat: der Server schickt die chatId im
+  // data-Payload mit (sendPush). Ohne diesen Listener wäre der Deep-Link wirkungslos.
+  useEffect(() => {
+    let sub: { remove: () => void } | null = null;
+    try {
+      sub = Notifications.addNotificationResponseReceivedListener((resp) => {
+        const data = resp?.notification?.request?.content?.data as { chatId?: unknown } | undefined;
+        const chatId = typeof data?.chatId === "string" ? data.chatId : "";
+        if (!chatId) return;
+        setTab("chats");
+        openChat(chatId);
+      });
+    } catch {
+      // Expo Go / Web: Push-Listener nicht verfügbar → ignorieren.
+    }
+    return () => { try { sub?.remove(); } catch { /* ignorieren */ } };
+  }, []);
 
   // Anhänge hängen am COMPOSER, nicht am Chat. Wechselt man den Chat, dürfen
   // alte Anhänge nicht mitwandern — sonst gehen sie beim nächsten Senden mit
@@ -1663,9 +1790,13 @@ export default function App() {
         // Nutzer-Stop (nicht Timeout): leere KI-Bubble entfernen statt Fehlerkarte.
         abortedRef.current.delete(chatId);
         patchChat(chatId, (c) => ({ ...c, messages: c.messages.filter((m) => m.id !== aiId) }));
+      } else if (wentBackgroundRef.current) {
+        // App ging in den Hintergrund → wir haben selbst abgebrochen. Kein Netzwerk-
+        // Fehlalarm, aber ehrlich benennen: die Generierung ist nicht fertig geworden.
+        setErrorCard(chatId, aiId, "Bild-Generierung unterbrochen (App im Hintergrund)", true, "image_background");
       } else {
         const msg = ctrl.signal.aborted ? "Zeitüberschreitung bei der Bild-Generierung" : (e instanceof Error ? e.message : String(e));
-        patchMsg(chatId, aiId, (m) => ({ ...m, text: "", error: { type: `Bild-Generierung fehlgeschlagen: ${msg}`, retryable: true } }));
+        setErrorCard(chatId, aiId, `Bild-Generierung fehlgeschlagen: ${msg}`, true, "image_failed", msg);
       }
     } finally {
       clearTimeout(timer);
@@ -1706,6 +1837,7 @@ export default function App() {
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
+    wentBackgroundRef.current = false; // neuer Turn → Hintergrund-Flag zurücksetzen
     let turnStillRunning = false; // Server-Turn läuft noch → kein Fehler, Busy-Polling übernimmt
     const isFirst = !chats.find((c) => c.id === chatId)?.messages.length;
     let finalMessage = message;
@@ -1767,6 +1899,40 @@ export default function App() {
       if (abortedRef.current.has(chatId)) {
         abortedRef.current.delete(chatId);
         return; // Nutzer-Abbruch → kein Fallback
+      }
+      if (e instanceof BackgroundDetached) {
+        // Erwarteter Vorgang: App war im Hintergrund, iOS hat die Verbindung gekillt.
+        // Der Server-Turn läuft weiter. KEIN Fehler, KEIN Retry-Sturm — beim
+        // Zurückkehren lädt der Vordergrund-Sync die Antwort per REST nach.
+        turnStillRunning = true;
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "App im Hintergrund — Antwort läuft auf dem Server weiter …" }));
+        return;
+      }
+      if (e instanceof StreamInterrupted) {
+        // Stream still beendet (EOF ohne done/error): gezielt mit Resume an der
+        // Abbruchstelle fortsetzen statt eine „Netzwerk unterbrochen"-Karte zu zeigen.
+        // Max. 5 Versuche mit wachsendem Backoff; währenddessen KEINE Fehlerbubble
+        // (der Server-Turn läuft unabhängig weiter und wird ggf. später gepollt).
+        const backoffs = [1000, 2000, 4000, 8000, 15000];
+        for (let attempt = 0; attempt < backoffs.length; attempt++) {
+          await waitForForeground();
+          if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
+          await new Promise((r) => setTimeout(r, backoffs[attempt]));
+          if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
+          const st = streamStateRef.current[chatId];
+          setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
+          try {
+            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: e.lastSeq || 0 }, clientMessageId);
+            setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+            return;
+          } catch {
+            // Erneut abgebrochen oder Resume nicht möglich → nächster Versuch.
+          }
+        }
+        // Nach 5 Fehlversuchen keine harte Fehlerkarte: Antwort wird nachgeliefert
+        // (Server-Turn läuft unabhängig weiter; Session-Polling lädt sie, sobald fertig).
+        setErrorCard(chatId, aiId, "Verbindung unterbrochen – Antwort wird nachgeliefert.", true, "stream_interrupted");
+        return;
       }
       // Auto-Wiederherstellung: bei Stream-Abbruch (Server-Neustart/Netz) mehrfach
       // retryen, damit sich der Chat von selbst fängt statt abzubrechen.
@@ -1837,7 +2003,7 @@ export default function App() {
           // während Offline). Dann existiert kein Server-Turn, der weiterlaufen könnte —
           // ewig pollen wäre falsch. Retry-Karte statt Reconnect.
           if (!(await messageReachedServer(chatId))) {
-            patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: "Nicht gesendet — Netzwerk unterbrochen. Bitte erneut senden.", retryable: true } }));
+            setErrorCard(chatId, aiId, "Nicht gesendet — Netzwerk unterbrochen. Bitte erneut senden.", true, "send_offline");
             return;
           }
           turnStillRunning = true;
@@ -1845,7 +2011,7 @@ export default function App() {
           return;
         }
         // Echter Server-Fehler (kein Netzproblem) → Fehler-Karte statt Text-Suffix.
-        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(rawMsg), retryable: isRetryable(rawMsg) } }));
+        setErrorCard(chatId, aiId, classifyError(rawMsg), isRetryable(rawMsg), "send_failed", rawMsg);
       }
     } finally {
       setChatThinking(chatId, "");
@@ -1985,7 +2151,23 @@ export default function App() {
       } else if (t === "error") {
         errorReceived = true;
         const raw = typeof e.data === "string" ? e.data : String(e.data || "Fehler");
-        patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: classifyError(raw), retryable: isRetryable(raw) } }));
+        // Server schickt optional eine praezise Ursache (kind) mit — die hat Vorrang
+        // vor der Text-Heuristik, damit z. B. ein Compaction-Race nicht als
+        // "Netzwerk unterbrochen" erscheint.
+        const kind = typeof (e as { kind?: unknown }).kind === "string" ? String((e as { kind?: string }).kind) : "";
+        const KIND_LABEL: Record<string, string> = {
+          compaction_busy: "Kontext wird kompaktiert",
+          progress_timeout: "Keine Antwort erhalten",
+          turn_timeout: "Zeitüberschreitung",
+          session_reset: "Session zurückgesetzt",
+          rate_limit: "Limit erreicht",
+          quota: "Konto/Guthaben",
+          context_too_long: "Kontext zu lang",
+          engine_down: "Server nicht bereit",
+          capacity: "Server ausgelastet",
+        };
+        const label = KIND_LABEL[kind] || classifyError(raw);
+        setErrorCard(chatId, aiId, label, isRetryable(raw), "sse_error", raw);
       }
     };
 
@@ -2006,7 +2188,13 @@ export default function App() {
     const readWithStallGuard = () => {
       let stallTimer: ReturnType<typeof setTimeout> | null = null;
       const stall = new Promise<never>((_, reject) => {
-        stallTimer = setTimeout(() => reject(new Error("Kein Datenfluss — Verbindung still beendet (network)")), STREAM_STALL_MS);
+        stallTimer = setTimeout(() => {
+          // War die App zwischenzeitlich im Hintergrund, ist die Stille ERWARTET
+          // (iOS friert Timer UND Socket ein). Dann kein Netzwerkfehler, sondern
+          // bewusste Trennung → send() synct beim Vordergrund per REST.
+          if (wentBackgroundRef.current) reject(new BackgroundDetached());
+          else reject(new Error("Kein Datenfluss — Verbindung still beendet (network)"));
+        }, STREAM_STALL_MS);
       });
       return Promise.race([reader.read(), stall]).finally(() => {
         if (stallTimer) clearTimeout(stallTimer);
@@ -2027,7 +2215,7 @@ export default function App() {
     // die Resume-/Reload-Logik anstößt — statt die Antwort mit "(keine Antwort)"
     // zu verwerfen. Der Server schreibt IMMER done ODER error vor Stream-Ende.
     if (!doneReceived && !errorReceived) {
-      throw new Error("Stream vorzeitig beendet (network)");
+      throw new StreamInterrupted(lastSeq);
     }
 
     const finalText = finalReply.trim() || "(keine Antwort)";
@@ -2066,8 +2254,10 @@ export default function App() {
         );
         return;
       }
-      // Timeout (30 min): partiell gestreamten Text behalten + Meldung anhängen.
+      // Timeout (65 min): partiell gestreamten Text behalten + Meldung anhängen.
       if (controller.signal.aborted) {
+        // Bewusst getrennt (App ging in den Hintergrund) → KEIN Fehler.
+        if (wentBackgroundRef.current) throw new BackgroundDetached();
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: "Zeitüberschreitung", retryable: true } }));
         return;
       }
