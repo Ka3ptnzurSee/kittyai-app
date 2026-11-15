@@ -14,6 +14,7 @@ import {
   Platform,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -27,6 +28,7 @@ import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-spe
 import * as Notifications from "expo-notifications";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
+import * as Clipboard from "expo-clipboard";
 import { secureGet, secureSet, SecureStoreError } from "./secureStore";
 import Constants from "expo-constants";
 import * as ImagePicker from "expo-image-picker";
@@ -397,6 +399,24 @@ function MessageBubble({
   const [forceOpen, setForceOpen] = useState(false);
   const tooBig = bigH > 0 && !forceOpen;
   const activity = !isUser ? item.activity || [] : [];
+  // Kopieren/Teilen: iOS-Textauswahl ist bei uns nur absatzweise möglich, weil
+  // Markdown jeden Absatz als eigenes <Text selectable> rendert — eine ganze
+  // Antwort lässt sich damit nicht am Stück markieren. Deshalb gibt es pro
+  // Nachricht eine feste Aktionszeile (Kopieren/Antworten/Teilen).
+  const [copied, setCopied] = useState(false);
+  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copiedTimer.current) clearTimeout(copiedTimer.current); }, []);
+  const plainText = (item.text || "").trim();
+  const canCopy = plainText.length > 0 && !isBusy;
+  function copyMessage() {
+    Clipboard.setStringAsync(item.text || "").catch(() => {});
+    setCopied(true);
+    if (copiedTimer.current) clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 1500);
+  }
+  function shareMessage() {
+    Share.share({ message: item.text || "" }).catch(() => {});
+  }
   const bubbleStyle = isUser
     ? styles.userBubble
     : isLast && isBusy && !item.text
@@ -493,6 +513,22 @@ function MessageBubble({
         </View>
       ) : null}
     </View>
+    {canCopy ? (
+      <View style={[styles.msgActions, isUser && styles.msgActionsUser]}>
+        <Pressable onPress={copyMessage} hitSlop={10} accessibilityLabel="Nachricht kopieren" style={styles.msgActionBtn}>
+          <Ionicons name={copied ? "checkmark" : "copy-outline"} size={13} color={copied ? colors.success : colors.muted} />
+          <Text style={[styles.msgActionText, copied && { color: colors.success }]}>{copied ? "Kopiert" : "Kopieren"}</Text>
+        </Pressable>
+        <Pressable onPress={() => onReply(item)} hitSlop={10} accessibilityLabel="Auf Nachricht antworten" style={styles.msgActionBtn}>
+          <Ionicons name="arrow-undo-outline" size={13} color={colors.muted} />
+          <Text style={styles.msgActionText}>Antworten</Text>
+        </Pressable>
+        <Pressable onPress={shareMessage} hitSlop={10} accessibilityLabel="Nachricht teilen" style={styles.msgActionBtn}>
+          <Ionicons name="share-outline" size={13} color={colors.muted} />
+          <Text style={styles.msgActionText}>Teilen</Text>
+        </Pressable>
+      </View>
+    ) : null}
     {tooBig ? (
       <Pressable onPress={() => setForceOpen(true)} style={styles.tooBigRow} hitSlop={8}>
         <Ionicons name="chevron-down" size={14} color={colors.accent} />
@@ -3397,6 +3433,10 @@ const styles = StyleSheet.create({
   imgFailedRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
   imgFailedText: { color: colors.muted, fontSize: 13, fontStyle: "italic" },
   tooBigRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 6, marginBottom: 8, maxWidth: "86%", paddingHorizontal: 4 },
+  msgActions: { flexDirection: "row", alignItems: "center", gap: 16, marginTop: 2, marginBottom: 10, paddingHorizontal: 6 },
+  msgActionsUser: { alignSelf: "flex-end" },
+  msgActionBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingVertical: 3, paddingHorizontal: 2 },
+  msgActionText: { color: colors.muted, fontSize: 12 },
   tooBigText: { flex: 1, color: colors.accent, fontSize: 12, lineHeight: 16 },
   userText: { color: colors.text, fontSize: 16, lineHeight: 22, fontFamily: uiFontFamily },
   aiText: { color: colors.text, fontSize: 17, lineHeight: 24, fontFamily: aiFontFamily },
