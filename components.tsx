@@ -112,21 +112,41 @@ export function OAIText({
 // ───────────────────────────── Pressable (Valdi Pressable.js) ─────────────────────────────
 export function Pressable({
   onPress,
+  onPressIn,
+  onPressOut,
+  onLongPress,
+  delayLongPress,
   disabled,
   children,
   style,
   hitSlop,
+  accessibilityLabel,
   hapticOnPress = "light",
 }: {
   onPress?: () => void;
+  onPressIn?: () => void;
+  onPressOut?: () => void;
+  onLongPress?: () => void;
+  delayLongPress?: number;
   disabled?: boolean;
   children?: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   hitSlop?: number;
+  accessibilityLabel?: string;
   hapticOnPress?: "light" | "medium" | "selection" | "none";
 }) {
   return (
     <RNPressable
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      // Langer Druck ist eine eigene Rueckmeldung (Valdi: "action_sheet") —
+      // bewusst medium, damit Halten nie wie ein normaler Tap klingt.
+      onLongPress={() => {
+        haptic("medium");
+        onLongPress?.();
+      }}
+      delayLongPress={delayLongPress}
+      accessibilityLabel={accessibilityLabel}
       onPress={() => {
         if (disabled) return;
         if (hapticOnPress !== "none") haptic(hapticOnPress === "selection" ? "selection" : hapticOnPress);
