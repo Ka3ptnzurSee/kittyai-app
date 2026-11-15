@@ -37,6 +37,7 @@ import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
+import { RehaTab } from "./RehaTab";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
@@ -166,17 +167,19 @@ class BackgroundDetached extends Error {
 
 // Auswählbare Chat-Modelle (Key = Server-Slug, Label = kurze Anzeige).
 // Reihenfolge = Zyklus beim Tippen auf den Chip.
-const CHAT_MODEL_OPTIONS: { key: string; label: string }[] = [
+const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[] = [
   { key: "pro", label: "PRO" },
   { key: "flash", label: "FLASH" },
   // --goeran-options:start--
+  { key: "kolibri", label: "KOLIBRI" },
   { key: "muse", label: "MUSE" },
   { key: "coder", label: "CODER" },
   { key: "qwen", label: "QWEN" },
   // --goeran-options:end--
   // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
-  { key: "robotron", label: "ROBOTRON" },
-  { key: "robotron2", label: "ROBOTRON2" },
+  // deactivated: hängen am Laptop-Tunnel → im UI als INAKTIV markiert, nicht wählbar.
+  { key: "robotron", label: "ROBOTRON", deactivated: true },
+  { key: "robotron2", label: "ROBOTRON2", deactivated: true },
 ];
 
 // Plugins-Untertabs (Connectors/Skills/Agenten/Workflows/Tasks).
@@ -537,7 +540,7 @@ async function secureGetWithRetry(key: string): Promise<string | null> {
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"chats" | "plugins" | "tasks">("chats");
+  const [tab, setTab] = useState<"chats" | "plugins" | "tasks" | "reha">("chats");
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -605,7 +608,7 @@ export default function App() {
   const [folderSuggestion, setFolderSuggestion] = useState<{ chatId: string; folderId: string; name: string } | null>(null);
   // Modell-Menü
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [dynamicModels, setDynamicModels] = useState<{ key: string; label: string }[]>([]);
+  const [dynamicModels, setDynamicModels] = useState<{ key: string; label: string; deactivated?: boolean }[]>([]);
   // Chat umbenennen
   const [renameChatId, setRenameChatId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
@@ -807,7 +810,11 @@ export default function App() {
     };
   }, [activeChatId]);
 
-  const activeModel = activeChat?.model || chatModel; // pro Chat einstellbares Modell (Default: "flash")
+  // pro Chat einstellbares Modell (Default: "flash"). Deaktivierte Modelle
+  // (Robotron via Laptop-Tunnel :18444) dürfen nie als aktiv gelten — sonst
+  // zeigt der Chip ein Modell an, das der Server still auf flash umbiegt.
+  const requestedModel = activeChat?.model || chatModel;
+  const activeModel = isModelDeactivated(requestedModel) ? fallbackModelKey() : requestedModel;
   const isThisChatBusy = activeChatId ? busyChatIds.has(activeChatId) : false;
   const thisThinking = activeChatId ? thinkingByChat[activeChatId] || "" : "";
   const thisStatus = activeChatId ? statusByChat[activeChatId] || "" : "";
@@ -850,6 +857,7 @@ export default function App() {
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)));
   }
   function setActiveModel(key: string) {
+    if (isModelDeactivated(key)) return; // deaktivierte Slugs (Robotron) nicht setzen
     if (activeChatId) patchChat(activeChatId, (c) => ({ ...c, model: key }));
     setModelMenuOpen(false);
   }
@@ -1018,7 +1026,11 @@ export default function App() {
       if (!res.ok) return;
       const data = await res.json();
       if (Array.isArray(data.models) && data.models.length) {
-        setDynamicModels(data.models.map((m: any) => ({ key: String(m.key || ""), label: String(m.label || m.key || "").toUpperCase() })));
+        setDynamicModels(data.models.map((m: any) => ({ key: String(m.key || ""), label: String(m.label || m.key || "").toUpperCase(), ...(m.deactivated === true ? { deactivated: true } : {}) })));
+        // Server-Standardmodell übernehmen (aktuell "flash") — damit App und
+        // WhatsApp-Brücke immer dasselbe Default-Modell zeigen.
+        const dflt = String(data.default || "");
+        if (dflt && data.models.some((m: any) => String(m.key || "") === dflt)) setChatModel(dflt);
       }
     } catch {
       // offline → statische CHAT_MODEL_OPTIONS verwenden
@@ -1053,8 +1065,16 @@ export default function App() {
     }
   }
 
-  function modelOptions(): { key: string; label: string }[] {
+  function modelOptions(): { key: string; label: string; deactivated?: boolean }[] {
     return dynamicModels.length ? dynamicModels : CHAT_MODEL_OPTIONS;
+  }
+  // Ist der Slug vom Server als deaktiviert gemeldet (oder statisch markiert)?
+  function isModelDeactivated(key: string): boolean {
+    return !!modelOptions().find((o) => o.key === key)?.deactivated;
+  }
+  // Erstes wählbares Modell (aktuell "flash") als Ersatz für deaktivierte Slugs.
+  function fallbackModelKey(): string {
+    return modelOptions().find((o) => !o.deactivated)?.key || "flash";
   }
 
   // --- Ordner/Projekte ---
@@ -2040,7 +2060,10 @@ export default function App() {
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
     let lastSeq = resume?.lastSeq ?? 0;
     let turnId = resume?.turnId ?? "";
-    const model = chatsRef.current.find((c) => c.id === chatId)?.model || chatModel;
+    // Deaktivierte Slugs nie senden — der Server würde sie still auf flash biegen,
+    // dann liefe der Chat mit einem anderen Modell als der Chip anzeigt.
+    const requested = chatsRef.current.find((c) => c.id === chatId)?.model || chatModel;
+    const model = isModelDeactivated(requested) ? fallbackModelKey() : requested;
     // Voll-Replay (lastSeq=0): bereits gestreamten Teiltext zurücksetzen, damit
     // die Deltas beim Replay nicht doppelt angehängt werden.
     if (resume && lastSeq === 0) {
@@ -2830,9 +2853,17 @@ export default function App() {
             <Text style={[styles.tabText, tab === "plugins" && styles.tabTextActive]}>Plugins</Text>
           </View>
         </Pressable>
+        <Pressable onPress={() => setTab("reha")} style={[styles.tab, tab === "reha" && styles.tabActive]}>
+          <View style={styles.tabRow}>
+            <Ionicons name="fitness-outline" size={16} color={tab === "reha" ? colors.accent : colors.muted} />
+            <Text style={[styles.tabText, tab === "reha" && styles.tabTextActive]}>Reha</Text>
+          </View>
+        </Pressable>
       </View>
 
-      {tab === "chats" ? (
+      {tab === "reha" ? (
+        <RehaTab serverUrl={serverUrl} authHeaders={authHeaders} />
+      ) : tab === "chats" ? (
         activeChat ? (
           <>
             <FlatList
@@ -3040,7 +3071,7 @@ export default function App() {
               <View style={styles.modelBar}>
                 <Pressable onPress={() => setModelMenuOpen(true)} style={styles.modelBarChip} hitSlop={6}>
                   <Ionicons name="hardware-chip-outline" size={13} color={colors.muted} />
-                  <Text style={styles.modelBarText} numberOfLines={1}>{modelOptions().find((o) => o.key === activeModel)?.label ?? "PRO"}</Text>
+                  <Text style={styles.modelBarText} numberOfLines={1}>{modelOptions().find((o) => o.key === activeModel)?.label ?? "FLASH"}</Text>
                   <Ionicons name="chevron-down" size={12} color={colors.muted} />
                 </Pressable>
               </View>
@@ -3213,9 +3244,16 @@ export default function App() {
             <View style={styles.attachSheetHandle} />
             <Text style={styles.attachSheetTitle}>Modell auswählen</Text>
             {modelOptions().map((o) => (
-              <Pressable key={o.key} onPress={() => setActiveModel(o.key)} style={[styles.modelMenuItem, activeModel === o.key && styles.modelMenuItemActive]}>
-                <Text style={[styles.modelMenuItemText, activeModel === o.key && styles.modelMenuItemTextActive]}>{o.label}</Text>
-                {activeModel === o.key ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : null}
+              <Pressable
+                key={o.key}
+                disabled={!!o.deactivated}
+                onPress={() => setActiveModel(o.key)}
+                style={[styles.modelMenuItem, activeModel === o.key && styles.modelMenuItemActive]}
+              >
+                <Text style={[styles.modelMenuItemText, activeModel === o.key && styles.modelMenuItemTextActive, o.deactivated && styles.modelMenuItemTextDeactivated]}>
+                  {o.label}{o.deactivated ? "  ·  INAKTIV" : ""}
+                </Text>
+                {activeModel === o.key ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : o.deactivated ? <Ionicons name="close-circle-outline" size={16} color={colors.muted} /> : null}
               </Pressable>
             ))}
           </Pressable>
@@ -3638,4 +3676,6 @@ const styles = StyleSheet.create({
   modelMenuItemActive: { backgroundColor: colors.accentSoft, borderRadius: 10, paddingHorizontal: 10 },
   modelMenuItemText: { fontSize: 15, color: colors.text },
   modelMenuItemTextActive: { color: colors.accent, fontWeight: "700" },
+  // deaktiviert (z. B. Robotron via Laptop-Tunnel): sichtbar, aber ausgegraut
+  modelMenuItemTextDeactivated: { color: colors.muted, opacity: 0.7 },
 });
