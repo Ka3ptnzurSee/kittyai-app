@@ -327,10 +327,21 @@ function MdImage({ uri, alt }: { uri: string; alt?: string }) {
 // einem solchen Link besteht, auf Block-Ebene als Karte gerendert (wie MdImage).
 const isFileHref = isGeneratedFileHref;
 
+// Absichtlich tolerant: Dateinamen mit "%" (z. B. "50%_Rabatt.pdf") sind
+// gueltige URLs, aber kein gueltiges Prozent-Encoding — decodeURIComponent
+// wuerde dann einen URIError werfen und die ganze Nachricht unrenderbar machen.
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
 function MdFile({ uri, label }: { uri: string; label: string }) {
   const ext = fileExtOf(uri);
   const icon = ext === "pdf" ? "📄" : ext === "xlsx" ? "📊" : ext === "pptx" ? "📽️" : ext === "docx" ? "📝" : "📎";
-  const name = label.trim() || decodeURIComponent(uri.split("/").pop() || "Datei");
+  const name = label.trim() || safeDecode(uri.split("/").pop() || "") || "Datei";
   return (
     <Pressable
       style={styles.fileCard}
