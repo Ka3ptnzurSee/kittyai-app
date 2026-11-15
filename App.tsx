@@ -1765,20 +1765,32 @@ export default function App() {
       const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
       if (res.canceled || !res.assets?.length) return;
       const a = res.assets[0];
-      const isPdf = a.mimeType === "application/pdf" || (a.name || "").toLowerCase().endsWith(".pdf");
-      const maxBytes = isPdf ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
+      const lower = (a.name || "").toLowerCase();
+      const isPdf = a.mimeType === "application/pdf" || lower.endsWith(".pdf");
+      // Word/PowerPoint/Excel sind ZIP-Container: als Text gelesen käme Binärmüll
+      // beim Modell an. Sie gehen wie PDFs als Base64 an den Server, der den Text
+      // mit scripts/office_extract.py herausholt.
+      const officeMime = lower.endsWith(".docx")
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : lower.endsWith(".pptx")
+          ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+          : lower.endsWith(".xlsx")
+            ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            : "";
+      const isDocument = isPdf || !!officeMime;
+      const maxBytes = isDocument ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
       if (a.size && a.size > maxBytes) {
-        Alert.alert("Datei zu groß", isPdf ? "Maximal 8 MB für PDFs" : "Maximal 2 MB");
+        Alert.alert("Datei zu groß", isDocument ? "Maximal 8 MB für PDF, Word, PowerPoint und Excel" : "Maximal 2 MB");
         return;
       }
       const f = new File(a.uri);
-      if (isPdf) {
+      if (isDocument) {
         const b64 = await f.base64();
         if (b64.length * 0.75 > maxBytes) {
-          Alert.alert("Datei zu groß", "Maximal 8 MB für PDFs");
+          Alert.alert("Datei zu groß", "Maximal 8 MB für PDF, Word, PowerPoint und Excel");
           return;
         }
-        setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: "application/pdf" }]);
+        setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: isPdf ? "application/pdf" : officeMime }]);
       } else {
         const content = await f.text();
         setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
