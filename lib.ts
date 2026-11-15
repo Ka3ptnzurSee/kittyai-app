@@ -506,3 +506,16 @@ export function setImageBaseUrl(base: string): void {
 export function getImageBaseUrl(): string {
   return imageBaseUrl;
 }
+
+/** Link auf eine erzeugte Datei? Relativ (`/generated/bericht.docx`) oder absolut. */
+export function isGeneratedFileHref(href: string): boolean {
+  const h = String(href || "");
+  if (!/\.(docx|pptx|xlsx|pdf|csv|zip|txt|md)(?:[?#].*)?$/i.test(h)) return false;
+  return h.startsWith("/generated/") || /^https?:/i.test(h);
+}
+
+/** Dateiendung einer URL/Pfadangabe in Kleinbuchstaben ("" wenn keine). */
+export function fileExtOf(uri: string): string {
+  const m = String(uri || "").split(/[?#]/)[0].match(/\.([a-z0-9]+)$/i);
+  return m ? m[1].toLowerCase() : "";
+}

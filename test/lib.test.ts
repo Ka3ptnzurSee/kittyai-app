@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
+import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
@@ -274,4 +275,29 @@ test("isBlankAiMessage: erkennt echte weiße Blasen, schont Inhalte", () => {
   // Müll
   assert.strictEqual(isBlankAiMessage(null as unknown as { role: string }), false);
   assert.strictEqual(isBlankAiMessage({ role: "assistant", text: null }), true);
+});
+
+// --- Erzeugte Dateien (Datei-Karten im Chat) ---
+test("isGeneratedFileHref erkennt generierte Dateien", () => {
+  assert.strictEqual(isGeneratedFileHref("/generated/bericht.docx"), true);
+  assert.strictEqual(isGeneratedFileHref("/generated/folien.pptx"), true);
+  assert.strictEqual(isGeneratedFileHref("/generated/zahlen.xlsx"), true);
+  assert.strictEqual(isGeneratedFileHref("/generated/scan.pdf"), true);
+  assert.strictEqual(isGeneratedFileHref("https://hashtagweinboehla.de/generated/a.pdf"), true);
+  assert.strictEqual(isGeneratedFileHref("/generated/a.docx?v=2"), true);
+});
+
+test("isGeneratedFileHref lehnt Fremdes ab", () => {
+  assert.strictEqual(isGeneratedFileHref("/generated/bild.jpg"), false);
+  assert.strictEqual(isGeneratedFileHref("/web/reha.html"), false);
+  assert.strictEqual(isGeneratedFileHref("javascript:alert(1)//x.pdf"), false);
+  assert.strictEqual(isGeneratedFileHref(""), false);
+  assert.strictEqual(isGeneratedFileHref("/generated/"), false);
+});
+
+test("fileExtOf liest die Endung", () => {
+  assert.strictEqual(fileExtOf("/generated/a.docx"), "docx");
+  assert.strictEqual(fileExtOf("https://x.de/a.PDF?x=1"), "pdf");
+  assert.strictEqual(fileExtOf("/generated/ohne"), "");
+  assert.strictEqual(fileExtOf(""), "");
 });

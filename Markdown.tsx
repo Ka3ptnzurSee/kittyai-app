@@ -28,7 +28,7 @@ import plaintext from "highlight.js/lib/languages/plaintext";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 import { MathView } from "./MathView";
 import { splitMathSegments, escapeInlineMathMeta } from "./dilviz";
-import { breakLongLines, breakUnbreakable, absoluteImageUri, getImageBaseUrl } from "./lib";
+import { breakLongLines, breakUnbreakable, absoluteImageUri, getImageBaseUrl, isGeneratedFileHref, fileExtOf } from "./lib";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
 
@@ -228,9 +228,11 @@ function renderInline(tokens: Token[], keyPrefix: string): ReactNode {
       );
       i = j;
     } else if (t.type === "link_open") {
-      const href = t.attrGet("href") || "#";
+      const raw = t.attrGet("href") || "#";
+      // Relative Server-Pfade (/generated/…) absolut machen, sonst nicht öffnbar.
+      const resolved = /^\/generated\//i.test(raw) ? absoluteImageUri(raw, getImageBaseUrl()) || raw : raw;
       // Nur sichere Schemas verlinken – blockt javascript:/data:/file: (adversarial)
-      const safe = /^(https?:|mailto:|tel:)/i.test(href);
+      const safe = /^(https?:|mailto:|tel:)/i.test(resolved);
       let j = i + 1;
       const inner: Token[] = [];
       while (j < tokens.length && tokens[j].type !== "link_close") {
@@ -241,7 +243,7 @@ function renderInline(tokens: Token[], keyPrefix: string): ReactNode {
         <Text
           key={key}
           style={safe ? styles.link : undefined}
-          onPress={safe ? () => Linking.openURL(href).catch(() => {}) : undefined}
+          onPress={safe ? () => Linking.openURL(resolved).catch(() => {}) : undefined}
         >
           {renderInline(inner, key)}
         </Text>,
@@ -318,6 +320,36 @@ function MdImage({ uri, alt }: { uri: string; alt?: string }) {
   );
 }
 
+// --- Datei-Karten (`[Titel](/generated/bericht.docx)`) ---
+//
+// Erzeugte Dokumente (Word/PPT/Excel/PDF) lassen sich in der App oeffnen. Eine
+// <View> darf nicht in einem <Text> stecken, deshalb wird ein Absatz, der nur aus
+// einem solchen Link besteht, auf Block-Ebene als Karte gerendert (wie MdImage).
+const isFileHref = isGeneratedFileHref;
+
+function MdFile({ uri, label }: { uri: string; label: string }) {
+  const ext = fileExtOf(uri);
+  const icon = ext === "pdf" ? "📄" : ext === "xlsx" ? "📊" : ext === "pptx" ? "📽️" : ext === "docx" ? "📝" : "📎";
+  const name = label.trim() || decodeURIComponent(uri.split("/").pop() || "Datei");
+  return (
+    <Pressable
+      style={styles.fileCard}
+      onPress={() => Linking.openURL(uri).catch(() => {})}
+      accessibilityRole="button"
+      accessibilityLabel={`Datei öffnen: ${name}`}
+    >
+      <Text style={styles.fileIcon}>{icon}</Text>
+      <View style={styles.fileMeta}>
+        <Text style={styles.fileName} numberOfLines={2}>
+          {breakUnbreakable(name)}
+        </Text>
+        <Text style={styles.fileHint}>{(ext || "Datei").toUpperCase()} · zum Öffnen tippen</Text>
+      </View>
+      <Text style={styles.fileOpen}>Öffnen ›</Text>
+    </Pressable>
+  );
+}
+
 // --- Block-Renderer ---
 
 function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
@@ -347,6 +379,23 @@ function renderBlocks(tokens: Token[], keyPrefix: string): ReactNode[] {
         });
         i++;
         continue;
+      }
+      // Absatz besteht NUR aus einem Link auf eine generierte Datei → Datei-Karte.
+      const openIdx = kids.findIndex((c) => c.type === "link_open");
+      const closeIdx = kids.findIndex((c) => c.type === "link_close");
+      if (openIdx >= 0 && closeIdx > openIdx) {
+        const outside = [...kids.slice(0, openIdx), ...kids.slice(closeIdx + 1)];
+        const cleanOutside = outside.every((c) => c.type === "text" && !String(c.content || "").trim());
+        const href = kids[openIdx].attrGet("href") || "";
+        if (cleanOutside && isFileHref(href)) {
+          const uri = absoluteImageUri(href, getImageBaseUrl());
+          if (uri) {
+            const label = kids.slice(openIdx + 1, closeIdx).map((c) => String(c.content || "")).join("");
+            out.push(<MdFile key={`${key}-file`} uri={uri} label={label} />);
+            i++;
+            continue;
+          }
+        }
       }
       out.push(
         <Text key={key} selectable style={styles.paragraph}>
@@ -542,6 +591,23 @@ const styles = StyleSheet.create({
     marginVertical: 6,
   },
   imageFallback: { color: colors.muted, fontSize: 15, fontStyle: "italic", marginVertical: 4 },
+  fileCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginVertical: 6,
+  },
+  fileIcon: { fontSize: 22 },
+  fileMeta: { flex: 1 },
+  fileName: { color: colors.text, fontSize: 14, fontWeight: "600" },
+  fileHint: { color: colors.muted, fontSize: 11, marginTop: 2 },
+  fileOpen: { color: colors.accent, fontSize: 13, fontWeight: "600" },
   h1: { color: colors.text, fontSize: 24, lineHeight: 30, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 10, marginBottom: 2 },
   h2: { color: colors.text, fontSize: 21, lineHeight: 27, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 8, marginBottom: 2 },
   h3: { color: colors.text, fontSize: 18, lineHeight: 24, fontWeight: "700", fontFamily: aiFontFamily, marginTop: 6, marginBottom: 1 },
