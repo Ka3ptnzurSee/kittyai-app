@@ -34,12 +34,15 @@ import {
 } from "./theme";
 
 // ───────────────────────────── Haptik (Valdi Device.performHapticFeedback) ─────────────────────────────
+// Haptics.*Async() liefert ein Promise: try/catch allein faengt nur synchrone
+// Fehler, auf Web/Android ohne Vibrator rejectet das Promise -> unhandled
+// rejection. Deshalb zusaetzlich .catch(() => {}) an jedem Aufruf.
 export function haptic(kind: "action_sheet" | "selection" | "light" | "medium" = "light"): void {
   try {
-    if (kind === "selection") Haptics.selectionAsync();
-    else if (kind === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    else if (kind === "action_sheet") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    else Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (kind === "selection") Haptics.selectionAsync().catch(() => {});
+    else if (kind === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    else if (kind === "action_sheet") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    else Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   } catch {
     /* Haptik ist optional – nie crashen */
   }
@@ -147,6 +150,10 @@ export function Pressable({
       }}
       delayLongPress={delayLongPress}
       accessibilityLabel={accessibilityLabel}
+      // Ohne role liest VoiceOver nur den Text vor, nicht "Taste"; accessibilityState
+      // sagt den deaktivierten Zustand an (sichtbar ist er nur ueber opacity).
+      accessibilityRole="button"
+      accessibilityState={{ disabled: !!disabled }}
       onPress={() => {
         if (disabled) return;
         if (hapticOnPress !== "none") haptic(hapticOnPress === "selection" ? "selection" : hapticOnPress);
@@ -154,9 +161,12 @@ export function Pressable({
       }}
       disabled={disabled}
       hitSlop={hitSlop}
+      // Eigene opacity zuerst, Aufrufer-Style danach: so gewinnt ein bewusst
+      // gesetzter Disabled-Zustand des Callers (z. B. permissionBtnDisabled 0.5)
+      // gegen den 0.38-Default, waehrend das Press-Feedback erhalten bleibt.
       style={({ pressed }) => [
-        style,
         { opacity: disabled ? 0.38 : pressed ? 0.7 : 1 },
+        style,
       ]}
     >
       {children}
