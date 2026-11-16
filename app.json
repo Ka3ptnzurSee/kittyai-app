@@ -2,7 +2,7 @@
   "expo": {
     "name": "KittyAI",
     "slug": "pi-app",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -18,7 +18,7 @@
         "NSMicrophoneUsageDescription": "KittyAI braucht das Mikrofon für den Sprachmodus (Diktieren).",
         "NSSpeechRecognitionUsageDescription": "KittyAI nutzt Spracherkennung, damit du Nachrichten diktieren kannst."
       },
-      "buildNumber": "104"
+      "buildNumber": "106"
     },
     "android": {
       "package": "com.meister.piapp",

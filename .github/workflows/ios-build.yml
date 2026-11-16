@@ -39,10 +39,12 @@ jobs:
 
       # Build-Nummer MUSS pro Lauf steigen: mit appVersionSource=local + autoIncrement
       # startete jeder CI-Lauf bei der committeten Zahl und kollidierte beim Upload
-      # ("Build number 105 ... has already been used"). github.run_number ist monoton.
+      # ("Build number 105 ... has already been used"). Deshalb: höchste bei Apple
+      # vorhandene Build-Nummer dieser Version + 1 (ASC ist die Quelle der Wahrheit).
+      # Fallback (kein Key / ASC down): committete buildNumber aus app.json.
       - name: Build-Nummer setzen
         run: |
-          BUILD=$((1000 + GITHUB_RUN_NUMBER))
+          BUILD=$(node scripts/next-build-number.mjs)
           node -e "const fs=require('fs');const p='app.json';let s=fs.readFileSync(p,'utf8');s=s.replace(/\"buildNumber\":\s*\"[0-9]+\"/,'\"buildNumber\": \"'+process.argv[1]+'\"');fs.writeFileSync(p,s)" "$BUILD"
           grep -n 'buildNumber' app.json
 
