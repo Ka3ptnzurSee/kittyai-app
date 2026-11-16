@@ -678,7 +678,11 @@ export default function App() {
   // WhatsApp-Bot, Terminal-Sessions). Werden nicht verschlüsselt gespeichert, sondern
   // bei jedem Sync frisch vom Server geholt — die Wahrheit liegt auf dem Server.
   const [remoteChats, setRemoteChats] = useState<Chat[]>([]);
-  const [chatFilter, setChatFilter] = useState<"all" | ChatSource>("all");
+  // "server" = Verläufe, die nur auf dem Server liegen (anderes Gerät/andere App-Instanz),
+  // "app" = nur die Chats DIESES Geräts. Ohne die Trennung ertrinkt die Liste in
+  // hunderten Server-Sessions, die man hier nie angelegt hat.
+  type ChatFilter = "all" | "app" | "server" | "whatsapp" | "terminal";
+  const [chatFilter, setChatFilter] = useState<ChatFilter>("app");
   // Storage-Keys, deren verschlüsselter Bestand vorhanden, aber nicht lesbar ist
   // (Key weg/korrupt bzw. Lesefehler) → NICHT mit leerem Stand überschreiben (kein stiller Datenverlust).
   const storageBlockedRef = useRef<Set<string>>(new Set());
@@ -1394,20 +1398,25 @@ export default function App() {
               if (!aiMsg || !userMsg) continue;
               markBusy(chat.id, true);
               streamChat(userMsg.text, chat.id, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId)
+                .then(() => markBusy(chat.id, false))
                 .catch(async (err) => {
                   // Resume nicht möglich (Turn aufgeräumt) -> erst Session-Reload versuchen:
                   // die Server-Session-Datei überlebt die turnRegistry-TTL und ist die Wahrheit.
                   const filled = await reloadFromServer(chat.id);
-                  if (!filled) {
-                    // Turn läuft serverseitig noch (lazy Session-Write)? Dann kein Fehler —
-                    // das Busy-Polling lädt die Antwort, sobald sie fertig ist.
-                    if (await serverTurnStillRunning(chat.id)) return;
-                    // Echte Ursache anzeigen statt pauschal "Verbindung unterbrochen".
-                    const raw = err instanceof Error ? err.message : String(err || "");
-                    setErrorCard(chat.id, aiMsg.id, classifyError(raw), isRetryable(raw), "auto_resume", raw);
+                  if (filled) {
+                    markBusy(chat.id, false);
+                    return;
                   }
-                })
-                .finally(() => markBusy(chat.id, false));
+                  // Turn läuft serverseitig noch (lazy Session-Write)? Dann busy BEHALTEN:
+                  // das Session-Polling (alle 3 s) lädt die Antwort, sobald sie fertig ist.
+                  // Wichtig: busy hier NICHT löschen, sonst pollt niemand mehr und die
+                  // Antwort bleibt für immer leer („Netzwerk unterbrochen" ohne Nachlieferung).
+                  if (await serverTurnStillRunning(chat.id)) return;
+                  // Echte Ursache anzeigen statt pauschal "Verbindung unterbrochen".
+                  const raw = err instanceof Error ? err.message : String(err || "");
+                  setErrorCard(chat.id, aiMsg.id, classifyError(raw), isRetryable(raw), "auto_resume", raw);
+                  markBusy(chat.id, false);
+                });
             }
           }
         }
@@ -2157,15 +2166,24 @@ export default function App() {
           const st = streamStateRef.current[chatId];
           setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
           try {
-            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: e.lastSeq || 0 }, clientMessageId);
+            // lastSeq aus dem REF (nicht aus `e.lastSeq`): ein teilweise erfolgreicher
+            // Resume-Versuch hat den Ref bereits weitergezählt — der feste Wert aus dem
+            // ersten StreamInterrupted würde Deltas doppelt anhängen (Text-Duplikation).
+            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0 }, clientMessageId);
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
           } catch {
             // Erneut abgebrochen oder Resume nicht möglich → nächster Versuch.
           }
         }
-        // Nach 5 Fehlversuchen keine harte Fehlerkarte: Antwort wird nachgeliefert
-        // (Server-Turn läuft unabhängig weiter; Session-Polling lädt sie, sobald fertig).
+        // Nach 5 Fehlversuchen keine harte Fehlerkarte. Läuft der Turn serverseitig noch,
+        // busy BEHALTEN (Session-Polling liefert die Antwort nach); ist er tot, erst dann
+        // die „wird nachgeliefert"-Karte zeigen (sonst bliebe die Bubble ewig leer).
+        if (await serverTurnStillRunning(chatId)) {
+          turnStillRunning = true;
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird auf dem Server verarbeitet …" }));
+          return;
+        }
         setErrorCard(chatId, aiId, "Verbindung unterbrochen – Antwort wird nachgeliefert.", true, "stream_interrupted");
         return;
       }
@@ -2863,7 +2881,7 @@ export default function App() {
                 <Ionicons name="pencil" size={13} color={colors.muted} />
               </Pressable>
             )}
-            <Pressable onPress={() => deleteChat(item.id)} hitSlop={8}>
+            <Pressable onPress={() => (item.remote || item.readOnly ? deleteRemoteChat(item) : deleteChat(item.id))} hitSlop={8}>
               <Ionicons name="close" size={14} color={colors.danger} />
             </Pressable>
           </View>
@@ -2900,7 +2918,58 @@ export default function App() {
   // Server-Verläufe (andere Geräte, WhatsApp, Terminal) hinten dran; in einem Ordner
   // haben sie nichts zu suchen (sie gehören keinem Projektordner).
   const mergedChats = [...folderScoped, ...(folderFilter ? [] : remoteChats)].sort((a, b) => b.updatedAt - a.updatedAt);
-  const filteredChats = chatFilter === "all" ? mergedChats : mergedChats.filter((c) => (c.source || "app") === chatFilter);
+  const filteredChats =
+    chatFilter === "all"
+      ? mergedChats
+      : chatFilter === "app"
+        ? mergedChats.filter((c) => (c.source || "app") === "app" && !c.remote)
+        : chatFilter === "server"
+          ? mergedChats.filter((c) => (c.source || "app") === "app" && c.remote)
+          : mergedChats.filter((c) => (c.source || "app") === chatFilter);
+
+  // Server-Verlauf löschen: liegt nur auf dem Hetzner (anderes Gerät, WhatsApp-Bot,
+  // Terminal-Historie). Ohne Rückfrage, denn löschen ist endgültig — bei Terminal-
+  // Sessions ist es echte pi-Historie.
+  function deleteRemoteChat(chat: Chat) {
+    Alert.alert(
+      chat.source === "terminal" ? "Terminal-Verlauf löschen?" : "Server-Verlauf löschen?",
+      chat.source === "terminal"
+        ? `"${chat.title}" wird auf dem Server gelöscht (pi-Historie ist danach weg).`
+        : `"${chat.title}" wird auf dem Server gelöscht.`,
+      [
+        { text: "Abbrechen", style: "cancel" },
+        {
+          text: "Löschen",
+          style: "destructive",
+          onPress: async () => {
+            const base = serverUrl.replace(/\/+$/, "");
+            const url = `${base}/api/session/${encodeURIComponent(chat.id)}`;
+            try {
+              let r = await fetch(url, { method: "DELETE", headers: authHeaders() });
+              if (r.status === 409) {
+                // Laufender Chat: erst abbrechen, dann erneut versuchen.
+                await fetch(`${base}/api/abort`, {
+                  method: "POST",
+                  headers: authHeaders(),
+                  body: JSON.stringify({ chatId: chat.id }),
+                }).catch(() => {});
+                r = await fetch(url, { method: "DELETE", headers: authHeaders() });
+              }
+              if (!r.ok) {
+                const d = await r.json().catch(() => ({} as any));
+                Alert.alert("Löschen fehlgeschlagen", String(d?.error || `HTTP ${r.status}`));
+                return;
+              }
+              setRemoteChats((cs) => cs.filter((c) => c.id !== chat.id));
+              if (activeChatId === chat.id) setActiveChatId(null);
+            } catch (e: any) {
+              Alert.alert("Löschen fehlgeschlagen", String(e?.message || e));
+            }
+          },
+        },
+      ],
+    );
+  }
 
   function renderMetaList(list: { id: string; name: string; description?: string; cron?: string }[], title: string) {
     if (list.length === 0) {
@@ -3342,7 +3411,7 @@ export default function App() {
           <>
             {renderFolders()}
             <View style={styles.srcFilterRow}>
-              {([["all", "Alle"], ["app", "App"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"]] as const).map(([k, label]) => (
+              {([["app", "Dieses Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"], ["all", "Alle"]] as const).map(([k, label]) => (
                 <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4}>
                   <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{label}</Text>
                 </Pressable>
