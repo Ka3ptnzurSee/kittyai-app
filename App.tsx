@@ -2928,8 +2928,8 @@ export default function App() {
           : mergedChats.filter((c) => (c.source || "app") === chatFilter);
 
   // Server-Verlauf löschen: liegt nur auf dem Hetzner (anderes Gerät, WhatsApp-Bot,
-  // Terminal-Historie). Ohne Rückfrage, denn löschen ist endgültig — bei Terminal-
-  // Sessions ist es echte pi-Historie.
+  // Terminal-Historie). Immer mit Rückfrage, denn löschen ist endgültig — bei
+  // Terminal-Sessions ist es echte pi-Historie.
   function deleteRemoteChat(chat: Chat) {
     Alert.alert(
       chat.source === "terminal" ? "Terminal-Verlauf löschen?" : "Server-Verlauf löschen?",
