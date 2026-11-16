@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -319,4 +319,28 @@ test("fileExtOf liest die Endung", () => {
   assert.strictEqual(fileExtOf("https://x.de/a.PDF?x=1"), "pdf");
   assert.strictEqual(fileExtOf("/generated/ohne"), "");
   assert.strictEqual(fileExtOf(""), "");
+});
+
+test("trimChatsForStorage lässt kleine Verläufe unangetastet", () => {
+  const chats = [{ id: "a", updatedAt: 2, messages: [{ t: 1 }, { t: 2 }] }];
+  assert.deepStrictEqual(trimChatsForStorage(chats), chats);
+});
+
+test("trimChatsForStorage halbiert Nachrichten, wenn der Deckel greift (nie unter 20)", () => {
+  const messages = Array.from({ length: 1000 }, (_, i) => ({ i }));
+  const chats = [{ id: "a", updatedAt: 1, messages }];
+  const out = trimChatsForStorage(chats, 5000, 30_000);
+  assert.ok(JSON.stringify(out).length <= 30_000);
+  assert.ok(out[0].messages.length >= 20);
+  // die NEUESTEN Nachrichten bleiben erhalten
+  assert.deepStrictEqual(out[0].messages[out[0].messages.length - 1], { i: 999 });
+});
+
+test("trimChatsForStorage opfert älteste Chats, den letzten nie", () => {
+  const mk = (id: string, updatedAt: number) => ({ id, updatedAt, messages: [{ x: "y".repeat(500) }] });
+  const chats = [mk("alt", 1), mk("mittel", 2), mk("neu", 3)];
+  const out = trimChatsForStorage(chats, 5000, 1500);
+  assert.ok(out.length < chats.length);
+  assert.ok(out.some((c) => c.id === "neu")); // jüngster überlebt immer
+  assert.ok(!out.some((c) => c.id === "alt"));
 });

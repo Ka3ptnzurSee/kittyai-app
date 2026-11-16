@@ -451,6 +451,37 @@ export function isRetryable(raw: string): boolean {
     && !/context length|maximum context|token limit/i.test(raw);
 }
 
+/** Speicher-Deckel für den lokalen (verschlüsselten) Chat-Store in JSON-Zeichen.
+ *  Ohne Deckel kann `messages` (5.000 je Chat × 50 Chats) den AsyncStorage-Write
+ *  sprengen — dann schlägt das Speichern fehl und der Verlauf ist nach einem
+ *  Neustart weg. */
+export const MAX_STORAGE_CHARS = 8 * 1024 * 1024;
+
+/** Kürzt Chats so, dass der lokale Store nicht überläuft. Reihenfolge bleibt erhalten.
+ *  Stufen: (1) je Chat die letzten `maxMessages`, (2) Nachrichten je Chat halbieren
+ *  (nie unter 20), (3) älteste Chats opfern (nie den letzten). */
+export function trimChatsForStorage<T extends { messages: unknown[]; updatedAt?: number }>(
+  chats: T[],
+  maxMessages = 5000,
+  maxChars = MAX_STORAGE_CHARS,
+): T[] {
+  let list = chats.map((c) => ({ ...c, messages: c.messages.slice(-maxMessages) }));
+  const size = (l: T[]) => JSON.stringify(l).length;
+  while (size(list) > maxChars && list.some((c) => c.messages.length > 20)) {
+    list = list.map((c) =>
+      c.messages.length > 20
+        ? { ...c, messages: c.messages.slice(-Math.max(20, Math.floor(c.messages.length / 2))) }
+        : c,
+    );
+  }
+  while (size(list) > maxChars && list.length > 1) {
+    let oldest = 0;
+    for (let i = 1; i < list.length; i++) if ((list[i].updatedAt ?? 0) < (list[oldest].updatedAt ?? 0)) oldest = i;
+    list = list.filter((_, i) => i !== oldest);
+  }
+  return list;
+}
+
 /** Chat-Titel aus der ersten Nutzernachricht ableiten (gekürzt, an Wortgrenze). */
 export function deriveTitle(raw: string, maxChars = 18): string {
   const cleaned = raw.replace(/\s+/g, " ").trim();
