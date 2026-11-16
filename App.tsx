@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -883,11 +883,14 @@ export default function App() {
       .catch(() => { /* ignorieren */ });
   }
 
-  function authHeaders(): Record<string, string> {
+  // Stabil halten: Verbraucher (z. B. RehaTab) nutzen die Funktion in
+  // useEffect-Deps. Eine bei jedem Render neu erzeugte Funktion trieb dort
+  // eine Endlosschleife (183 Requests/Minute -> Rate-Limit -> Chat-Abbruch).
+  const authHeaders = useCallback((): Record<string, string> => {
     // Token nur über HTTPS senden – kein Klartext-Token im LAN-/Dev-Modus
     const secure = serverUrl.startsWith("https://");
     return { "Content-Type": "application/json", ...(apiToken && secure ? { "X-API-Token": apiToken } : {}) };
-  }
+  }, [serverUrl, apiToken]);
 
   function patchChat(chatId: string, fn: (c: Chat) => Chat) {
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)));
