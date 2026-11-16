@@ -40,6 +40,7 @@ import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { Pressable } from "./components";
 import { RehaTab } from "./RehaTab";
+import { installGlobalErrorHandlers } from "./crashHandler";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
@@ -641,6 +642,8 @@ export default function App() {
   // der Markdown-Renderer löst damit `![](/generated/…)` zu einer ladbaren URL auf.
   useEffect(() => {
     setImageBaseUrl(serverUrl);
+    // Crash-Telemetrie kennt die aktuelle Server-Basis (installiert sich nur einmal).
+    installGlobalErrorHandlers(() => serverUrl);
   }, [serverUrl]);
   const [apiToken, setApiToken] = useState("");
   const [cwd, setCwd] = useState("");
