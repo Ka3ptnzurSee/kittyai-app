@@ -22,9 +22,19 @@ const KEY_PATH = process.env.ASC_KEY_PATH || "credentials/AscApiKey_26AXZ5M8UR.p
 const argv = process.argv.slice(2);
 const DRY = argv.includes("--dry");
 const appIdx = argv.indexOf("--app");
-const APP_ID = appIdx >= 0 ? argv[appIdx + 1] : process.env.ASC_APP_ID || "6818109107";
+const APP_ID = String(appIdx >= 0 ? argv[appIdx + 1] : process.env.ASC_APP_ID || "6818109107");
+if (!/^\d+$/.test(APP_ID)) {
+  console.error(`FEHLER: ungueltige App-ID '${APP_ID}' (nur Ziffern erlaubt)`);
+  process.exit(2);
+}
 
-const keyPem = fs.readFileSync(KEY_PATH, "utf8");
+let keyPem;
+try {
+  keyPem = fs.readFileSync(KEY_PATH, "utf8");
+} catch (e) {
+  console.error(`FEHLER: ASC-Key '${KEY_PATH}' nicht lesbar (${e.code || e.message}) — laeuft 'Restore Apple credentials'?`);
+  process.exit(2);
+}
 
 function b64url(b) {
   return Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -47,6 +57,7 @@ function req(method, path, body) {
         host: "api.appstoreconnect.apple.com",
         path,
         method,
+        timeout: 30000,
         headers: {
           Authorization: `Bearer ${jwt()}`,
           "Content-Type": "application/json",
@@ -68,6 +79,8 @@ function req(method, path, body) {
         });
       },
     );
+    // Ohne hartes Timeout kann der Job am Runner-Limit (90 min) hängen statt zu scheitern.
+    r.on("timeout", () => r.destroy(new Error(`${method} ${path} -> Timeout nach 30 s`)));
     r.on("error", reject);
     if (payload) r.write(payload);
     r.end();
@@ -88,15 +101,21 @@ async function main() {
   console.log(`App-ID ${APP_ID}${DRY ? " (dry)" : ""}`);
 
   let build = null;
-  for (let i = 0; i < 30; i++) {
+  // Apple braucht nach dem Upload typisch 2–10 min; 45 × 20 s = 15 min Deckel.
+  for (let i = 0; i < 45; i++) {
     build = await latestBuild();
     if (build && build.attributes.processingState === "VALID") break;
     console.log(`  warte auf Verarbeitung (${build?.attributes.processingState || "kein Build"}) …`);
     await sleep(20000);
   }
   if (!build) throw new Error("kein Build gefunden");
+  if (build.attributes.processingState !== "VALID") {
+    // Nicht VALID = nicht installierbar. Fehlschlag muss sichtbar sein, nicht still
+    // als "zugewiesen" durchlaufen (sonst sieht der Tester den Build nie).
+    throw new Error(`Build ${build.attributes.version} ist ${build.attributes.processingState}, nicht VALID — nach 15 min Wartezeit aufgegeben`);
+  }
   const ver = build.attributes.version;
-  console.log(`  neuester Build: ${ver} — ${build.attributes.processingState}`);
+  console.log(`  neuester Build: ${ver} — VALID`);
 
   const groups = await req("GET", `/v1/apps/${APP_ID}/betaGroups?limit=50&fields[betaGroups]=name,isInternalGroup,createdDate`);
   const internal = (groups.data || []).filter((g) => g.attributes.isInternalGroup === true);
@@ -110,6 +129,7 @@ async function main() {
     return;
   }
 
+  const failures = [];
   for (const g of targets) {
     try {
       await req("POST", `/v1/betaGroups/${g.id}/relationships/builds`, { data: [{ type: "builds", id: build.id }] });
@@ -121,9 +141,11 @@ async function main() {
         console.log(`  = ${ver} war bereits in ${g.attributes.name}`);
         continue;
       }
-      console.log(`  ! ${g.attributes.name}: ${e.message.slice(0, 160)}`);
+      console.error(`  ! ${g.attributes.name}: ${e.message.slice(0, 160)}`);
+      failures.push(g.attributes.name);
     }
   }
+  if (failures.length) throw new Error(`Zuweisung fehlgeschlagen für: ${failures.join(", ")}`);
 }
 
 main().catch((e) => {
