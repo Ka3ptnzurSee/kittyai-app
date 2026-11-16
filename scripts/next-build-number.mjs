@@ -23,20 +23,7 @@ const ISSUER = process.env.ASC_ISSUER_ID || "1a64f714-48a7-43dd-9737-f41c424b20b
 const KEY_PATH = process.env.ASC_KEY_PATH || "credentials/AscApiKey_26AXZ5M8UR.p8";
 const APP_ID = String(process.env.ASC_APP_ID || "6818109107");
 
-// app.json: expo.version (z. B. "0.2.0"), expo.ios.buildNumber (z. B. "106")
-const appJson = JSON.parse(fs.readFileSync("app.json", "utf8"));
-const version = String(appJson.expo?.version || "");
-const committed = parseInt(String(appJson.expo?.ios?.buildNumber), 10) || 1;
-
-let keyPem;
-try {
-  keyPem = fs.readFileSync(KEY_PATH, "utf8");
-} catch (e) {
-  // Kein Key (z. B. lokaler Lauf ohne "Restore Apple credentials") → committete Zahl.
-  console.error(`ASC-Key '${KEY_PATH}' nicht lesbar (${e.code || e.message}) — nutze committete buildNumber ${committed}`);
-  process.stdout.write(String(committed));
-  process.exit(0);
-}
+let keyPem = null;
 
 function b64url(b) {
   return Buffer.from(b).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -79,29 +66,47 @@ function req(method, path) {
   });
 }
 
-try {
-  // 1) preReleaseVersion zur aktuellen Version finden.
-  const prvs = await req("GET", `/v1/apps/${APP_ID}/preReleaseVersions?limit=100`);
-  const prv = (prvs.data || []).find((p) => p.attributes?.version === version);
+async function main() {
+  // app.json: expo.version (z. B. "0.2.0"), expo.ios.buildNumber (z. B. "106")
+  const appJson = JSON.parse(fs.readFileSync("app.json", "utf8"));
+  const version = String(appJson.expo?.version || "");
+  const committed = parseInt(String(appJson.expo?.ios?.buildNumber), 10) || 1;
 
-  if (!prv) {
-    // Version hat noch keinen Eintrag in ASC → committete buildNumber ist der Startwert.
-    console.error(`Version ${version} hat noch keine preReleaseVersion in ASC — Start bei committeter buildNumber ${committed}`);
-    process.stdout.write(String(committed));
-    process.exit(0);
+  try {
+    keyPem = fs.readFileSync(KEY_PATH, "utf8");
+  } catch (e) {
+    // Kein Key (z. B. lokaler Lauf ohne "Restore Apple credentials") → committete Zahl.
+    console.error(`ASC-Key '${KEY_PATH}' nicht lesbar (${e.code || e.message}) — nutze committete buildNumber ${committed}`);
+    console.log(committed);
+    return;
   }
 
-  // 2) Alle Builds dieser Version holen und höchste Nummer bestimmen.
-  const builds = await req("GET", `/v1/preReleaseVersions/${prv.id}/builds?limit=200&fields[builds]=version`);
-  const nums = (builds.data || [])
-    .map((b) => parseInt(b.attributes?.version, 10))
-    .filter((n) => !Number.isNaN(n));
+  try {
+    // 1) preReleaseVersion zur aktuellen Version finden.
+    const prvs = await req("GET", `/v1/apps/${APP_ID}/preReleaseVersions?limit=100`);
+    const prv = (prvs.data || []).find((p) => p.attributes?.version === version);
 
-  const next = nums.length ? Math.max(...nums) + 1 : committed;
-  console.error(`ASC: ${nums.length} Builds für ${version}, max ${nums.length ? Math.max(...nums) : "-"} → nächste ${next}`);
-  process.stdout.write(String(next));
-} catch (e) {
-  // ASC nicht erreichbar → committete buildNumber (kein harter Abbruch des CI-Laufs).
-  console.error(`ASC-Abfrage fehlgeschlagen (${e.message}) — nutze committete buildNumber ${committed}`);
-  process.stdout.write(String(committed));
+    if (!prv) {
+      // Version hat noch keinen Eintrag in ASC → committete buildNumber ist der Startwert.
+      console.error(`Version ${version} hat noch keine preReleaseVersion in ASC — Start bei committeter buildNumber ${committed}`);
+      console.log(committed);
+      return;
+    }
+
+    // 2) Alle Builds dieser Version holen und höchste Nummer bestimmen.
+    const builds = await req("GET", `/v1/preReleaseVersions/${prv.id}/builds?limit=200&fields[builds]=version`);
+    const nums = (builds.data || [])
+      .map((b) => parseInt(b.attributes?.version, 10))
+      .filter((n) => !Number.isNaN(n));
+
+    const next = nums.length ? Math.max(...nums) + 1 : committed;
+    console.error(`ASC: ${nums.length} Builds für ${version}, max ${nums.length ? Math.max(...nums) : "-"} → nächste ${next}`);
+    console.log(next);
+  } catch (e) {
+    // ASC nicht erreichbar → committete buildNumber (kein harter Abbruch des CI-Laufs).
+    console.error(`ASC-Abfrage fehlgeschlagen (${e.message}) — nutze committete buildNumber ${committed}`);
+    console.log(committed);
+  }
 }
+
+main();
