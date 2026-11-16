@@ -37,6 +37,15 @@ jobs:
         run: |
           eas whoami || (echo "Expo-Session ungueltig -> EXPO_STATE-Secret erneuern"; exit 1)
 
+      # Build-Nummer MUSS pro Lauf steigen: mit appVersionSource=local + autoIncrement
+      # startete jeder CI-Lauf bei der committeten Zahl und kollidierte beim Upload
+      # ("Build number 105 ... has already been used"). github.run_number ist monoton.
+      - name: Build-Nummer setzen
+        run: |
+          BUILD=$((1000 + GITHUB_RUN_NUMBER))
+          node -e "const fs=require('fs');const p='app.json';let s=fs.readFileSync(p,'utf8');s=s.replace(/\"buildNumber\":\s*\"[0-9]+\"/,'\"buildNumber\": \"'+process.argv[1]+'\"');fs.writeFileSync(p,s)" "$BUILD"
+          grep -n 'buildNumber' app.json
+
       # Kein CI=1 im Build-Step: mit CI=1 verlangt die EAS-CLI zwingend EXPO_TOKEN
       # und ignoriert die restaurierte Session (.expo/state.json aus EXPO_STATE).
       - name: Build iOS (local, umgeht EAS-Cloud-Kontingent)
@@ -52,3 +61,11 @@ jobs:
           echo "IPA gefunden: $IPA"
           if [ -z "$IPA" ]; then echo "Keine .ipa gefunden"; exit 1; fi
           eas submit --platform ios --profile production --non-interactive --path "$IPA"
+
+      # Nach dem Upload den Build der internen Tester-Gruppe zuweisen, sonst taucht er
+      # in TestFlight unter "Interne Tester" nicht auf.
+      - name: Build internen Testern zuweisen
+        env:
+          APPLE_CREDS: ${{ secrets.APPLE_CREDS }}
+        run: |
+          if [ -f scripts/assign-testflight-group.mjs ]; then node scripts/assign-testflight-group.mjs; else echo "kein Skript"; fi

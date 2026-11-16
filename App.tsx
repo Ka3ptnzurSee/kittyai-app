@@ -43,7 +43,26 @@ import { RehaTab } from "./RehaTab";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
 type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
-type Chat = { id: string; title: string; messages: Msg[]; createdAt: number; updatedAt: number; folderId?: string | null; model?: string };
+type ChatSource = "app" | "whatsapp" | "terminal";
+type Chat = {
+  id: string;
+  title: string;
+  messages: Msg[];
+  createdAt: number;
+  updatedAt: number;
+  folderId?: string | null;
+  model?: string;
+  /** Woher der Verlauf kommt: App (Server-Session), WhatsApp (GOWA-Bots), Terminal (pi auf dem Hetzner). */
+  source?: ChatSource;
+  /** Nur lesbar (Terminal-Verläufe gehören dem pi-Prozess, WhatsApp-Antworten gehen über WhatsApp). */
+  readOnly?: boolean;
+  /** Liegt (noch) nur auf dem Server, nicht als lokaler Chat auf diesem Gerät. */
+  remote?: boolean;
+  /** Stabile Server-Identität (Session-Dateiname) — verhindert doppelte Einträge. */
+  serverKey?: string;
+  /** Vorschau der letzten Nachricht vom Server (remote-Chats haben noch keinen Verlauf geladen). */
+  preview?: string;
+};
 type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
 type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
 type ConnectedPlatform = { id: string; name: string; status: "ok" | "error" | "warning"; detail: string };
@@ -655,6 +674,11 @@ export default function App() {
   const [connectorForm, setConnectorForm] = useState<{ name: string; agent: string; description: string }>({ name: "", agent: "", description: "" });
   const loadedRef = useRef(false);
   const chatsRef = useRef<Chat[]>([]);
+  // Server-Verläufe, die es auf DIESEM Gerät noch nicht gibt (anderes iPhone/iPad,
+  // WhatsApp-Bot, Terminal-Sessions). Werden nicht verschlüsselt gespeichert, sondern
+  // bei jedem Sync frisch vom Server geholt — die Wahrheit liegt auf dem Server.
+  const [remoteChats, setRemoteChats] = useState<Chat[]>([]);
+  const [chatFilter, setChatFilter] = useState<"all" | ChatSource>("all");
   // Storage-Keys, deren verschlüsselter Bestand vorhanden, aber nicht lesbar ist
   // (Key weg/korrupt bzw. Lesefehler) → NICHT mit leerem Stand überschreiben (kein stiller Datenverlust).
   const storageBlockedRef = useRef<Set<string>>(new Set());
@@ -910,6 +934,18 @@ export default function App() {
 
   // chatsRef aktuell halten (für Helfer, die außerhalb von State-Closures lesen müssen).
   useEffect(() => { chatsRef.current = chats; }, [chats]);
+
+  // Server-Verläufe (andere Geräte / WhatsApp / Terminal) laden: beim Öffnen des
+  // Chats-Tabs und dann alle 45 s, solange keine Unterhaltung offen ist.
+  useEffect(() => {
+    if (tab !== "chats" || !loadedRef.current) return;
+    syncServerChats();
+    const iv = setInterval(() => {
+      if (!activeChatId) syncServerChats();
+    }, 45000);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, serverUrl, apiToken, activeChatId]);
 
   // Live-Sync/Reload: finale Antwort aus der Server-Session-Datei holen (überlebt die
   // turnRegistry-TTL) und eine leere/fehlerhafte KI-Bubble damit auffüllen.
@@ -1531,7 +1567,12 @@ export default function App() {
   useEffect(() => {
     if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
     const t = setTimeout(() => {
-      const trimmed = chats.slice(0, 50).map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-200) }));
+      // Nur-lesbare Verläufe (WhatsApp/Terminal) NICHT lokal speichern: sie werden bei
+      // jedem Sync frisch vom Server geholt und können sehr groß sein (bis ~7 MB).
+      const trimmed = chats
+        .filter((c) => !c.readOnly)
+        .slice(0, 50)
+        .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-200) }));
       secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
         .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
         .catch(() => warnWriteFailure(CHATS_ENC_KEY));
@@ -1606,8 +1647,115 @@ export default function App() {
     setPendingDocuments([]);
   }
 
+  // Server-Verläufe holen (App-Chats anderer Geräte, WhatsApp, Terminal) und alles
+  // herausfiltern, was auf diesem Gerät schon als lokaler Chat liegt. Der Abgleich
+  // läuft über die chatId-Hashes (Parameter `ids`) und die Session-Datei als Schlüssel.
+  async function syncServerChats() {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const locals = chatsRef.current;
+      const ids = locals
+        .map((c) => c.id)
+        .filter((id) => id && !id.startsWith("file:"));
+      // Query manuell bauen: URLSearchParams ist in Hermes unzuverlässig.
+      let qs = "limit=400";
+      if (ids.length) qs += `&ids=${encodeURIComponent(ids.slice(0, 300).join(","))}`;
+      const res = await fetch(`${base}/api/chats?${qs}`, { headers: authHeaders() });      if (!res.ok) return;
+      const data = await res.json();
+      const list: any[] = Array.isArray(data?.chats) ? data.chats : [];
+      const localIds = new Set(locals.map((c) => c.id));
+      const localKeys = new Set(locals.map((c) => c.serverKey).filter(Boolean) as string[]);
+      const next: Chat[] = [];
+      for (const c of list) {
+        if (!c || !c.id) continue;
+        if (c.known === true) continue; // liegt schon lokal auf diesem Gerät
+        if (localIds.has(c.id)) continue;
+        if (c.key && localKeys.has(c.key)) continue; // schon als lokaler Chat übernommen
+        const source: ChatSource = c.source === "whatsapp" ? "whatsapp" : c.source === "terminal" ? "terminal" : "app";
+        const updated = Number(c.updatedAt) || Date.now();
+        next.push({
+          id: String(c.id),
+          title: String(c.title || "Ohne Titel"),
+          messages: [],
+          createdAt: updated,
+          updatedAt: updated,
+          source,
+          readOnly: source !== "app",
+          remote: true,
+          serverKey: c.key ? String(c.key) : undefined,
+          preview: String(c.preview || ""),
+        });
+      }
+      setRemoteChats(next);
+    } catch {
+      // offline → alte Liste behalten
+    }
+  }
+
+  // Verlauf eines Server-Chats laden und als lokalen Chat übernehmen.
+  async function adoptRemoteChat(r: Chat) {
+    const chat: Chat = { ...r, remote: false, createdAt: Date.now() };
+    setChats((cs) => [chat, ...cs.filter((c) => c.id !== chat.id)]);
+    setRemoteChats((rs) => rs.filter((c) => c.id !== chat.id));
+    setActiveChatId(chat.id);
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/session/${encodeURIComponent(chat.id)}`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const data = await res.json();
+      const msgs: Msg[] = Array.isArray(data?.messages)
+        ? data.messages.slice(-300).map((m: any, i: number) => ({
+            id: String(m.id || `s${i}`),
+            role: m.role === "user" ? "user" : "assistant",
+            text: String(m.text || ""),
+            images: Array.isArray(m.images) && m.images.length ? m.images : undefined,
+          }))
+        : [];
+      if (!msgs.length) return;
+      setChats((cs) => cs.map((c) => (c.id === chat.id ? { ...c, messages: msgs } : c)));
+    } catch {
+      // Verlauf bleibt leer — beim nächsten Öffnen erneut
+    }
+  }
+
+  // Nur-lesbaren Verlauf als Kopie in die App übernehmen (Server kopiert die Session-Datei,
+  // der Original-Verlauf bleibt unangetastet).
+  async function forkReadOnlyChat(c: Chat) {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/fork`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ chatId: c.id }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data?.chatId) throw new Error("keine Chat-ID zurückgegeben");
+      const copy: Chat = {
+        id: String(data.chatId),
+        title: `${c.title} (Kopie)`,
+        messages: c.messages,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        source: "app",
+      };
+      setChats((cs) => [copy, ...cs]);
+      setActiveChatId(copy.id);
+      Alert.alert("Übernommen", "Der Verlauf liegt jetzt als eigener Chat in der App — hier kannst du weiterschreiben.");
+    } catch (e) {
+      Alert.alert("Übernehmen fehlgeschlagen", e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function openChat(id: string | null) {
     clearPendingAttachments();
+    if (id) {
+      const remote = remoteChats.find((c) => c.id === id);
+      if (remote) {
+        adoptRemoteChat(remote);
+        return;
+      }
+    }
     setActiveChatId(id);
   }
 
@@ -1904,6 +2052,22 @@ export default function App() {
 
   async function send(text?: string) {
     const message = (text ?? input).trim();
+    // Nur-lesbare Verläufe (WhatsApp, Terminal) nie anschreiben — der Verlauf gehört
+    // einem anderen Prozess/Kanal. Stattdessen den Übernehmen-Weg anbieten.
+    const activeMeta = chatsRef.current.find((c) => c.id === activeChatId);
+    if (activeMeta?.readOnly) {
+      Alert.alert(
+        activeMeta.source === "whatsapp" ? "WhatsApp-Verlauf" : "Terminal-Verlauf",
+        activeMeta.source === "whatsapp"
+          ? "Antworten laufen über WhatsApp. Du kannst den Verlauf hier lesen oder als Kopie in die App übernehmen."
+          : "Dieser Verlauf gehört dem pi-Prozess im Terminal. Über 'Übernehmen' wird eine Kopie erstellt, in der du hier weiterschreiben kannst.",
+        [
+          { text: "Schließen", style: "cancel" },
+          { text: "Als Kopie übernehmen", onPress: () => { if (activeMeta) forkReadOnlyChat(activeMeta); } },
+        ],
+      );
+      return;
+    }
     if (!message && pendingImages.length === 0 && pendingFiles.length === 0 && pendingDocuments.length === 0) return;
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
@@ -2650,28 +2814,55 @@ export default function App() {
 
   function renderChatItem({ item }: { item: Chat }) {
     const last = item.messages[item.messages.length - 1];
-    const preview = last ? last.text.replace(/\n/g, " ").slice(0, 80) : "Neue Unterhaltung";
+    const preview = last
+      ? last.text.replace(/\n/g, " ").slice(0, 80)
+      : item.preview
+        ? item.preview.replace(/\n/g, " ").slice(0, 80)
+        : item.remote
+          ? "Verlauf vom Server"
+          : "Neue Unterhaltung";
     const isActive = item.id === activeChatId;
     // Status-Ampel: rot = arbeitet (busy), grün = fertig (hat Nachrichten), weiß = unbenutzt (leer)
     const isBusy = busyChatIds.has(item.id);
     const hasMessages = item.messages.length > 0;
     const statusColor = isBusy ? colors.danger : hasMessages ? colors.success : "#ffffff";
+    // Herkunft: WhatsApp / Terminal / anderes Gerät. Ohne Markierung sieht man nicht,
+    // welcher Verlauf von wo kommt — und genau das war der Punkt.
+    const srcBadge =
+      item.source === "whatsapp"
+        ? { text: "WhatsApp", color: "#25D366" }
+        : item.source === "terminal"
+          ? { text: "Terminal", color: "#8A8A8E" }
+          : item.remote
+            ? { text: "Server", color: colors.accent }
+            : null;
+    const avatarIcon = item.source === "whatsapp" ? "logo-whatsapp" : item.source === "terminal" ? "terminal-outline" : "chatbubbles-outline";
     return (
-      <Pressable onPress={() => openChat(item.id)} onLongPress={() => setAssignChatId(item.id)} style={[styles.chatItem, isActive && styles.chatItemActive]}>
-        <View style={styles.chatAvatar}>
-          <Ionicons name="chatbubbles-outline" size={20} color={colors.accent} />
+      <Pressable onPress={() => openChat(item.id)} onLongPress={() => (item.readOnly ? undefined : setAssignChatId(item.id))} style={[styles.chatItem, isActive && styles.chatItemActive]}>
+        <View style={[styles.chatAvatar, item.source === "whatsapp" && { backgroundColor: "#E7F9EE" }, item.source === "terminal" && { backgroundColor: "#EFEFF2" }]}>
+          <Ionicons name={avatarIcon as any} size={20} color={item.source === "whatsapp" ? "#128C4A" : item.source === "terminal" ? "#5D5D5D" : colors.accent} />
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
         </View>
         <View style={styles.chatInfo}>
-          <Text style={styles.chatTitle} numberOfLines={1}>{item.title}</Text>
+          <View style={styles.chatTitleRow}>
+            <Text style={styles.chatTitle} numberOfLines={1}>{item.title}</Text>
+            {srcBadge ? (
+              <View style={[styles.srcBadge, { borderColor: srcBadge.color }]}>
+                <Text style={[styles.srcBadgeText, { color: srcBadge.color }]}>{srcBadge.text}</Text>
+              </View>
+            ) : null}
+            {item.readOnly ? <Ionicons name="lock-closed" size={11} color={colors.muted} /> : null}
+          </View>
           <Text style={styles.chatPreview} numberOfLines={1}>{preview}</Text>
         </View>
         <View style={styles.chatRight}>
           <Text style={styles.chatTime}>{formatTime(item.updatedAt)}</Text>
           <View style={styles.chatRightRow}>
-            <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8}>
-              <Ionicons name="pencil" size={13} color={colors.muted} />
-            </Pressable>
+            {item.readOnly ? null : (
+              <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8}>
+                <Ionicons name="pencil" size={13} color={colors.muted} />
+              </Pressable>
+            )}
             <Pressable onPress={() => deleteChat(item.id)} hitSlop={8}>
               <Ionicons name="close" size={14} color={colors.danger} />
             </Pressable>
@@ -2705,7 +2896,11 @@ export default function App() {
   }
 
   const sortedChats = [...chats].sort((a, b) => b.updatedAt - a.updatedAt);
-  const filteredChats = folderFilter ? sortedChats.filter((c) => c.folderId === folderFilter) : sortedChats;
+  const folderScoped = folderFilter ? sortedChats.filter((c) => c.folderId === folderFilter) : sortedChats;
+  // Server-Verläufe (andere Geräte, WhatsApp, Terminal) hinten dran; in einem Ordner
+  // haben sie nichts zu suchen (sie gehören keinem Projektordner).
+  const mergedChats = [...folderScoped, ...(folderFilter ? [] : remoteChats)].sort((a, b) => b.updatedAt - a.updatedAt);
+  const filteredChats = chatFilter === "all" ? mergedChats : mergedChats.filter((c) => (c.source || "app") === chatFilter);
 
   function renderMetaList(list: { id: string; name: string; description?: string; cron?: string }[], title: string) {
     if (list.length === 0) {
@@ -3005,6 +3200,20 @@ export default function App() {
               </View>
             ) : null}
 
+            {activeChat.readOnly ? (
+              <View style={styles.readOnlyBar}>
+                <Ionicons name="lock-closed-outline" size={14} color={colors.muted} />
+                <Text style={styles.readOnlyText} numberOfLines={2}>
+                  {activeChat.source === "terminal"
+                    ? "Terminal-Verlauf — hier nur lesbar. Weiterschreiben im Terminal (pi --resume)."
+                    : "WhatsApp-Verlauf — Antworten laufen über WhatsApp."}
+                </Text>
+                <Pressable onPress={() => forkReadOnlyChat(activeChat)} hitSlop={8} style={styles.readOnlyBtn}>
+                  <Text style={styles.readOnlyBtnText}>Übernehmen</Text>
+                </Pressable>
+              </View>
+            ) : null}
+
             <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined}>
               {replyingTo ? (
                 <View style={styles.replyBar}>
@@ -3132,6 +3341,16 @@ export default function App() {
         ) : (
           <>
             {renderFolders()}
+            <View style={styles.srcFilterRow}>
+              {([["all", "Alle"], ["app", "App"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"]] as const).map(([k, label]) => (
+                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4}>
+                  <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{label}</Text>
+                </Pressable>
+              ))}
+              <Pressable onPress={() => syncServerChats()} style={styles.srcFilterChip} hitSlop={6}>
+                <Ionicons name="refresh" size={13} color={colors.muted} />
+              </Pressable>
+            </View>
             <FlatList
               data={filteredChats}
               keyExtractor={(c) => c.id}
@@ -3615,6 +3834,18 @@ const styles = StyleSheet.create({
   chatInfo: { flex: 1 },
   chatTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
   chatPreview: { fontSize: 13, color: colors.muted, marginTop: 2 },
+  chatTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  srcBadge: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 },
+  srcBadgeText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.3 },
+  srcFilterRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingBottom: 8 },
+  srcFilterChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  srcFilterChipActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  srcFilterText: { fontSize: 12, color: colors.muted, fontWeight: "600" },
+  srcFilterTextActive: { color: colors.accent },
+  readOnlyBar: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface2 },
+  readOnlyText: { flex: 1, fontSize: 12, color: colors.muted },
+  readOnlyBtn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: colors.accentSoft },
+  readOnlyBtnText: { fontSize: 12, fontWeight: "700", color: colors.accent },
   chatRight: { alignItems: "flex-end", gap: 6 },
   chatTime: { fontSize: 11, color: colors.muted },
   micBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center" },

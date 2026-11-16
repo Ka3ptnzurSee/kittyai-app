@@ -53,3 +53,6 @@ credentials.json
 # build tooling logs
 *.log
 build-monitor.log
+
+# Expo-Web-Export (Build-Artefakt, nicht einchecken)
+web-dist/
