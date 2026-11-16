@@ -354,9 +354,12 @@ export function cronLabel(cron: string): string {
 // Verwerfen von Chunks, kein unbegrenztes Puffer-Wachstum).
 // ---------------------------------------------------------------------------
 
-/** Einzelne SSE-Events, die größer sind, werden verworfen statt synchron auf dem
- *  JS-Thread geparst — verhindert UI-Jank durch ein einzelnes Riesen-Event. */
-const MAX_EVENT_CHARS = 65536;
+/** Obergrenze für ein einzelnes SSE-Event. Der Server schickt die komplette Antwort
+ *  (Snapshot) + alle Tool-Karten + alle DIL-Widgets in EINEM `done`-Event — gemessen
+ *  bis 135 KB (148 Tool-Calls). Bei 64 KB wurde so ein Event stillschweigend
+ *  verworfen: Antwort/Bilder/Diagramme fehlten dann ohne jede Fehlermeldung.
+ *  4 MB ist reichlich Luft, begrenzt aber weiterhin pathologische Events. */
+const MAX_EVENT_CHARS = 4 * 1024 * 1024;
 
 /** Parst einen einzelnen SSE-Event-Block (Zeilen bis zur Trennzeile `\n\n`). */
 function parseSseEvent(raw: string): unknown {
@@ -367,7 +370,7 @@ function parseSseEvent(raw: string): unknown {
     .map((l) => l.slice(5).trim())
     .join("\n");
   if (!data) return undefined;
-  if (data.length > MAX_EVENT_CHARS) return undefined; // Riesen-Event nicht synchron parsen
+  if (data.length > MAX_EVENT_CHARS) return undefined; // nur pathologische Events (> 4 MB) verwerfen
   try {
     return JSON.parse(data);
   } catch {
@@ -401,10 +404,12 @@ export class SseParser {
       const evt = parseSseEvent(raw);
       if (evt !== undefined) out.push(evt);
     }
-    // Deckel: riesiger Rest ohne Delimiter (hängendes/kaputtes Event) → kürzen,
-    // damit der Puffer nicht unbegrenzt wächst.
+    // Deckel gegen unbegrenztes Wachstum: ein unvollständiges Event, das den Puffer
+    // sprengt, ist ein kaputter Stream → verwerfen. NICHT den Kopf abschneiden, das
+    // würde ein gültiges JSON zerstören und das Event still verlieren (genau so sind
+    // vorher große `done`-Events verschwunden).
     if (this.buffer.length > this.maxBufferChars) {
-      this.buffer = this.buffer.slice(-this.maxBufferChars);
+      this.buffer = "";
     }
     return out;
   }

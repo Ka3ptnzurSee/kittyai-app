@@ -154,8 +154,8 @@ const CHATS_ENC_KEY = "pi-chats-v2.enc";
 const FOLDERS_ENC_KEY = "pi-folders-v1.enc";
 const STREAM_TIMEOUT_MS = 65 * 60 * 1000; // 65 min – über PROMPT_TIMEOUT_MS (60 min), damit der Server-Timeout (fehlgeschlagener Turn) VOR dem Client-Abbruch als Fehler-Event ankommt
 const STREAM_STALL_MS = 45 * 1000; // Kein-Datenfluss-Watchdog: Server pingt alle 15 s → 45 s Stille = Verbindung still gestorben (iOS/Netz tötet Socket ohne EOF). Reconnect/Resume statt ewig hängen.
-const MAX_REPLY_CHARS = 20000; // Antworttext pro Nachricht deckeln (OOM-Schutz)
-const MAX_BUFFER_CHARS = 200000; // SSE-Parser-Puffer deckeln
+const MAX_REPLY_CHARS = 500000; // OOM-Schutz, hoch genug für echte Antworten (vorher 20 000 → lange Antworten wurden mitten im Wort abgeschnitten)
+const MAX_BUFFER_CHARS = 8 * 1024 * 1024; // SSE-Puffer (ein `done`-Event kann ~135 KB+ tragen)
 const MAX_THINKING_CHARS = 16000; // Denk-Text deckeln (vorher 800 → schnitt Reasoning sichtbar ab)
 const MAX_TITLE_CHARS = 22;
 const MAX_FOLDER_NAME_CHARS = 40;
@@ -1575,7 +1575,8 @@ export default function App() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
 
-  // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat)
+  // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 5000 Nachrichten je Chat)
+  // 5000 statt 200: ältere Nachrichten verschwanden sonst beim Neuladen endgültig.
   useEffect(() => {
     if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
     const t = setTimeout(() => {
@@ -1584,7 +1585,7 @@ export default function App() {
       const trimmed = chats
         .filter((c) => !c.readOnly)
         .slice(0, 50)
-        .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-200) }));
+        .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: c.messages.slice(-5000) }));
       secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
         .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
         .catch(() => warnWriteFailure(CHATS_ENC_KEY));
@@ -2486,6 +2487,9 @@ export default function App() {
       activity: m.activity && m.activity.length ? m.activity : finalActivity,
       dil: finalDil !== undefined ? finalDil : m.dil,
       images: finalImages && finalImages.length ? finalImages : m.images,
+      // Fehlerkarte eines Zwischenfehlers (Provider-Retry, Tool-Fehler) darf nicht
+      // über der fertigen Antwort stehen bleiben → beim Abschluss immer löschen.
+      error: undefined,
     }));
     if (speak && finalReply.trim()) speakReply(finalReply.trim());
     } catch (e) {

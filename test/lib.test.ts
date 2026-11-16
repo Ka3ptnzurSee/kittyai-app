@@ -147,10 +147,29 @@ test("SseParser behandelt CRLF über eine Chunk-Grenze", () => {
   assert.deepStrictEqual(out, [{ type: "a" }, { type: "b" }]);
 });
 
-test("SseParser verwirft übergroße Einzel-Events statt sie zu parsen", () => {
-  const p = new SseParser(1000000);
-  const huge = `data: {"type":"text","data":"${"x".repeat(70000)}"}\n\n`;
-  assert.deepStrictEqual(p.push(huge), []); // > MAX_EVENT_CHARS (65536) → verworfen
+test("SseParser parst ein großes done-Event (148 Tool-Karten, ~600 KB) statt es zu verwerfen", () => {
+  // Regression: MAX_EVENT_CHARS lag bei 64 KB → echte done-Events (bis 135 KB,
+  // mit Tool-Karten auch ~600 KB) wurden STILL verworfen: Antwort/DIL fehlten.
+  const p = new SseParser();
+  const activity = Array.from({ length: 148 }, (_, i) => ({ id: `t${i}`, tool: "bash", status: "ok", result: "x".repeat(4000) }));
+  const payload = JSON.stringify({ type: "done", data: { reply: "Antwort", activity } });
+  assert.ok(payload.length > 500000, `Payload zu klein: ${payload.length}`);
+  const out = p.push(`data: ${payload}\n\n`);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual((out[0] as { type: string }).type, "done");
+});
+
+test("SseParser verwirft nur pathologisch große Events (> 4 MB)", () => {
+  const p = new SseParser(10000000);
+  const huge = `data: {"type":"text","data":"${"x".repeat(5 * 1024 * 1024)}"}\n\n`;
+  assert.deepStrictEqual(p.push(huge), []);
+});
+
+test("SseParser wirft bei Puffer-Überlauf den unvollständigen Rest weg (kein Kopf-Abschneiden)", () => {
+  const p = new SseParser(1000);
+  assert.deepStrictEqual(p.push('data: {"type":"text","data":"' + "y".repeat(2000)), []); // kein Delimiter → Puffer > Deckel
+  // Folge-Event muss danach wieder sauber geparst werden
+  assert.deepStrictEqual(p.push('data: {"type":"ok"}\n\n'), [{ type: "ok" }]);
 });
 
 test("SseParser überspringt kaputtes JSON und liefert Folge-Events", () => {
