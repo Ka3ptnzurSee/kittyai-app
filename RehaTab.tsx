@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -1012,6 +1012,197 @@ function QuellenView({ data, onSync, busy }: { data: ComebackData; onSync: () =>
 
 // --- Hauptkomponente ---------------------------------------------------------
 
+/** Lagebild als Text: berechnete Zahlen aus /api/comeback, damit der Coach nicht raten muss. */
+function rehaLagebild(data: ComebackData | null): string {
+  if (!data) return "";
+  const s: any = data.state || {};
+  const r: any = data.result || {};
+  const DOW = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
+  const tagName = DOW[(Number(s.weekday) || 1) - 1] || "";
+  const planHeute = (data.wochenplan || []).find((w: any) => w.wochentag === tagName);
+  const soll: any = planHeute?.soll || {};
+  const tiles: any[] = (data.wellness_tiles || []).filter((t: any) => t.wert);
+  const lsi = Object.entries(s.lsi || {}).map(([name, wert]) => `- ${name}: ${Math.round(Number(wert))} %`);
+  const offen: string[] = [...(r.warnungen || []), ...(r.blockers || [])];
+  const sync: any = data.sync || {};
+  return [
+    "[Reha-Lagebild – Zahlen aus dem Reha-Backend]",
+    `Heute: ${s.today} (${tagName}), Tag ${s.op_day} nach OP rechtes Knie (Kreuzband).`,
+    `Ampel: ${r.ampel || "?"}${ampelZusatz(r.heute)}`,
+    `Heute geplant: ${soll.einheit || "frei"}${soll.intensitaet ? " (" + soll.intensitaet + ")" : ""}`,
+    ...(soll.details || []).map((x: string) => `  · ${x}`),
+    `Check-in heute: ${
+      s.has_checkin
+        ? `Schmerz ${s.pain ?? "?"}/10, Schwellung ${s.swelling ?? "?"}/3${s.note ? ", Notiz: " + s.note : ""}`
+        : "noch keiner"
+    }`,
+    "",
+    "Garmin/Trends (Delta = Vergleich zum 7-Tage-Schnitt):",
+    ...(tiles.length ? tiles.map((t) => `- ${t.label}: ${t.wert}${t.delta ? " (" + t.delta + ")" : ""}${t.tag ? " [vom " + t.tag + "]" : ""}`) : ["- keine Wellness-Daten"]),
+    "",
+    "LSI (rechts = operiert):",
+    ...(lsi.length ? lsi : ["- keine Messung"]),
+    "",
+    `Kraft-Einheiten letzte 7 Tage: ${s.strength_week ?? 0} (Soll 3) · Readiness ${s.readiness ?? "?"} · ACWR ${s.acwr ?? "n/a"}`,
+    "",
+    "Offene Punkte:",
+    ...(offen.length ? offen.map((x) => `- ${x}`) : ["- keine"]),
+    "",
+    `Datenstand: letzter Garmin-Sync ${sync.last_ok || "unbekannt"}${sync.last_ok_age_h != null ? " (vor " + Math.round(sync.last_ok_age_h) + " h)" : ""}.`,
+    "[/Reha-Lagebild]",
+    "",
+    "Regeln: beziehe dich auf diese Zahlen statt zu raten; keine Diagnosen, keine Medikamentenempfehlungen;",
+    "bei Warnzeichen (Fieber, zunehmende Schwellung, Instabilität, Atemnot) klar auf Arzt/Notruf verweisen;",
+    "antworte knapp auf Deutsch mit konkreten Sätzen/Gewichten/Zeiten.",
+    "",
+    "Frage: ",
+  ].join("\n");
+}
+
+/** result.heute kann ein String oder ein Objekt {einheit, details} sein. */
+function ampelZusatz(heute: any): string {
+  if (!heute) return "";
+  if (typeof heute === "string") return " – " + heute;
+  const einheit = heute.einheit || heute.text || "";
+  return einheit ? " – " + einheit : "";
+}
+
+/** Ganz einfache Fett-Darstellung fuer **Text** (Markdown aus dem Chat). */
+function FettText({ text, style }: { text: string; style?: any }) {
+  const teile = String(text).split(/\*\*(.+?)\*\*/g);
+  return (
+    <Text style={style}>
+      {teile.map((teil, i) =>
+        i % 2 === 1 ? (
+          <Text key={i} style={{ fontWeight: "700" }}>
+            {teil}
+          </Text>
+        ) : (
+          teil
+        ),
+      )}
+    </Text>
+  );
+}
+
+/** Reha-Coach: Chat mit Reha-Lagebild (wie Arnes /trainer). Server stellt die
+ *  berechneten Zahlen voran (mode="reha"), damit das Modell nicht raten muss. */
+function RehaCoach({
+  base,
+  authHeaders,
+  data,
+  onClose,
+}: {
+  base: string;
+  authHeaders?: () => Record<string, string>;
+  data: ComebackData | null;
+  onClose: () => void;
+}) {
+  const [verlauf, setVerlauf] = useState<{ role: "du" | "coach"; text: string }[]>([]);
+  const [text, setText] = useState("");
+  const [laeuft, setLaeuft] = useState(false);
+  const scrollRef = useRef<ScrollView | null>(null);
+
+  const VORSCHLAEGE = [
+    "Was soll ich heute machen?",
+    "Ist die Ampel so in Ordnung?",
+    "Warum ist der LSI wichtig?",
+  ];
+
+  const senden = useCallback(
+    async (frage: string) => {
+      const f = frage.trim();
+      if (!f || laeuft) return;
+      setText("");
+      setVerlauf((v) => [...v, { role: "du", text: f }]);
+      setLaeuft(true);
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (authHeaders) Object.assign(headers, authHeaders());
+        const res = await fetch(base + "/api/chat", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ message: rehaLagebild(data) + f, chatId: "reha-coach" }),
+        });
+        const j = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          // 502/503/429 = Server gerade ausgelastet (alle Engines beschaeftigt).
+          const busy = res.status === 502 || res.status === 503 || res.status === 429;
+          throw new Error(
+            busy ? "Server gerade ausgelastet – bitte in einer Minute nochmal fragen." : j?.error || "HTTP " + res.status,
+          );
+        }
+        const antwort = String(j?.reply || "").trim() || "(keine Antwort)";
+        setVerlauf((v) => [...v, { role: "coach", text: antwort }]);
+      } catch (e) {
+        setVerlauf((v) => [...v, { role: "coach", text: "Fehler: " + String((e as any)?.message || e) }]);
+      } finally {
+        setLaeuft(false);
+      }
+    },
+    [base, authHeaders, laeuft, data],
+  );
+
+  return (
+    <View style={styles.coachOverlay}>
+      <View style={styles.coachHead}>
+        <Ionicons name="chatbubbles" size={18} color={colors.accent} />
+        <Text style={styles.coachTitle}>Reha-Coach</Text>
+        <Pressable onPress={onClose} hitSlop={12} accessibilityRole="button" accessibilityLabel="Coach schließen">
+          <Ionicons name="close" size={20} color={colors.muted} />
+        </Pressable>
+      </View>
+      <Text style={styles.hint}>
+        Der Coach bekommt Ampel, Plan, Garmin-Werte und LSI als Zahlen mitgeschickt — keine Diagnosen, nur Einordnung.
+      </Text>
+      <ScrollView
+        ref={scrollRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ gap: 8, paddingVertical: 8 }}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        keyboardShouldPersistTaps="handled"
+      >
+        {verlauf.length === 0 ? (
+          <Text style={styles.hint}>Frag etwas zu heute, zur Ampel oder zu einer Übung.</Text>
+        ) : null}
+        {verlauf.map((m, i) => (
+          <View key={i} style={[styles.coachBubble, m.role === "du" ? styles.coachBubbleDu : styles.coachBubbleCoach]}>
+            <FettText text={m.text} style={[styles.coachText, m.role === "du" ? styles.coachTextDu : null]} />
+          </View>
+        ))}
+        {laeuft ? <Text style={styles.hint}>Coach denkt nach …</Text> : null}
+      </ScrollView>
+      <View style={styles.legendRow}>
+        {VORSCHLAEGE.map((v) => (
+          <Pressable key={v} onPress={() => senden(v)} style={styles.coachChip} accessibilityRole="button">
+            <Text style={styles.coachChipText}>{v}</Text>
+          </Pressable>
+        ))}
+      </View>
+      <View style={styles.coachInputRow}>
+        <TextInput
+          style={[styles.input, { flex: 1 }]}
+          value={text}
+          onChangeText={setText}
+          placeholder="Frage an den Reha-Coach"
+          placeholderTextColor={colors.muted}
+          maxLength={1000}
+          onSubmitEditing={() => senden(text)}
+          editable={!laeuft}
+        />
+        <Pressable
+          style={[styles.btn, styles.coachSend, laeuft ? styles.btnDisabled : null]}
+          onPress={() => senden(text)}
+          disabled={laeuft}
+          accessibilityRole="button"
+        >
+          <Text style={styles.btnText}>Senden</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 export function RehaTab({
   serverUrl,
   authHeaders,
@@ -1028,6 +1219,7 @@ export function RehaTab({
   const [toast, setToast] = useState<string | null>(null);
   const [toastMs, setToastMs] = useState(2600);
   const [toastWarn, setToastWarn] = useState(false);
+  const [coachOffen, setCoachOffen] = useState(false);
 
   const load = useCallback(async (refresh = false) => {
     try {
@@ -1158,6 +1350,16 @@ export function RehaTab({
             {sync.next_run ? <Text style={styles.syncBarText}> · nächster {sync.next_run}</Text> : null}
           </View>
         </View>
+        <Pressable
+          onPress={() => setCoachOffen(true)}
+          style={styles.coachBtn}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Reha-Coach öffnen"
+        >
+          <Ionicons name="chatbubbles-outline" size={16} color={colors.accent} />
+          <Text style={styles.coachBtnText}>Coach</Text>
+        </Pressable>
         <Pressable onPress={() => load(true)} hitSlop={10} accessibilityRole="button" accessibilityLabel="Neu laden">
           <Ionicons name="refresh" size={18} color={colors.accent} />
         </Pressable>
@@ -1204,6 +1406,10 @@ export function RehaTab({
           {content}
         </ScrollView>
       )}
+
+      {coachOffen ? (
+        <RehaCoach base={base} authHeaders={authHeaders} data={data} onClose={() => setCoachOffen(false)} />
+      ) : null}
 
       {toast ? (
         <View style={[styles.toast, toastWarn ? styles.toastWarn : null]} pointerEvents="none">
@@ -1384,6 +1590,44 @@ const styles = StyleSheet.create({
   planHeuteTag: { color: colors.accent, fontSize: 11, fontWeight: "700" },
   planIntensity: { color: colors.warning, fontSize: 12, fontWeight: "600", marginTop: 1 },
   planRowHeute: { borderWidth: 1, borderColor: colors.accent },
+  coachBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  coachBtnText: { color: colors.accent, fontSize: 12, fontWeight: "700" },
+  coachOverlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.bg,
+    padding: 14,
+    gap: 8,
+  },
+  coachHead: { flexDirection: "row", alignItems: "center", gap: 8 },
+  coachTitle: { flex: 1, color: colors.text, fontSize: 16, fontWeight: "700" },
+  coachBubble: { borderRadius: 12, padding: 10, maxWidth: "92%" },
+  coachBubbleDu: { backgroundColor: colors.accent, alignSelf: "flex-end" },
+  coachBubbleCoach: { backgroundColor: colors.surface, alignSelf: "flex-start" },
+  coachText: { color: colors.text, fontSize: 14, lineHeight: 20 },
+  coachTextDu: { color: "#fff" },
+  coachChip: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  coachChipText: { color: colors.muted, fontSize: 11, fontWeight: "600" },
+  coachInputRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  coachSend: { width: 92 },
   chip: {
     flexDirection: "row",
     alignItems: "center",
