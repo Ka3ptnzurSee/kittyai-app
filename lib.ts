@@ -172,6 +172,19 @@ export function sanitizeLoadedMessages<T extends { id?: string; role?: string; e
     .filter((m) => !isBlankAiMessage(m) || m?.id === anchorId);
 }
 
+/**
+ * Fehler-Flags aus einem Verlauf entfernen, ohne Text zu verlieren.
+ *
+ * Anders als sanitizeLoadedMessages (Start) wird hier nichts gefiltert: eine
+ * Teil-Antwort mit Fehlerkarte bleibt als Text stehen, nur die rote Karte faellt weg.
+ * Genutzt (a) beim Speichern — der Store enthaelt nie Fehlerkarten — und (b) wenn ein
+ * neuer Turn startet, weil der alte Fehler dann ueberholt ist.
+ */
+export function stripErrorFlags<T extends { error?: unknown }>(messages: T[]): T[] {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((m) => (m && m.error ? ({ ...m, error: undefined } as T) : m));
+}
+
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──
 export type ToolCategory = "system" | "file" | "web" | "memory" | "search" | "agent" | "calendar" | "github" | "media" | "other";
 export type ToolMeta = { label: string; icon: string; category: ToolCategory };

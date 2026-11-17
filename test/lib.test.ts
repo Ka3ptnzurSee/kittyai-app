@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -386,6 +386,26 @@ test("sanitizeLoadedMessages lässt inhaltsvolle Nachrichten unangetastet", () =
     { id: "a3", role: "assistant", text: "", dil: [{ type: "Table" }] },
   ];
   assert.deepStrictEqual(sanitizeLoadedMessages(messages), messages);
+});
+
+// ── stripErrorFlags: Speichern ohne Fehlerkarten, Text bleibt ──
+test("stripErrorFlags entfernt nur das error-Flag, Text bleibt stehen", () => {
+  const msgs = [
+    { id: "u1", role: "user", text: "hallo" },
+    { id: "a1", role: "assistant", text: "halbe Antwor", error: { type: "502", retryable: true } },
+  ];
+  const out = stripErrorFlags(msgs);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[1].error, undefined);
+  assert.strictEqual(out[1].text, "halbe Antwor");
+  assert.deepStrictEqual(out[0], msgs[0]);
+});
+
+test("stripErrorFlags ist robust gegen kaputte Eingaben", () => {
+  assert.deepStrictEqual(stripErrorFlags([]), []);
+  assert.deepStrictEqual(stripErrorFlags(null as unknown as []), []);
+  const keep = [{ id: "x", role: "assistant", text: "ok" }];
+  assert.deepStrictEqual(stripErrorFlags(keep), keep);
 });
 
 test("sanitizeLoadedMessages ist robust gegen leere/kaputte Einträge", () => {

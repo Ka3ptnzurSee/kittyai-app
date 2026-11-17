@@ -35,7 +35,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { Pressable } from "./components";
@@ -1578,7 +1578,7 @@ export default function App() {
         chats
           .filter((c) => !c.readOnly)
           .slice(0, 50)
-          .map((c) => ({ ...c, title: deriveTitle(c.title || "") })),
+          .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: stripErrorFlags(c.messages || []) })),
       );
       secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
         .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
@@ -2502,8 +2502,7 @@ export default function App() {
                       (m.text && m.text.trim()) ||
                       (m.activity && m.activity.length) ||
                       (m.permissions && m.permissions.length) ||
-                      (m.images && m.images.length) ||
-                      m.error,
+                      (m.images && m.images.length),
                   ),
                 }
               : c,
