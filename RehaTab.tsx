@@ -9,7 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import Svg, { Circle, Line as SvgLine, Polyline, Rect, Text as SvgText } from "react-native-svg";
+import Svg, { Line as SvgLine, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import { Ionicons } from "./icons";
 import { colors } from "./theme";
 
