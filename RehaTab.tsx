@@ -42,7 +42,8 @@ function nf(v: number | null | undefined, digits = 0): string {
 }
 
 function fmtPct(v: number | null | undefined): string {
-  return v == null ? "–" : Math.round(v) + " %";
+  if (typeof v !== "number" || !isFinite(v)) return "–";
+  return Math.round(v) + " %";
 }
 
 function fmtMinutes(sec: number | null | undefined): string {
@@ -110,28 +111,37 @@ function polySegments(
   return out;
 }
 
+/** Breite messen, damit die Charts die volle Kartenbreite nutzen (Svg width="100%" skaliert nicht ueberall). */
+function useChartWidth(): [number, (w: number) => void] {
+  const [w, setW] = useState(0);
+  return [w, (nw: number) => setW(Math.round(nw))];
+}
+
 function LineChart({
   series,
   labels,
   height = CHART_H,
   unit,
+  domain,
 }: {
   series: { name: string; color: string; values: (number | null)[] }[];
   labels: string[];
   height?: number;
   unit?: string;
+  domain?: [number, number];
 }) {
   const n = Math.max(1, ...series.map((s) => s.values.length), labels.length);
-  const W = 360;
+  const [boxW, setBoxW] = useChartWidth();
+  const W = boxW > 40 ? boxW : 360;
   const innerW = W - PAD_L - PAD_R;
   const innerH = height - PAD_T - PAD_B;
   const x = (i: number) => PAD_L + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
   const all = series.flatMap((s) => s.values);
-  const [lo, hi] = yRange(all);
+  const [lo, hi] = domain || yRange(all);
   const y = (v: number) => PAD_T + (1 - (v - lo) / (hi - lo)) * innerH;
 
   return (
-    <View>
+    <View onLayout={(e) => setBoxW(e.nativeEvent.layout.width)}>
       <View style={styles.legendRow}>
         {series.map((s) => (
           <View key={s.name} style={styles.legendItem}>
@@ -140,7 +150,7 @@ function LineChart({
           </View>
         ))}
       </View>
-      <Svg width="100%" height={height} viewBox={`0 0 ${W} ${height}`}>
+      <Svg width={W} height={height} viewBox={`0 0 ${W} ${height}`}>
         {[0, 0.5, 1].map((t) => (
           <SvgLine
             key={t}
@@ -192,7 +202,8 @@ function BarLineChart({
   height?: number;
 }) {
   const n = Math.max(bars.values.length, line.values.length, labels.length);
-  const W = 360;
+  const [boxW, setBoxW] = useChartWidth();
+  const W = boxW > 40 ? boxW : 360;
   const innerW = W - PAD_L - PAD_R;
   const innerH = height - PAD_T - PAD_B;
   const x = (i: number) => PAD_L + (n <= 1 ? innerW / 2 : (i / (n - 1)) * innerW);
@@ -203,7 +214,7 @@ function BarLineChart({
   const barW = Math.max(3, Math.min(10, innerW / n - 3));
 
   return (
-    <View>
+    <View onLayout={(e) => setBoxW(e.nativeEvent.layout.width)}>
       <View style={styles.legendRow}>
         <View style={styles.legendItem}>
           <View style={[styles.legendDot, { backgroundColor: bars.color }]} />
@@ -214,7 +225,7 @@ function BarLineChart({
           <Text style={styles.legendText}>{line.name}</Text>
         </View>
       </View>
-      <Svg width="100%" height={height} viewBox={`0 0 ${W} ${height}`}>
+      <Svg width={W} height={height} viewBox={`0 0 ${W} ${height}`}>
         {bars.values.map((v, i) =>
           v == null || !isFinite(v) ? null : (
             <Rect
@@ -279,11 +290,21 @@ function Sparkline({ values, color, height = 46 }: { values: (number | null)[]; 
   const x = (i: number) => (values.length <= 1 ? 0 : (i / (values.length - 1)) * W);
   const y = (v: number) => height - 4 - ((v - lo) / span) * (height - 8);
   return (
-    <Svg width="100%" height={height} viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none">
+    <Svg width={W} height={height} viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none">
       {polySegments(values, x, y).map((seg, i) => (
         <Polyline key={i} points={seg} fill="none" stroke={color} strokeWidth={2} />
       ))}
     </Svg>
+  );
+}
+
+/** Kleines Label-Chip (z. B. "3× Kraft"). */
+function Chip({ text, color }: { text: string; color: string }) {
+  return (
+    <View style={[styles.chip, { borderColor: color }]}>
+      <View style={[styles.chipDot, { backgroundColor: color }]} />
+      <Text style={styles.chipText}>{text}</Text>
+    </View>
   );
 }
 
@@ -434,6 +455,19 @@ function HeuteView({ data, onCheckin, onFunktion, busy }: {
   const sync = data.sync || {};
   const tiles: any[] = data.wellness_tiles || [];
   const bekannteTiles = tiles.filter((t) => t.wert);
+  // LSI je Uebung: state.lsi_detail ist ein Objekt {Uebung: {lsi, right_kg, left_kg, day}}
+  const lsiDetail: { name: string; lsi: number; rechts: number | null; links: number | null; day: string | null }[] = Object.entries(
+    (s.lsi_detail && typeof s.lsi_detail === "object" ? s.lsi_detail : {}) as Record<string, any>,
+  )
+    .map(([name, d]: [string, any]) => ({
+      name,
+      lsi: Number(d?.lsi),
+      rechts: d?.right_kg ?? null,
+      links: d?.left_kg ?? null,
+      day: d?.day ?? null,
+    }))
+    .filter((row) => isFinite(row.lsi))
+    .sort((a, b) => a.lsi - b.lsi);
   const [pain, setPain] = useState<string>(s.pain != null ? String(s.pain) : "");
   const [swelling, setSwelling] = useState<string>(s.swelling != null ? String(s.swelling) : "");
   const [note, setNote] = useState<string>("");
@@ -502,19 +536,62 @@ function HeuteView({ data, onCheckin, onFunktion, busy }: {
         </Section>
       ) : null}
 
-      {/* Kennzahlen */}
-      <Section title="Kennzahlen">
+      {/* Kennzahlen: nur was nicht schon in den Wellness-Kacheln steht */}
+      <Section title="Belastung & Symmetrie">
         <View style={styles.tileGrid}>
           <Tile label="Readiness" value={nf(s.readiness)} sub={s.readiness_level || undefined} />
-          <Tile label="Schlaf" value={s.sleep_h != null ? nf(s.sleep_h, 1) + " h" : "–"} sub={s.sleep_score != null ? `Score ${nf(s.sleep_score)}` : undefined} />
-          <Tile label="HRV" value={nf(s.hrv_last_night)} sub={s.hrv_status || undefined} />
-          <Tile label="Ruhepuls" value={nf(s.rhr)} sub="bpm" />
-          <Tile label="ACWR" value={s.acwr != null ? s.acwr.toFixed(2) : "–"} sub={`akut ${nf(s.acute, 0)} / chron ${nf(s.chronic, 0)}`} />
-          <Tile label="LSI" value={fmtPct(s.worst_lsi ?? s.lsi)} tone={s.worst_lsi != null && s.worst_lsi < 90 ? colors.warning : undefined} sub="Symmetrie" />
+          <Tile
+            label="ACWR"
+            value={s.acwr != null ? Number(s.acwr).toFixed(2) : "–"}
+            tone={s.acwr != null && Number(s.acwr) > 1.3 ? colors.warning : undefined}
+            sub={
+              s.chronic != null && Number(s.chronic) < 15
+                ? `akut ${nf(s.acute, 0)} / chron ${nf(s.chronic, 0)} · zu wenig Historie`
+                : `akut ${nf(s.acute, 0)} / chron ${nf(s.chronic, 0)}`
+            }
+          />
+          <Tile
+            label="LSI (schlechtester)"
+            value={fmtPct(r.worst_lsi ?? (typeof s.lsi === "number" ? s.lsi : null))}
+            tone={r.worst_lsi != null && Number(r.worst_lsi) < 90 ? colors.warning : undefined}
+            sub="Symmetrie, Ziel 95 %"
+          />
           <Tile label="Kraft" value={s.strength_week != null ? String(s.strength_week) : "–"} sub={s.last_strength ? `zuletzt ${dayShort(s.last_strength)}` : undefined} />
           <Tile label="OP-Tag" value={s.op_day != null ? String(s.op_day) : "–"} sub="Tage" />
+          <Tile label="Check-in" value={s.has_checkin ? "✓" : "offen"} sub={s.has_checkin ? "heute eingetragen" : "heute noch nicht"} />
         </View>
       </Section>
+
+      {/* LSI je Übung (Hevy-Sätze, rechts = operiert) */}
+      {lsiDetail.length ? (
+        <Section title="LSI je Übung (rechts = operiert)">
+          {lsiDetail.map((row) => (
+            <View key={row.name} style={styles.lsiRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.actName}>{row.name}</Text>
+                <Text style={styles.daySub}>
+                  {row.rechts != null ? `${nf(row.rechts, 1)} kg rechts` : "rechts –"}
+                  {row.links != null ? ` · ${nf(row.links, 1)} kg links` : ""}
+                  {row.day ? ` · ${dayShort(row.day)}` : ""}
+                </Text>
+              </View>
+              <View style={styles.lsiBarWrap}>
+                <View
+                  style={[
+                    styles.lsiBar,
+                    {
+                      width: `${Math.max(4, Math.min(100, row.lsi))}%`,
+                      backgroundColor: row.lsi >= 95 ? colors.success : row.lsi >= 80 ? colors.warning : colors.danger,
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.lsiValue}>{fmtPct(row.lsi)}</Text>
+            </View>
+          ))}
+          <Text style={styles.hint}>Unter 80 % keine Sprünge und kein Laufen. Ziel 95 %.</Text>
+        </Section>
+      ) : null}
 
       {/* Check-in */}
       <Section title="Check-in (Schmerz / Schwellung)">
@@ -611,64 +688,116 @@ function HeuteView({ data, onCheckin, onFunktion, busy }: {
 
 function WocheView({ data }: { data: ComebackData }) {
   const kalender: any[] = data.kalender || [];
+  const heute = String(data.state?.today || "");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [zeigeAlt, setZeigeAlt] = useState(false);
+
+  const tag = (d: any) => String(d.day || "");
+  const ist = (d: any) => (Array.isArray(d.ist) ? d.ist : []);
+  const geplant = (d: any) => Boolean(d.soll && d.soll.einheit);
+
+  const kommend = kalender.filter((d) => tag(d) > heute).slice(0, 7);
+  const letzte14 = kalender.filter((d) => tag(d) <= heute).slice(-14);
+  const alt = kalender.filter((d) => !kommend.includes(d) && !letzte14.includes(d));
+
+  // Wochenbilanz: letzte 7 Tage mit Plan
+  const letzte7 = kalender.filter((d) => tag(d) <= heute).slice(-7);
+  const sollCount = letzte7.filter(geplant).length;
+  const istCount = letzte7.filter((d) => geplant(d) && ist(d).length > 0).length;
+
+  const zeile = (d: any, i: number) => {
+    const eintraege = ist(d);
+    const done = eintraege.length > 0;
+    const zukunft = tag(d) > heute;
+    const missed = !done && !zukunft && geplant(d) && d.status !== "frei";
+    const dot = done ? colors.success : zukunft ? colors.muted : missed ? colors.danger : colors.muted;
+    const key = String(d.day || i);
+    const open = expanded === key;
+    const statusText = done
+      ? eintraege.map((a: any) => a.name || a.type).join(", ")
+      : zukunft
+      ? geplant(d)
+        ? "geplant"
+        : "frei"
+      : geplant(d)
+      ? "nicht erledigt"
+      : "frei";
+    return (
+      <View key={key}>
+        <Pressable onPress={() => setExpanded(open ? null : key)} style={styles.dayRow} accessibilityRole="button">
+          <View style={styles.dayBadge}>
+            <Text style={styles.dayDow}>{d.wochentag || dayShort(d.day)}</Text>
+            <Text style={styles.dayDate}>{dayShort(d.day)}</Text>
+          </View>
+          <View style={[styles.dayDot, { backgroundColor: dot }]} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.dayMain}>
+              {d.soll?.einheit || "Frei"}
+              {d.heute ? <Text style={styles.todayTag}>  heute</Text> : null}
+            </Text>
+            <Text style={styles.daySub}>{statusText}</Text>
+          </View>
+          {done ? <Ionicons name="checkmark-circle" size={18} color={colors.success} /> : null}
+          <Ionicons name={open ? "chevron-up" : "chevron-down"} size={16} color={colors.muted} />
+        </Pressable>
+        {open ? (
+          <View style={styles.dayDetail}>
+            {d.soll?.details?.length ? (
+              <Text style={styles.dayDetailText}>Geplant: {d.soll.details.join(" · ")}</Text>
+            ) : null}
+            {eintraege.map((a: any, j: number) => (
+              <View key={j} style={styles.dayDetailRow}>
+                <Ionicons name={sportIcon(a.type)} size={14} color={colors.accent} />
+                <Text style={styles.dayDetailText}>
+                  {a.name || a.type}{a.source === "strava" ? " (Strava)" : ""} · {fmtMinutes(a.duration_s)}
+                  {a.trimp != null ? ` · TRIMP ${nf(a.trimp)}` : ""}{a.tempo ? ` · ${a.tempo}` : ""}
+                </Text>
+              </View>
+            ))}
+            {missed ? <Text style={styles.dayMissed}>Verpasst — Einheit nicht eingetragen.</Text> : null}
+            {zukunft && geplant(d) ? <Text style={styles.hint}>Noch offen — liegt in der Zukunft.</Text> : null}
+          </View>
+        ) : null}
+      </View>
+    );
+  };
+
   return (
     <View style={styles.scroll}>
-      <Section title={`Kalender · ${kalender.length} Tage`}>
-        <Text style={styles.hint}>Antippen für Details. Farbe = Status (grün erledigt, rot verpasst, grau frei).</Text>
-        {kalender.map((d, i) => {
-          const ist = Array.isArray(d.ist) ? d.ist : [];
-          const done = ist.length > 0;
-          const missed = d.soll && d.soll.einheit && !done && d.status !== "frei";
-          const dot = done ? colors.success : missed ? colors.danger : colors.muted;
-          const key = String(d.day || i);
-          const open = expanded === key;
-          return (
-            <View key={key}>
-              <Pressable onPress={() => setExpanded(open ? null : key)} style={styles.dayRow} accessibilityRole="button">
-                <View style={styles.dayBadge}>
-                  <Text style={styles.dayDow}>{d.wochentag || dayShort(d.day)}</Text>
-                  <Text style={styles.dayDate}>{dayShort(d.day)}</Text>
-                </View>
-                <View style={[styles.dayDot, { backgroundColor: dot }]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.dayMain}>
-                    {d.soll?.einheit || "Frei"}
-                    {d.heute ? <Text style={styles.todayTag}>  heute</Text> : null}
-                  </Text>
-                  <Text style={styles.daySub}>
-                    {done
-                      ? ist.map((a: any) => a.name || a.type).join(", ")
-                      : d.soll?.einheit
-                      ? "nicht erledigt"
-                      : ""}
-                  </Text>
-                </View>
-                {done ? <Ionicons name="checkmark-circle" size={18} color={colors.success} /> : null}
-                <Ionicons name={open ? "chevron-up" : "chevron-down"} size={16} color={colors.muted} />
-              </Pressable>
-              {open ? (
-                <View style={styles.dayDetail}>
-                  {d.soll?.details?.length ? (
-                    <Text style={styles.dayDetailText}>Geplant: {d.soll.details.join(" · ")}</Text>
-                  ) : null}
-                  {ist.map((a: any, j: number) => (
-                    <View key={j} style={styles.dayDetailRow}>
-                      <Ionicons name={sportIcon(a.type)} size={14} color={colors.accent} />
-                      <Text style={styles.dayDetailText}>
-                        {a.name || a.type}{a.source === "strava" ? " (Strava)" : ""} · {fmtMinutes(a.duration_s)}
-                        {a.trimp != null ? ` · TRIMP ${nf(a.trimp)}` : ""}{a.tempo ? ` · ${a.tempo}` : ""}
-                      </Text>
-                    </View>
-                  ))}
-                  {!done && d.soll?.einheit ? (
-                    <Text style={styles.dayMissed}>Verpasst — Einheit nicht eingetragen.</Text>
-                  ) : null}
-                </View>
-              ) : null}
-            </View>
-          );
-        })}
+      <Section title="Diese Woche im Rückblick">
+        <Text style={styles.hint}>
+          {istCount} von {sollCount} geplanten Einheiten erledigt (letzte 7 Tage).
+        </Text>
+        <View style={styles.progressTrack}>
+          <View
+            style={[
+              styles.progressFill,
+              {
+                width: `${sollCount ? Math.round((istCount / sollCount) * 100) : 0}%`,
+                backgroundColor: istCount >= sollCount ? colors.success : colors.warning,
+              },
+            ]}
+          />
+        </View>
+      </Section>
+
+      <Section title="Nächste 7 Tage">
+        <Text style={styles.hint}>Was als Nächstes ansteht (aus dem Plan).</Text>
+        {kommend.length ? kommend.map(zeile) : <Text style={styles.hint}>Keine Planung hinterlegt.</Text>}
+      </Section>
+
+      <Section title="Letzte 14 Tage">
+        <Text style={styles.hint}>Grün = erledigt, rot = verpasst, grau = frei. Antippen für Details.</Text>
+        {letzte14.length ? letzte14.slice().reverse().map(zeile) : <Text style={styles.hint}>Keine Daten.</Text>}
+      </Section>
+
+      <Section title="Ältere Tage">
+        <Pressable onPress={() => setZeigeAlt(!zeigeAlt)} style={styles.btnGhost} accessibilityRole="button">
+          <Text style={styles.btnGhostText}>
+            {zeigeAlt ? "Ältere Tage ausblenden" : `${alt.length} ältere Tage anzeigen`}
+          </Text>
+        </Pressable>
+        {zeigeAlt ? alt.slice().reverse().map(zeile) : null}
       </Section>
     </View>
   );
@@ -699,14 +828,23 @@ function VerlaufView({ data }: { data: ComebackData }) {
       ) : null}
 
       {wellness.length ? (
-        <Section title="Readiness & Schlaf">
+        <Section title="Readiness (0–100)">
           <LineChart
             unit=""
             labels={wellness.map((d) => dayShort(d.day))}
-            series={[
-              { name: "Readiness", color: colors.success, values: wellness.map((d) => d.readiness) },
-              { name: "Schlaf (h)", color: colors.muted, values: wellness.map((d) => d.sleep_h) },
-            ]}
+            domain={[0, 100]}
+            series={[{ name: "Readiness", color: colors.success, values: wellness.map((d) => d.readiness) }]}
+          />
+        </Section>
+      ) : null}
+
+      {wellness.some((d) => d.sleep_h != null) ? (
+        <Section title="Schlaf (Stunden pro Nacht)">
+          <LineChart
+            unit=" h"
+            labels={wellness.map((d) => dayShort(d.day))}
+            domain={[0, 12]}
+            series={[{ name: "Schlaf", color: colors.accent, values: wellness.map((d) => d.sleep_h) }]}
           />
         </Section>
       ) : null}
@@ -722,21 +860,37 @@ function VerlaufView({ data }: { data: ComebackData }) {
       ) : null}
 
       {lsi.length ? (
-        <Section title="Symmetrie (LSI)">
-          <LineChart
-            unit=" %"
-            labels={lsi[0]?.punkte?.map((p: any) => dayShort(p.day)) || []}
-            series={lsi.slice(0, 6).map((ex, i) => ({
-              name: ex.uebung || "Übung",
-              color: LSI_PALETTE[i % LSI_PALETTE.length],
-              values: (ex.punkte || []).map((p: any) => p.lsi),
-            }))}
-          />
+        <Section title="Symmetrie (LSI) · je Übung eigene Skala">
+          <Text style={styles.hint}>
+            Rechts (operiert) im Verhältnis zu links in Prozent. Ziel 95 %, unter 80 % kein Springen.
+          </Text>
+          {lsi.slice(0, 6).map((ex, i) => {
+            const punkte = (ex.punkte || []).filter((p: any) => p.lsi != null && isFinite(p.lsi));
+            const werte = punkte.slice(-12).map((p: any) => p.lsi);
+            const jetzt = werte.length ? werte[werte.length - 1] : null;
+            const vorher = werte.length > 1 ? werte[0] : null;
+            const delta = jetzt != null && vorher != null ? jetzt - vorher : null;
+            return (
+              <View key={ex.uebung || i} style={styles.lsiSeriesRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.actName}>{ex.uebung || "Übung"}</Text>
+                  <Text style={styles.daySub}>
+                    {jetzt != null ? fmtPct(jetzt) : "–"}
+                    {delta != null ? ` · ${delta >= 0 ? "+" : "−"}${nf(Math.abs(delta), 1)} pp in ${punkte.length} Messungen` : ""}
+                  </Text>
+                </View>
+                <Sparkline values={werte} color={LSI_PALETTE[i % LSI_PALETTE.length]} height={34} />
+              </View>
+            );
+          })}
         </Section>
       ) : null}
 
       {aktivitaet.length ? (
-        <Section title={`Einheiten (${aktivitaet.length})`}>
+        <Section title="Einheiten · letzte 90 Tage">
+          <Text style={styles.hint}>
+            {aktivitaet.length} Einheiten, neueste zuerst. TRIMP = Belastungswert der Einheit.
+          </Text>
           {aktivitaet.map((a, i) => (
             <View key={i} style={styles.actRow}>
               <Ionicons name={sportIcon(a.type)} size={20} color={colors.accent} />
@@ -760,21 +914,47 @@ function VerlaufView({ data }: { data: ComebackData }) {
 
 function PlanView({ data }: { data: ComebackData }) {
   const wochenplan: any[] = data.wochenplan || [];
+  // state.weekday ist ISO (1 = Montag). Der Plan liefert nur den Namen -> ueber Namen matchen.
+  const DOW = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
+  const heuteName = DOW[(Number(data.state?.weekday ?? 0) || new Date().getDay() || 7) - 1] || "";
+  const einheiten = wochenplan.map((w) => String(w.soll?.einheit || "Frei"));
+  const kraft = wochenplan.filter((w) => w.krafttag).length;
+  const physio = einheiten.filter((e) => /physio/i.test(e)).length;
+  const ausdauer = einheiten.filter((e) => /ausdauer/i.test(e)).length;
+  const mobility = einheiten.filter((e) => /mobility|balance|rom/i.test(e)).length;
   return (
     <View style={styles.scroll}>
+      <Section title="Wochenumfang">
+        <View style={styles.legendRow}>
+          <Chip text={`${kraft}× Kraft`} color={colors.warning} />
+          <Chip text={`${physio}× Physio`} color={colors.accent} />
+          <Chip text={`${ausdauer}× Ausdauer`} color={colors.success} />
+          <Chip text={`${mobility}× Mobility`} color={colors.muted} />
+        </View>
+        <Text style={styles.hint}>Feste Wochenstruktur der Reha. Der Ampel-Status oben kann Übungen und Sätze reduzieren.</Text>
+      </Section>
       <Section title="Wochenplan">
-        {wochenplan.map((w, i) => (
-          <View key={i} style={styles.planRow}>
-            <Text style={styles.planDow}>{w.wochentag || `Tag ${i + 1}`}</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.planEinheit}>{w.soll?.einheit || "Frei"}</Text>
-              <Text style={styles.planDetails}>
-                {[w.soll?.intensitaet, ...(w.soll?.details || [])].filter(Boolean).join(" · ") || "–"}
-              </Text>
+        {wochenplan.map((w, i) => {
+          const istHeute = String(w.wochentag || "") === heuteName;
+          return (
+            <View key={i} style={[styles.planRow, istHeute && styles.planRowHeute]}>
+              <View style={styles.planDayCol}>
+                <Text style={styles.planDow} numberOfLines={1}>
+                  {w.wochentag || `Tag ${i + 1}`}
+                </Text>
+                {istHeute ? <Text style={styles.planHeuteTag}>heute</Text> : null}
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.planEinheit}>{w.soll?.einheit || "Frei"}</Text>
+                {w.soll?.intensitaet ? <Text style={styles.planIntensity}>{w.soll.intensitaet}</Text> : null}
+                <Text style={styles.planDetails}>
+                  {(w.soll?.details || []).join(" · ") || "–"}
+                </Text>
+              </View>
+              {w.krafttag ? <Ionicons name="barbell" size={16} color={colors.warning} /> : null}
             </View>
-            {w.krafttag ? <Ionicons name="barbell" size={16} color={colors.warning} /> : null}
-          </View>
-        ))}
+          );
+        })}
       </Section>
     </View>
   );
@@ -790,12 +970,14 @@ function QuellenView({ data, onSync, busy }: { data: ComebackData; onSync: () =>
   const hv = q.hevy || {};
   const ap = q.apple || {};
 
-  rows.push({ label: "Garmin Wellness", value: `${g.wellness_tage ?? 0} von ${fenster}`, sub: "Tage mit Werten" });
-  rows.push({ label: "Garmin Schritte", value: `${g.schritte_tage ?? 0} von ${fenster}` });
-  rows.push({ label: "Garmin Schlaf", value: `${g.schlaf_tage ?? 0} von ${fenster}` });
-  rows.push({ label: "Garmin HRV", value: `${g.hrv_tage ?? 0} von ${fenster}` });
-  rows.push({ label: "Garmin Ruhepuls", value: `${g.puls_tage ?? 0} von ${fenster}` });
-  rows.push({ label: "Garmin Stress", value: `${g.stress_tage ?? 0} von ${fenster}` });
+  // „31 von 30" sieht wie ein Fehler aus: Tage im Fenster hart deckeln.
+  const vonFenster = (n: number | undefined) => `${Math.min(Number(n) || 0, fenster)} von ${fenster}`;
+  rows.push({ label: "Garmin Wellness", value: vonFenster(g.wellness_tage), sub: "Tage mit Werten" });
+  rows.push({ label: "Garmin Schritte", value: vonFenster(g.schritte_tage) });
+  rows.push({ label: "Garmin Schlaf", value: vonFenster(g.schlaf_tage) });
+  rows.push({ label: "Garmin HRV", value: vonFenster(g.hrv_tage) });
+  rows.push({ label: "Garmin Ruhepuls", value: vonFenster(g.puls_tage) });
+  rows.push({ label: "Garmin Stress", value: vonFenster(g.stress_tage) });
   rows.push({ label: "Garmin Einheiten", value: `${g.einheiten ?? 0}`, sub: `${g.mit_hf_reihe ?? 0} mit HF-Reihe` });
   rows.push({ label: "Strava Einheiten", value: `${st.einheiten ?? 0}` });
   rows.push({ label: "Hevy Workouts", value: `${hv.workouts ?? 0}`, sub: `${hv.saetze ?? 0} Sätze` });
@@ -1197,7 +1379,22 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
   },
-  planDow: { width: 72, color: colors.text, fontSize: 14, fontWeight: "700" },
+  planDow: { color: colors.text, fontSize: 14, fontWeight: "700" },
+  planDayCol: { width: 84, gap: 2 },
+  planHeuteTag: { color: colors.accent, fontSize: 11, fontWeight: "700" },
+  planIntensity: { color: colors.warning, fontSize: 12, fontWeight: "600", marginTop: 1 },
+  planRowHeute: { borderWidth: 1, borderColor: colors.accent },
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  chipDot: { width: 6, height: 6, borderRadius: 3 },
+  chipText: { color: colors.text, fontSize: 12, fontWeight: "600" },
 
   // Quellen
   srcRow: {
@@ -1239,6 +1436,36 @@ const styles = StyleSheet.create({
   },
   deltaRow: { flexDirection: "row", alignItems: "center", gap: 4, flexWrap: "wrap" },
   deltaText: { fontSize: 12, fontWeight: "700" },
+  lsiRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderRadius: 10,
+    padding: 10,
+  },
+  lsiBarWrap: { width: 64, height: 8, borderRadius: 4, backgroundColor: colors.surface2, overflow: "hidden" },
+  lsiBar: { height: 8, borderRadius: 4 },
+  lsiValue: { width: 46, textAlign: "right", color: colors.text, fontSize: 13, fontWeight: "700" },
+  lsiSeriesRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: colors.surface,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  progressTrack: { height: 8, borderRadius: 4, backgroundColor: colors.surface2, overflow: "hidden", marginTop: 6 },
+  progressFill: { height: 8, borderRadius: 4 },
+  btnGhost: {
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+  },
+  btnGhostText: { color: colors.text, fontSize: 13, fontWeight: "600" },
   erklaerung: { backgroundColor: colors.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
   erklaerungHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
   erklaerungLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 },
