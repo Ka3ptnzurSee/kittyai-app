@@ -152,6 +152,26 @@ export function isBlankAiMessage(m: {
   return !stripDilFences(m.text || "").trim();
 }
 
+/**
+ * Nachrichten aus dem Speicher fuer die Anzeige aufbereiten.
+ *
+ * Gespeicherte Fehlerkarten werden verworfen: Sie sind die Momentaufnahme eines
+ * Turns, der beim naechsten App-Start ohnehin nicht mehr laeuft. Ohne diesen
+ * Schritt blieb JEDER einmal fehlgeschlagene Chat fuer immer rot (das `error`-Flag
+ * wurde mitpersistiert) und der Auto-Resume uebersprang ihn — die Antwort wurde
+ * nie nachgeladen. Danach werden leere KI-Bubbles entfernt; `anchorId` ist die
+ * letzte leere Bubble, an der ein Resume haengen bleiben darf.
+ */
+export function sanitizeLoadedMessages<T extends { id?: string; role?: string; error?: unknown }>(
+  messages: T[],
+  anchorId: string | null = null,
+): T[] {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .map((m) => (m && m.role === "assistant" && m.error ? ({ ...m, error: undefined } as T) : m))
+    .filter((m) => !isBlankAiMessage(m) || m?.id === anchorId);
+}
+
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──
 export type ToolCategory = "system" | "file" | "web" | "memory" | "search" | "agent" | "calendar" | "github" | "media" | "other";
 export type ToolMeta = { label: string; icon: string; category: ToolCategory };

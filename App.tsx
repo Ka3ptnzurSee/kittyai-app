@@ -35,7 +35,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { Pressable } from "./components";
@@ -193,9 +193,9 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[
   { key: "pro", label: "PRO" },
   { key: "flash", label: "FLASH" },
   // --goeran-options:start--
-  { key: "kolibri", label: "KOLIBRI" },
   { key: "muse", label: "MUSE" },
   { key: "coder", label: "CODER" },
+  { key: "qwen38", label: "QWEN38" },
   { key: "qwen", label: "QWEN" },
   // --goeran-options:end--
   // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
@@ -1375,17 +1375,9 @@ export default function App() {
               }
               return {
                 ...c,
-                messages: msgs.filter(
-                  (m: any) =>
-                    m.role !== "assistant" ||
-                    (m.text && String(m.text).trim()) ||
-                    (m.activity && m.activity.length) ||
-                    (m.permissions && m.permissions.length) ||
-                    (m.images && m.images.length) ||
-                    (m.dil && m.dil.length) ||
-                    m.error ||
-                    m.id === anchorId,
-                ),
+                // Fehlerkarten aus dem Speicher verwerfen + leere Bubbles raeumen
+                // (siehe lib.ts: sanitizeLoadedMessages).
+                messages: sanitizeLoadedMessages(msgs, anchorId),
               };
             });
             setChats((prev) => (prev.length ? prev : cleaned));

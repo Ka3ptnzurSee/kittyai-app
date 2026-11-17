@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -343,4 +343,53 @@ test("trimChatsForStorage opfert älteste Chats, den letzten nie", () => {
   assert.ok(out.length < chats.length);
   assert.ok(out.some((c) => c.id === "neu")); // jüngster überlebt immer
   assert.ok(!out.some((c) => c.id === "alt"));
+});
+
+// ── sanitizeLoadedMessages: persistierte Fehlerkarten beim Start verwerfen ──
+test("sanitizeLoadedMessages entfernt gespeicherte Fehlerkarten (Chat wird nicht dauerhaft rot)", () => {
+  const messages = [
+    { id: "u1", role: "user", text: "hallo" },
+    { id: "a1", role: "assistant", text: "", error: { type: "aborted", retryable: true } },
+  ];
+  const out = sanitizeLoadedMessages(messages);
+  assert.strictEqual(out.length, 1); // leere Fehler-Bubble ist weg
+  assert.strictEqual(out[0].id, "u1");
+});
+
+test("sanitizeLoadedMessages behält die Antwort, wenn Text da ist (nur error fällt weg)", () => {
+  const messages = [
+    { id: "u1", role: "user", text: "hallo" },
+    { id: "a1", role: "assistant", text: "Antwort kam an", error: { type: "network", retryable: true } },
+  ];
+  const out = sanitizeLoadedMessages(messages);
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[1].error, undefined);
+  assert.strictEqual(out[1].text, "Antwort kam an");
+  assert.strictEqual(messages[1].error.type, "network"); // Original unverändert
+});
+
+test("sanitizeLoadedMessages behält den Resume-Anker (letzte leere Bubble)", () => {
+  const messages = [
+    { id: "u1", role: "user", text: "hallo" },
+    { id: "a1", role: "assistant", text: "", error: { type: "network", retryable: true } },
+  ];
+  const out = sanitizeLoadedMessages(messages, "a1");
+  assert.strictEqual(out.length, 2);
+  assert.strictEqual(out[1].error, undefined);
+});
+
+test("sanitizeLoadedMessages lässt inhaltsvolle Nachrichten unangetastet", () => {
+  const messages = [
+    { id: "u1", role: "user", text: "frage" },
+    { id: "a1", role: "assistant", text: "antwort" },
+    { id: "a2", role: "assistant", text: "", activity: [{ tool: "bash" }] },
+    { id: "a3", role: "assistant", text: "", dil: [{ type: "Table" }] },
+  ];
+  assert.deepStrictEqual(sanitizeLoadedMessages(messages), messages);
+});
+
+test("sanitizeLoadedMessages ist robust gegen leere/kaputte Einträge", () => {
+  assert.deepStrictEqual(sanitizeLoadedMessages([]), []);
+  assert.deepStrictEqual(sanitizeLoadedMessages([{ id: "x", role: "user", text: "" }]).length, 1);
+  assert.strictEqual(sanitizeLoadedMessages(null as unknown as []).length, 0);
 });
