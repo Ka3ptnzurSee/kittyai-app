@@ -266,17 +266,177 @@ function Tile({ label, value, sub, tone }: { label: string; value: string; sub?:
 
 // --- Ansichten ---------------------------------------------------------------
 
+/** Kleiner Verlauf (14 Tage) hinter einer Wellness-Kachel - wie Arnes Trend-Panel. */
+function Sparkline({ values, color, height = 46 }: { values: (number | null)[]; color: string; height?: number }) {
+  const nums = values.filter((v): v is number => v != null && isFinite(v));
+  if (nums.length < 2) {
+    return <Text style={styles.tileSub}>zu wenig Werte fuer einen Verlauf</Text>;
+  }
+  const W = 220;
+  const lo = Math.min(...nums);
+  const hi = Math.max(...nums);
+  const span = hi - lo || 1;
+  const x = (i: number) => (values.length <= 1 ? 0 : (i / (values.length - 1)) * W);
+  const y = (v: number) => height - 4 - ((v - lo) / span) * (height - 8);
+  return (
+    <Svg width="100%" height={height} viewBox={`0 0 ${W} ${height}`} preserveAspectRatio="none">
+      {polySegments(values, x, y).map((seg, i) => (
+        <Polyline key={i} points={seg} fill="none" stroke={color} strokeWidth={2} />
+      ))}
+    </Svg>
+  );
+}
+
+const TON_COLOR: Record<string, string> = { gut: colors.success, schlecht: colors.danger };
+
+/** Wellness-Kachel nach Arnes Muster: Wert, Vergleich zum 7-Tage-Schnitt, Trend zum Aufklappen. */
+function WellnessTile({ tile }: { tile: any }) {
+  const [open, setOpen] = useState(false);
+  const tone = TON_COLOR[tile.ton] || colors.muted;
+  const delta = String(tile.delta || "");
+  const arrow: IonName = delta.startsWith("+")
+    ? "arrow-up"
+    : delta.startsWith("−")
+    ? "arrow-down"
+    : "remove";
+  const verlauf = (tile.verlauf || []).map((p: any) => p.wert);
+  return (
+    <Pressable
+      style={styles.tile}
+      onPress={() => setOpen((o) => !o)}
+      accessibilityRole="button"
+      accessibilityLabel={`${tile.label}: ${tile.wert || "kein Wert"}`}
+    >
+      <Text style={styles.tileLabel}>{tile.label}</Text>
+      <Text style={[styles.tileValue, { color: tile.wert ? colors.text : colors.muted }]}>{tile.wert || "–"}</Text>
+      {tile.delta ? (
+        <View style={styles.deltaRow}>
+          <Ionicons name={arrow} size={12} color={tone} />
+          <Text style={[styles.deltaText, { color: tone }]}>{delta}</Text>
+          <Text style={styles.tileSub}>zu Ø 7 T {tile.schnitt || ""}</Text>
+        </View>
+      ) : tile.wert ? (
+        <Text style={styles.tileSub}>kein Vergleich (unter 3 Werten)</Text>
+      ) : null}
+      {tile.tag && tile.tag !== todayIso() ? (
+        <Text style={styles.tileSub}>Wert vom {dayShort(tile.tag)}</Text>
+      ) : null}
+      {open ? (
+        <View style={{ marginTop: 6 }}>
+          <Sparkline values={verlauf} color={tone === colors.muted ? colors.accent : tone} />
+          <Text style={styles.tileSub}>
+            {(tile.verlauf || []).length} Tage · Tippen schließt den Verlauf
+          </Text>
+        </View>
+      ) : null}
+    </Pressable>
+  );
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/** Sync-Karte: letzter Lauf, nächster Termin, Automatik - Knopf nur für Sonderfälle. */
+function SyncCard({ sync, onSync, busy }: { sync: any; onSync: () => void; busy: boolean }) {
+  if (!sync || sync.fehler) {
+    return (
+      <Section title="Garmin-Sync">
+        <Text style={styles.hint}>Sync-Status nicht lesbar: {sync?.fehler || "keine Antwort"}</Text>
+      </Section>
+    );
+  }
+  const age = sync.last_ok_age_h;
+  const ageText = age == null ? "noch kein Lauf" : age < 1 ? "vor wenigen Minuten" : `vor ${nf(age, 1)} h`;
+  const dot = sync.running ? colors.warning : sync.failed_message ? colors.danger : age != null && age < sync.stale_h ? colors.success : colors.warning;
+  return (
+    <Section title="Garmin-Sync">
+      <View style={styles.syncCard}>
+        <View style={styles.syncHead}>
+          <View style={[styles.dayDot, { backgroundColor: dot }]} />
+          <Text style={styles.syncState}>
+            {sync.running ? "läuft gerade …" : `zuletzt ${ageText}`}
+          </Text>
+          {sync.last_ok_trigger ? <Text style={styles.syncMeta}>{sync.last_ok_trigger}</Text> : null}
+        </View>
+        <Text style={styles.syncMeta}>Nächster Lauf: {sync.next_run || "unbekannt"}</Text>
+        {sync.last_ok_counters ? (
+          <Text style={styles.syncMeta}>
+            Letzter Lauf: {sync.last_ok_counters.tage ?? 0} Tage Wellness, {sync.last_ok_counters.aktivitaeten ?? 0} Einheiten, {
+              sync.last_ok_counters.lsi_zeilen ?? 0
+            } LSI-Zeilen
+          </Text>
+        ) : null}
+        {sync.failed_message ? <Text style={styles.syncFail}>Fehler: {sync.failed_message}</Text> : null}
+        <Text style={[styles.syncMeta, { marginTop: 2 }]}>{sync.plan}</Text>
+        {sync.auto && sync.auto !== "frisch" ? (
+          <Text style={styles.syncMeta}>Automatik: Sync {sync.auto}</Text>
+        ) : null}
+        <Pressable
+          style={[styles.btnSmall, busy ? styles.btnDisabled : null]}
+          disabled={busy}
+          onPress={onSync}
+          accessibilityRole="button"
+        >
+          <Ionicons name="sync" size={14} color="#fff" />
+          <Text style={styles.btnText}>Jetzt synchronisieren</Text>
+        </Pressable>
+      </View>
+    </Section>
+  );
+}
+
+/** Erklärtexte in Laien-Deutsch (Arne-Muster: <details>). */
+function Erklaerungen({ texte }: { texte: Record<string, string> }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const labels: [string, string][] = [
+    ["ampel", "Was heißt grün / gelb / rot?"],
+    ["readiness", "Was ist Readiness?"],
+    ["hrv", "Was ist HRV?"],
+    ["rhr", "Warum der Ruhepuls wichtig ist"],
+    ["schlaf", "Warum Schlaf zählt"],
+    ["acwr", "Was ist die Belastungs-Balance (ACWR)?"],
+    ["trimp", "Was ist TRIMP?"],
+    ["lsi", "Was ist LSI (Symmetrie)?"],
+    ["checkin", "Wie funktioniert der Check-in?"],
+    ["sprungtest", "Wie funktioniert der Sprungtest?"],
+    ["sync", "Wie oft werden die Daten geholt?"],
+  ];
+  return (
+    <Section title="Was bedeuten die Zahlen?">
+      {labels
+        .filter(([key]) => texte[key])
+        .map(([key, label]) => {
+          const isOpen = open === key;
+          return (
+            <View key={key} style={styles.erklaerung}>
+              <Pressable onPress={() => setOpen(isOpen ? null : key)} style={styles.erklaerungHead} accessibilityRole="button">
+                <Text style={styles.erklaerungLabel}>{label}</Text>
+                <Ionicons name={isOpen ? "chevron-up" : "chevron-down"} size={15} color={colors.muted} />
+              </Pressable>
+              {isOpen ? <Text style={styles.erklaerungText}>{texte[key]}</Text> : null}
+            </View>
+          );
+        })}
+    </Section>
+  );
+}
+
 function HeuteView({ data, onCheckin, onFunktion, busy }: {
   data: ComebackData;
-  onCheckin: (p: { pain?: number; swelling?: number }) => void;
+  onCheckin: (p: { pain?: number; swelling?: number; note?: string }) => void;
   onFunktion: (p: { rechts: number; links: number }) => void;
   busy: boolean;
 }) {
   const s = data.state || {};
   const r = data.result || {};
   const amp = ampelInfo(r.ampel);
+  const sync = data.sync || {};
+  const tiles: any[] = data.wellness_tiles || [];
+  const bekannteTiles = tiles.filter((t) => t.wert);
   const [pain, setPain] = useState<string>(s.pain != null ? String(s.pain) : "");
   const [swelling, setSwelling] = useState<string>(s.swelling != null ? String(s.swelling) : "");
+  const [note, setNote] = useState<string>("");
   const [rechts, setRechts] = useState<string>("");
   const [links, setLinks] = useState<string>("");
 
@@ -319,6 +479,26 @@ function HeuteView({ data, onCheckin, onFunktion, busy }: {
           {Array.isArray(heute.details) && heute.details.length ? (
             <Text style={styles.planDetails}>{heute.details.join(" · ")}</Text>
           ) : null}
+        </Section>
+      ) : null}
+
+      {/* Wellness-Kacheln wie in Arnes Dashboard */}
+      {bekannteTiles.length ? (
+        <Section title="Wellness (Garmin) · Tippen zeigt 14 Tage">
+          <View style={styles.tileGrid}>
+            {bekannteTiles.map((t) => (
+              <WellnessTile key={t.key} tile={t} />
+            ))}
+          </View>
+          <Text style={styles.hint}>
+            Vergleich mit dem Schnitt der 7 Tage davor: grün = besser, rot = schlechter. Unter 3 Werten kein Vergleich.
+          </Text>
+        </Section>
+      ) : sync.last_ok_age_h != null ? (
+        <Section title="Wellness (Garmin)">
+          <Text style={styles.hint}>
+            Noch keine Wellness-Werte. Letzter Sync vor {nf(sync.last_ok_age_h, 1)} h — Sync läuft automatisch.
+          </Text>
         </Section>
       ) : null}
 
@@ -365,12 +545,21 @@ function HeuteView({ data, onCheckin, onFunktion, busy }: {
             onCheckin({
               pain: pain.trim() !== "" && isFinite(p) ? p : undefined,
               swelling: swelling.trim() !== "" && isFinite(sw) ? sw : undefined,
+              note: note.trim() || undefined,
             });
           }}
           accessibilityRole="button"
         >
           <Text style={styles.btnText}>Speichern</Text>
         </Pressable>
+        <TextInput
+          style={[styles.input, { minHeight: 40 }]}
+          value={note}
+          onChangeText={setNote}
+          placeholder="Notiz (z. B. Treppe ok, Schwellung abends mehr)"
+          placeholderTextColor={colors.muted}
+          maxLength={200}
+        />
         {s.has_checkin ? (
           <Text style={styles.hint}>Heute schon eingetragen{s.note ? `: ${s.note}` : ""}.</Text>
         ) : null}
@@ -591,7 +780,7 @@ function PlanView({ data }: { data: ComebackData }) {
   );
 }
 
-function QuellenView({ data }: { data: ComebackData }) {
+function QuellenView({ data, onSync, busy }: { data: ComebackData; onSync: () => void; busy: boolean }) {
   const q = data.history?.quellen || {};
   const fenster = q.fenster_tage || 30;
 
@@ -616,6 +805,7 @@ function QuellenView({ data }: { data: ComebackData }) {
 
   return (
     <View style={styles.scroll}>
+      <SyncCard sync={data.sync} onSync={onSync} busy={busy} />
       <Section title="Datenquellen">
         <Text style={styles.hint}>
           Abdeckung der letzten {fenster} Tage. Fehlende Tage = keine Daten von dieser Quelle.
@@ -633,6 +823,7 @@ function QuellenView({ data }: { data: ComebackData }) {
           <Text style={styles.syncHint}>Letzter Sync: {new Date(q.letzter_sync).toLocaleString("de-DE")}</Text>
         ) : null}
       </Section>
+      <Erklaerungen texte={data.erklaerungen || {}} />
     </View>
   );
 }
@@ -653,6 +844,8 @@ export function RehaTab({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [toastMs, setToastMs] = useState(2600);
+  const [toastWarn, setToastWarn] = useState(false);
 
   const load = useCallback(async (refresh = false) => {
     try {
@@ -684,9 +877,20 @@ export function RehaTab({
         const res = await fetch(base + path, { method: "POST", headers, body: JSON.stringify(payload) });
         const j = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(j?.error || "HTTP " + res.status);
-        setToast("Gespeichert ✓");
+        if (j?.warnung?.text) {
+          // Warnzeichen im Notiztext: Arzt/Notruf-Hinweis stehen lassen, nicht wegblinzeln.
+          setToastWarn(true);
+          setToastMs(15000);
+          setToast("⚠ " + j.warnung.text);
+        } else {
+          setToastWarn(false);
+          setToastMs(2600);
+          setToast("Gespeichert ✓");
+        }
         await load(true);
       } catch (e) {
+        setToastWarn(true);
+        setToastMs(5000);
         setToast("Fehler: " + String((e as any)?.message || e));
       } finally {
         setBusy(false);
@@ -697,9 +901,30 @@ export function RehaTab({
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 2600);
+    const t = setTimeout(() => setToast(null), toastMs);
     return () => clearTimeout(t);
-  }, [toast]);
+  }, [toast, toastMs]);
+
+  const syncNow = useCallback(async () => {
+    setBusy(true);
+    setToast("Sync wird angestossen …");
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (authHeaders) Object.assign(headers, authHeaders());
+      const res = await fetch(base + "/api/comeback/sync", { method: "POST", headers, body: "{}" });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || "HTTP " + res.status);
+      setToast("Sync laeuft - Werte in etwa einer Minute da");
+      setTimeout(() => load(true), 45000);
+    } catch (e) {
+      // Aeltere Server-Version ohne /sync-Route: der normale Abruf stoesst bei
+      // alten Daten ebenfalls einen Sync an - dann eben beim naechsten Oeffnen.
+      await load(true);
+      setToast(`Sync automatisch angefordert (${String((e as any)?.message || e)})`);
+    } finally {
+      setBusy(false);
+    }
+  }, [base, authHeaders, load]);
 
   const content = useMemo(() => {
     if (!data) return null;
@@ -711,7 +936,7 @@ export function RehaTab({
       case "plan":
         return <PlanView data={data} />;
       case "quellen":
-        return <QuellenView data={data} />;
+        return <QuellenView data={data} onSync={syncNow} busy={busy} />;
       default:
         return (
           <HeuteView
@@ -722,12 +947,35 @@ export function RehaTab({
           />
         );
     }
-  }, [data, view, busy, post]);
+  }, [data, view, busy, post, syncNow]);
+
+  // Sync-Zustand in der Kopfzeile: Alter der Daten / laeuft gerade / Fehler.
+  const sync = data?.sync || {};
+  const syncAge = sync.last_ok_age_h;
+  const syncTone = sync.running
+    ? colors.warning
+    : sync.failed_message
+    ? colors.danger
+    : syncAge != null && syncAge < (sync.stale_h || 6)
+    ? colors.success
+    : colors.warning;
+  const syncText = sync.running
+    ? "Sync läuft …"
+    : syncAge == null
+    ? "noch kein Sync"
+    : `Sync vor ${syncAge < 1 ? "wenigen Minuten" : nf(syncAge, 1) + " h"}`;
 
   return (
     <View style={styles.root}>
       <View style={styles.bar}>
-        <Text style={styles.title}>Reha · rechtes Knie</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.title}>Reha · rechtes Knie</Text>
+          <View style={styles.syncBarRow}>
+            <View style={[styles.syncDot, { backgroundColor: syncTone }]} />
+            <Text style={styles.syncBarText}>{syncText}</Text>
+            {sync.next_run ? <Text style={styles.syncBarText}> · nächster {sync.next_run}</Text> : null}
+          </View>
+        </View>
         <Pressable onPress={() => load(true)} hitSlop={10} accessibilityRole="button" accessibilityLabel="Neu laden">
           <Ionicons name="refresh" size={18} color={colors.accent} />
         </Pressable>
@@ -776,7 +1024,7 @@ export function RehaTab({
       )}
 
       {toast ? (
-        <View style={styles.toast} pointerEvents="none">
+        <View style={[styles.toast, toastWarn ? styles.toastWarn : null]} pointerEvents="none">
           <Text style={styles.toastText}>{toast}</Text>
         </View>
       ) : null}
@@ -846,6 +1094,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   toastText: { color: "#fff", fontSize: 13, fontWeight: "600" },
+  toastWarn: { backgroundColor: "rgba(180,30,30,0.96)" },
 
   // Ampel
   ampelCard: { borderRadius: 14, padding: 14, gap: 8 },
@@ -963,4 +1212,35 @@ const styles = StyleSheet.create({
   srcLabel: { color: colors.text, fontSize: 14 },
   srcValue: { color: colors.text, fontSize: 14, fontWeight: "700" },
   srcSub: { color: colors.muted, fontSize: 11 },
+
+  // Sync + Erklaerungen
+  syncBarRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 2 },
+  syncDot: { width: 7, height: 7, borderRadius: 4 },
+  syncBarText: { color: colors.muted, fontSize: 11 },
+  syncCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 12,
+    gap: 4,
+  },
+  syncHead: { flexDirection: "row", alignItems: "center", gap: 7 },
+  syncState: { color: colors.text, fontSize: 14, fontWeight: "600", flex: 1 },
+  syncMeta: { color: colors.muted, fontSize: 12 },
+  syncFail: { color: colors.danger, fontSize: 12, fontWeight: "600" },
+  btnSmall: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: colors.accent,
+    paddingVertical: 8,
+    borderRadius: 9,
+    marginTop: 6,
+  },
+  deltaRow: { flexDirection: "row", alignItems: "center", gap: 4, flexWrap: "wrap" },
+  deltaText: { fontSize: 12, fontWeight: "700" },
+  erklaerung: { backgroundColor: colors.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
+  erklaerungHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  erklaerungLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flex: 1 },
+  erklaerungText: { color: colors.muted, fontSize: 12, lineHeight: 18, marginTop: 6 },
 });
