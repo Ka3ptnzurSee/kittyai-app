@@ -2259,7 +2259,9 @@ export default function App() {
             await new Promise((r) => setTimeout(r, 1200));
             if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
             const st = streamStateRef.current[chatId];
-            setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
+            // Nur bei Voll-Replay (lastSeq=0) zurücksetzen: dann kommen alle Deltas erneut.
+            // Bei Delta-Resume bleiben die schon gesehenen Teile des Denkvorgangs stehen.
+            if (!st || !st.lastSeq) setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
             if (st && st.turnId) {
               // Resumable: an der Abbruchstelle fortsetzen statt von vorn zu streamen.
               await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, clientMessageId);
@@ -2443,8 +2445,15 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "done") {
         doneReceived = true;
-        const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[]; images?: { uri?: string }[] };
+        const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[]; images?: { uri?: string }[]; thinking?: string };
         finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
+        // Nach einem Resume (App im Hintergrund/getötet) kommen keine thinking-Deltas mehr:
+        // der Server schickt den Denkvorgang im done-Snapshot. Nur setzen, wenn lokal
+        // noch nichts da ist — sonst würde ein doppelter Text angehängt.
+        if (typeof d.thinking === "string" && d.thinking.trim()) {
+          const t2 = d.thinking.slice(-MAX_THINKING_CHARS);
+          setThinkingByChat((prev) => ((prev[chatId] || "").trim() ? prev : { ...prev, [chatId]: t2 }));
+        }
         finalActivity = (Array.isArray(d.activity) ? d.activity : []).map((a) => ({ ...a, result: (a.result || "").slice(0, 4000) }));
         finalDil = Array.isArray(d.dil) ? d.dil : undefined;
         // Vom Server aus dem Antworttext gehobene Bilder (/generated/…) — relative
