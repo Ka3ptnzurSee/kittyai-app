@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -39,7 +39,8 @@ import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
-import { haptic, CharacterCounter, Pressable, PullToRefresh, SearchField, ShimmerText, TabsHeader } from "./components";
+import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
+import { buildIndex, matchingChatIds } from "./searchIndex";
 import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
@@ -3004,10 +3005,26 @@ export default function App() {
 
   // Titel-/Vorschau-Suche ueber der Liste: Titel + letzte Nachricht, Gross-/Kleinschreibung egal.
   // Volltext ueber alle Nachrichten folgt in Welle 2 (Index + Treffer-Snippets).
+  // Volltext-Index ueber Titel, Vorschau und Nachrichten (nur lokale Verlaeufe —
+  // Server-Verlaeufe haben hier keinen Text, sie bleiben ueber /api/chats suchbar).
+  const searchDocs = useMemo(
+    () => buildIndex([...folderScoped, ...(folderFilter ? [] : remoteChats)].map((c) => ({
+      id: c.id,
+      title: c.title,
+      preview: c.preview,
+      updatedAt: c.updatedAt,
+      messages: c.messages,
+    }))),
+    [folderScoped, remoteChats, folderFilter],
+  );
   const searchedChats = (() => {
-    const q = chatSearch.trim().toLowerCase();
+    const q = chatSearch.trim();
     if (!q) return filteredChats;
-    return filteredChats.filter((c) => ((c.title || "") + " " + (c.preview || "")).toLowerCase().includes(q));
+    const lower = q.toLowerCase();
+    const fullText = matchingChatIds(searchDocs, q);
+    return filteredChats.filter(
+      (c) => ((c.title || "") + " " + (c.preview || "")).toLowerCase().includes(lower) || fullText.has(c.id),
+    );
   })();
 
   // Tastatur oeffnen: die Liste selbst resized nicht (der Eingabebalken macht das),
@@ -3327,7 +3344,7 @@ export default function App() {
                         // klar ist, dass die App lebt und NICHT die Verbindung abgebrochen ist.
                         <ElapsedLabel style={styles.thinkingText} />
                       ) : thisStatus ? (
-                        <ShimmerText style={styles.thinkingText} durationMs={1400}>{thisStatus}</ShimmerText>
+                        <RotatingShimmerText messages={[thisStatus]} intervalMs={2000} style={styles.thinkingText} />
                       ) : listening ? (
                         <ShimmerText style={styles.thinkingText} durationMs={1400}>höre zu …</ShimmerText>
                       ) : (

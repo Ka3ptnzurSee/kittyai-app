@@ -16,6 +16,8 @@ import {
   TextInput,
   Pressable as RNPressable,
   Animated,
+  FlatList as RNFlatList,
+  PanResponder,
   RefreshControl,
   StyleSheet,
   type ViewStyle,
@@ -1041,6 +1043,337 @@ export function InlineEdit({
       returnKeyType="done"
       style={{ fontSize: 17, color: colors.text, borderBottomWidth: 1, borderBottomColor: colors.accent, paddingVertical: 4 }}
     />
+  );
+}
+
+
+// ───────────────────────────── RotatingShimmerText (Valdi rotating_shimmer.dec) ─────────────────────────────
+// Wechselt alle 2 s den Text und laesst ihn dabei schimmern ("analysiere …" -> "schreibe …").
+export function RotatingShimmerText({
+  messages,
+  intervalMs = 2000,
+  style,
+}: {
+  messages: string[];
+  intervalMs?: number;
+  style?: StyleProp<TextStyle>;
+}) {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (messages.length <= 1) return;
+    const t = setInterval(() => setIdx((i) => (i + 1) % messages.length), Math.max(600, intervalMs));
+    return () => clearInterval(t);
+  }, [messages.length, intervalMs]);
+  const label = messages.length ? messages[idx % messages.length] : "";
+  return <ShimmerText style={style}>{label}</ShimmerText>;
+}
+
+// ───────────────────────────── TextWithTags (Valdi text_with_tags.dec) ─────────────────────────────
+// Fliesstext, in dem Marker (#ordner, @skill) als antippbare Chips erscheinen.
+export function TextWithTags({
+  text,
+  onPressTag,
+  tagColor = colors.accent,
+}: {
+  text: string;
+  onPressTag?: (tag: string) => void;
+  tagColor?: string;
+}) {
+  const parts = useMemo(() => {
+    const out: { kind: "text" | "tag"; value: string }[] = [];
+    const re = /([#@][A-Za-z0-9_\-]+)/g;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      if (m.index > last) out.push({ kind: "text", value: text.slice(last, m.index) });
+      out.push({ kind: "tag", value: m[0] });
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) out.push({ kind: "text", value: text.slice(last) });
+    return out;
+  }, [text]);
+  return (
+    <Text style={{ fontSize: oaiTypography.body.size, lineHeight: oaiTypography.body.lineHeight, color: colors.text }}>
+      {parts.map((p, i) =>
+        p.kind === "text" ? (
+          <Text key={i}>{p.value}</Text>
+        ) : (
+          <Text
+            key={i}
+            onPress={() => { haptic("selection"); onPressTag?.(p.value); }}
+            accessibilityRole="link"
+            accessibilityLabel={p.value + " oeffnen"}
+            style={{ color: tagColor }}
+          >
+            {p.value}
+          </Text>
+        ),
+      )}
+    </Text>
+  );
+}
+
+// ───────────────────────────── EmojiLabel (Valdi emoji_label.dec) ─────────────────────────────
+export function EmojiLabel({
+  emoji,
+  label,
+  size = "body",
+}: {
+  emoji: string;
+  label: string;
+  size?: "caption" | "body" | "headline";
+}) {
+  const s = size === "caption" ? oaiTypography.caption : size === "headline" ? oaiTypography.headline : oaiTypography.body;
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: oaiSpacing.one }}>
+      <Text accessibilityElementsHidden style={{ fontSize: s.size }}>{emoji}</Text>
+      <Text accessibilityLabel={label} style={{ fontSize: s.size, lineHeight: s.lineHeight, color: colors.text }}>{label}</Text>
+    </View>
+  );
+}
+
+// ───────────────────────────── IndexPicker / DatePicker / TimePicker (Valdi pickers.dec) ─────────────────────────────
+// Eigenbau statt @react-native-picker: keine native Dep, gleiches Snap-Verhalten (44 pt Zeilen).
+export function IndexPicker({
+  items,
+  index,
+  onChange,
+  width = 88,
+  label,
+}: {
+  items: string[];
+  index: number;
+  onChange: (i: number) => void;
+  width?: number;
+  label?: string;
+}) {
+  const rowH = oaiControlHeight.md;
+  const listRef = useRef<RNFlatList<string> | null>(null);
+  useEffect(() => {
+    const t = setTimeout(() => listRef.current?.scrollToOffset({ offset: Math.max(0, index - 1) * rowH, animated: false }), 0);
+    return () => clearTimeout(t);
+  }, [index, rowH]);
+  return (
+    <View style={{ width, height: rowH * 3, overflow: "hidden" }} accessibilityLabel={label}>
+      <RNFlatList
+        ref={listRef}
+        data={items}
+        keyExtractor={(v) => v}
+        showsVerticalScrollIndicator={false}
+        snapToInterval={rowH}
+        decelerationRate="fast"
+        getItemLayout={(_, i) => ({ length: rowH, offset: rowH * i, index: i })}
+        contentContainerStyle={{ paddingVertical: rowH }}
+        onMomentumScrollEnd={(e) => {
+          const i = Math.round(e.nativeEvent.contentOffset.y / rowH);
+          const clamped = Math.max(0, Math.min(items.length - 1, i));
+          if (clamped !== index) { haptic("selection"); onChange(clamped); }
+        }}
+        renderItem={({ item, index: i }) => (
+          <View style={{ height: rowH, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ fontSize: i === index ? 18 : 16, color: i === index ? colors.text : colors.muted }}>{item}</Text>
+          </View>
+        )}
+      />
+    </View>
+  );
+}
+export function DatePicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (iso: string) => void;
+}) {
+  const [y, m, d] = useMemo(() => {
+    const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value) || ["", "2026", "01", "01"];
+    return [Number(parts[1]), Number(parts[2]), Number(parts[3])];
+  }, [value]);
+  const years = useMemo(() => Array.from({ length: 11 }, (_, i) => String(2026 + i)), []);
+  const months = useMemo(() => Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0")), []);
+  const days = useMemo(() => {
+    const last = new Date(y, m, 0).getDate();
+    return Array.from({ length: last }, (_, i) => String(i + 1).padStart(2, "0"));
+  }, [y, m]);
+  const emit = (ny: number, nm: number, nd: number) => {
+    const last = new Date(ny, nm, 0).getDate();
+    const safeDay = Math.min(Math.max(1, nd), last);
+    onChange(String(ny) + "-" + String(nm).padStart(2, "0") + "-" + String(safeDay).padStart(2, "0"));
+  };
+  return (
+    <View style={{ flexDirection: "row", gap: oaiSpacing.half, justifyContent: "center" }}>
+      <IndexPicker items={days} index={Math.max(0, d - 1)} onChange={(i) => emit(y, m, i + 1)} label="Tag" />
+      <IndexPicker items={months} index={Math.max(0, m - 1)} onChange={(i) => emit(y, i + 1, d)} label="Monat" />
+      <IndexPicker items={years} index={Math.max(0, years.indexOf(String(y)))} onChange={(i) => emit(Number(years[i]), m, d)} label="Jahr" width={100} />
+    </View>
+  );
+}
+export function TimePicker({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (hhmm: string) => void;
+}) {
+  const [hh, mm] = useMemo(() => {
+    const p = /^(\d{2}):(\d{2})$/.exec(value) || ["", "09", "00"];
+    return [Number(p[1]), Number(p[2])];
+  }, [value]);
+  const hours = useMemo(() => Array.from({ length: 24 }, (_, i) => String(i).padStart(2, "0")), []);
+  const minutes = useMemo(() => Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, "0")), []);
+  return (
+    <View style={{ flexDirection: "row", gap: oaiSpacing.half, justifyContent: "center" }}>
+      <IndexPicker items={hours} index={hh} onChange={(i) => onChange(hours[i] + ":" + minutes[Math.round(mm / 5)] )} label="Stunde" />
+      <IndexPicker items={minutes} index={Math.max(0, Math.round(mm / 5))} onChange={(i) => onChange(String(hh).padStart(2, "0") + ":" + minutes[i])} label="Minute" />
+    </View>
+  );
+}
+
+// ───────────────────────────── SectionList + IndexView (Valdi list.dec) ─────────────────────────────
+export function SectionList<T>({
+  sections,
+  renderItem,
+  keyExtractor,
+  sticky = true,
+  style,
+}: {
+  sections: { title: string; data: T[] }[];
+  renderItem: (item: T) => React.ReactElement | null;
+  keyExtractor: (item: T) => string;
+  sticky?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const flat = useMemo(() => {
+    const rows: ({ type: "header"; title: string } | { type: "row"; item: T })[] = [];
+    for (const s of sections) {
+      rows.push({ type: "header", title: s.title });
+      for (const it of s.data) rows.push({ type: "row", item: it });
+    }
+    return rows;
+  }, [sections]);
+  return (
+    <RNFlatList
+      style={style}
+      data={flat}
+      keyExtractor={(r, i) => (r.type === "header" ? "h:" + r.title + ":" + i : keyExtractor(r.item))}
+      stickyHeaderIndices={sticky ? flat.map((r, i) => (r.type === "header" ? i : -1)).filter((i) => i >= 0) : undefined}
+      renderItem={({ item }) =>
+        item.type === "header" ? (
+          <View style={{ backgroundColor: colors.bg, paddingHorizontal: oaiSpacing.oneAndHalf, paddingVertical: oaiSpacing.half }}>
+            <Text accessibilityRole="header" style={{ fontSize: oaiTypography.footnoteSemibold.size, color: colors.muted }}>{item.title}</Text>
+          </View>
+        ) : (
+          renderItem(item.item)
+        )
+      }
+    />
+  );
+}
+export function IndexView({
+  letters,
+  onSelect,
+  active,
+}: {
+  letters: string[];
+  onSelect: (letter: string) => void;
+  active?: string;
+}) {
+  return (
+    <View style={{ position: "absolute", right: 2, top: 0, bottom: 0, justifyContent: "center", gap: 1 }}>
+      {letters.map((l) => (
+        <Pressable
+          key={l}
+          onPress={() => onSelect(l)}
+          hapticOnPress="selection"
+          accessibilityRole="button"
+          accessibilityLabel={"Springe zu " + l}
+          style={{ paddingHorizontal: 6, paddingVertical: 1, borderRadius: oaiRadius.sm }}
+        >
+          <Text style={{ fontSize: 10, fontWeight: active === l ? "700" : "400", color: active === l ? colors.accent : colors.muted }}>{l}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+// ───────────────────────────── SwipeNavigationSurface + SidebarLayout (Valdi navigation.dec) ─────────────────────────────
+export function SwipeNavigationSurface({
+  children,
+  onBack,
+  enabled = true,
+  edgeWidth = 32,
+}: {
+  children?: React.ReactNode;
+  onBack?: () => void;
+  enabled?: boolean;
+  edgeWidth?: number;
+}) {
+  const x = useRef(new Animated.Value(0)).current;
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) => enabled && !!onBack && g.dx > 12 && Math.abs(g.dy) < 24,
+        onPanResponderMove: (_, g) => { if (g.dx > 0) x.setValue(Math.min(g.dx, 320)); },
+        onPanResponderRelease: (_, g) => {
+          const goBack = g.dx > 90 || g.vx > 0.6;
+          Animated.spring(x, { toValue: goBack ? 320 : 0, ...motion.springSidebar, useNativeDriver: true }).start(() => {
+            if (goBack) { haptic("light"); onBack?.(); }
+            x.setValue(0);
+          });
+        },
+        onPanResponderTerminate: () => { Animated.spring(x, { toValue: 0, ...motion.springSidebar, useNativeDriver: true }).start(); },
+      }),
+    [enabled, onBack, x],
+  );
+  return (
+    <View style={{ flex: 1 }} {...pan.panHandlers} hitSlop={{ left: edgeWidth } as any}>
+      <Animated.View style={{ flex: 1, transform: [{ translateX: x }] }}>{children}</Animated.View>
+    </View>
+  );
+}
+export function SidebarLayout({
+  sidebar,
+  children,
+  open,
+  onOpenChange,
+  width = 300,
+}: {
+  sidebar?: React.ReactNode;
+  children?: React.ReactNode;
+  open: boolean;
+  onOpenChange?: (v: boolean) => void;
+  width?: number;
+}) {
+  const x = useRef(new Animated.Value(open ? 0 : -width)).current;
+  useEffect(() => {
+    Animated.spring(x, { toValue: open ? 0 : -width, ...motion.springSidebar, useNativeDriver: true }).start();
+  }, [open, width, x]);
+  return (
+    <View style={{ flex: 1 }}>
+      <View style={{ flex: 1 }}>{children}</View>
+      {open ? (
+        <RNPressable
+          style={[StyleSheet.absoluteFill, { backgroundColor: "#00000033" }]}
+          onPress={() => onOpenChange?.(false)}
+          accessibilityLabel="Seitenleiste schliessen"
+        />
+      ) : null}
+      <Animated.View
+        style={{
+          position: "absolute",
+          top: 0,
+          bottom: 0,
+          left: 0,
+          width,
+          backgroundColor: colors.surface,
+          transform: [{ translateX: x }],
+          borderRightWidth: StyleSheet.hairlineWidth,
+          borderRightColor: colors.border,
+        }}
+      >
+        {sidebar}
+      </Animated.View>
+    </View>
   );
 }
 
