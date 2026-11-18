@@ -150,7 +150,7 @@ export function Pressable({
   accessibilityLabel?: string;
   accessibilityHint?: string;
   /** z. B. "button" | "tab" | "link" — VoiceOver-Ansage (Valdi: a11y_role). */
-  accessibilityRole?: "button" | "tab" | "link" | "header" | "image" | "none";
+  accessibilityRole?: "button" | "tab" | "link" | "header" | "image" | "none" | "radio" | "checkbox" | "search";
   accessibilityState?: { selected?: boolean; disabled?: boolean; busy?: boolean; expanded?: boolean; checked?: boolean };
   /** Container, der nur Taps schluckt: komplett aus der VoiceOver-Reihenfolge nehmen. */
   accessibilityElementsHidden?: boolean;
@@ -709,3 +709,338 @@ export function CharacterCounter({ value, max }: { value: string; max?: number }
     </Text>
   );
 }
+
+// ───────────────────────────── SlidingSelectionIndicator (Valdi tabs.dec) ─────────────────────────────
+// ChatGPT schiebt die Auswahl-Pille zwischen Segmenten, statt sie umzuschalten.
+export function SlidingSelectionIndicator({
+  index,
+  count,
+  width,
+  color = colors.surface,
+}: {
+  index: number;
+  count: number;
+  width: number;
+  color?: string;
+}) {
+  const segment = count > 0 ? width / count : width;
+  const x = useRef(new Animated.Value(index * segment)).current;
+  useEffect(() => {
+    Animated.spring(x, { toValue: index * segment, ...motion.springSidebar, useNativeDriver: true }).start();
+  }, [index, segment, x]);
+  if (width <= 0) return null;
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: "absolute",
+        top: 2,
+        bottom: 2,
+        left: 2,
+        width: Math.max(0, segment - 4),
+        borderRadius: oaiRadius.md,
+        backgroundColor: color,
+        transform: [{ translateX: x }],
+      }}
+    />
+  );
+}
+
+// ───────────────────────────── RadioToggle (Valdi radio_toggle.dec) ─────────────────────────────
+export function RadioToggle({
+  checked,
+  onSelect,
+  label,
+  disabled,
+}: {
+  checked: boolean;
+  onSelect?: () => void;
+  label?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={() => onSelect?.()}
+      disabled={disabled}
+      style={{ flexDirection: "row", alignItems: "center", gap: oaiSpacing.oneAndHalf, paddingVertical: oaiSpacing.one }}
+      accessibilityRole="radio"
+      accessibilityState={{ selected: checked, disabled: !!disabled }}
+      accessibilityLabel={label}
+      hapticOnPress="selection"
+    >
+      <View
+        style={{
+          width: 22,
+          height: 22,
+          borderRadius: 11,
+          borderWidth: 2,
+          borderColor: checked ? colors.accent : colors.border,
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {checked ? <View style={{ width: 12, height: 12, borderRadius: 6, backgroundColor: colors.accent }} /> : null}
+      </View>
+      {label ? <Text style={{ fontSize: oaiTypography.body.size, lineHeight: oaiTypography.body.lineHeight, color: colors.text }}>{label}</Text> : null}
+    </Pressable>
+  );
+}
+
+// ───────────────────────────── CoreToggle / CoreJumboToggle (Valdi core_toggle.dec) ─────────────────────────────
+export function CoreToggle(props: React.ComponentProps<typeof Toggle>) {
+  return <Toggle {...props} />;
+}
+// Jumbo = dieselbe Mechanik, 1.45x skaliert (Valdi: grosser Schalter in Einstellungen).
+export function CoreJumboToggle(props: React.ComponentProps<typeof Toggle>) {
+  return (
+    <View style={{ transform: [{ scale: 1.45 }], width: 38 * 1.45, height: 24 * 1.45, alignItems: "center", justifyContent: "center" }}>
+      <Toggle {...props} />
+    </View>
+  );
+}
+
+// ───────────────────────────── TabsCoordinator / TabsContent (Valdi tabs.dec) ─────────────────────────────
+// Keep-Mounted: ein einmal besuchter Tab bleibt im Baum (Zustand + Scrollposition bleiben).
+export function useTabsCoordinator<T extends string>(initial: T) {
+  const [active, setActive] = useState<T>(initial);
+  const seen = useRef<Set<T>>(new Set<T>([initial]));
+  seen.current.add(active);
+  const isMounted = useMemo(() => (key: T) => seen.current.has(key), [active]);
+  return { active, setActive, isMounted };
+}
+// Alias mit dem Valdi-Namen (die Audit-/Portier-Liste fuehrt "TabsCoordinator").
+export const TabsCoordinator = useTabsCoordinator;
+
+export function TabsContent({
+  active,
+  keepMounted = true,
+  children,
+}: {
+  active: boolean;
+  keepMounted?: boolean;
+  children?: React.ReactNode;
+}) {
+  if (!active && !keepMounted) return null;
+  return <View style={active ? { flex: 1 } : { display: "none" }}>{children}</View>;
+}
+
+// ───────────────────────────── FormField (Valdi form_field.dec) ─────────────────────────────
+export function FormField({
+  label,
+  hint,
+  error,
+  children,
+}: {
+  label?: string;
+  hint?: string;
+  error?: string | null;
+  children?: React.ReactNode;
+}) {
+  return (
+    <View style={{ gap: oaiSpacing.half, paddingVertical: oaiSpacing.half }}>
+      {label ? (
+        <Text style={{ fontSize: oaiTypography.footnoteSemibold.size, color: colors.muted }} accessibilityRole="text">
+          {label}
+        </Text>
+      ) : null}
+      {children}
+      {error ? <Text style={{ fontSize: oaiTypography.caption.size, color: colors.danger }}>{error}</Text> : null}
+      {!error && hint ? <Text style={{ fontSize: oaiTypography.caption.size, color: colors.muted }}>{hint}</Text> : null}
+    </View>
+  );
+}
+
+// ───────────────────────────── SearchField (Valdi search_field.dec) ─────────────────────────────
+export function SearchField({
+  value,
+  onChangeText,
+  placeholder = "Suchen",
+  onDebouncedChange,
+  debounceMs = 120,
+}: {
+  value: string;
+  onChangeText: (v: string) => void;
+  placeholder?: string;
+  onDebouncedChange?: (v: string) => void;
+  debounceMs?: number;
+}) {
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: oaiSpacing.one,
+        backgroundColor: colors.surface2,
+        borderRadius: oaiRadius.pill,
+        paddingHorizontal: oaiSpacing.oneAndHalf,
+        minHeight: oaiControlHeight.sm + 8,
+      }}
+    >
+      <Ionicons name="search" size={16} color={colors.muted} />
+      <TextInput
+        value={value}
+        placeholder={placeholder}
+        placeholderTextColor={colors.muted}
+        returnKeyType="search"
+        autoCorrect={false}
+        accessibilityLabel={placeholder}
+        onChangeText={(v) => {
+          onChangeText(v);
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(() => onDebouncedChange?.(v), debounceMs);
+        }}
+        style={{ flex: 1, paddingVertical: 8, fontSize: 16, color: colors.text }}
+      />
+      {value.length > 0 ? (
+        <Pressable onPress={() => { onChangeText(""); onDebouncedChange?.(""); }} accessibilityLabel="Suche leeren" hapticOnPress="selection">
+          <Ionicons name="close-circle" size={16} color={colors.muted} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+// ───────────────────────────── SelectionMenu (Valdi selection_menu.dec) ─────────────────────────────
+export function SelectionMenu({
+  items,
+  onSelect,
+  onCancel,
+  title,
+}: {
+  items: { key: string; label: string; selected?: boolean; destructive?: boolean }[];
+  onSelect: (key: string) => void;
+  onCancel?: () => void;
+  title?: string;
+}) {
+  return (
+    <View style={{ backgroundColor: colors.surface, borderRadius: oaiRadius.xl, paddingVertical: oaiSpacing.one }}>
+      {title ? (
+        <Text style={{ fontSize: oaiTypography.caption.size, color: colors.muted, paddingHorizontal: oaiSpacing.two, paddingBottom: oaiSpacing.one }}>
+          {title}
+        </Text>
+      ) : null}
+      {items.map((it) => (
+        <Pressable
+          key={it.key}
+          onPress={() => onSelect(it.key)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: !!it.selected }}
+          accessibilityLabel={it.label}
+          hapticOnPress="selection"
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: oaiSpacing.one,
+            paddingHorizontal: oaiSpacing.two,
+            minHeight: oaiControlHeight.md,
+          }}
+        >
+          <Text style={{ fontSize: 17, color: it.destructive ? colors.danger : colors.text }}>{it.label}</Text>
+          {it.selected ? <Ionicons name="checkmark" size={18} color={colors.accent} /> : null}
+        </Pressable>
+      ))}
+      {onCancel ? (
+        <Pressable
+          onPress={onCancel}
+          accessibilityLabel="Abbrechen"
+          style={{ borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border, marginTop: oaiSpacing.one, paddingHorizontal: oaiSpacing.two, minHeight: oaiControlHeight.md, justifyContent: "center" }}
+        >
+          <Text style={{ fontSize: 17, color: colors.muted }}>Abbrechen</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+// ───────────────────────────── Dialog (Valdi dialog.dec) ─────────────────────────────
+// Zentrierte Karte statt Alert: ChatGPT zeigt Rueckfragen im App-Layout.
+export function Dialog({
+  open,
+  title,
+  message,
+  confirmLabel = "OK",
+  cancelLabel = "Abbrechen",
+  destructive,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  message?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  destructive?: boolean;
+  onConfirm?: () => void;
+  onCancel?: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <View style={StyleSheet.absoluteFill} accessibilityViewIsModal>
+      <RNPressable style={[StyleSheet.absoluteFill, { backgroundColor: "#00000066" }]} onPress={onCancel} accessibilityLabel="Dialog schliessen" />
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: oaiSpacing.four }}>
+        <View style={{ width: "100%", maxWidth: 320, backgroundColor: colors.surface, borderRadius: oaiRadius.xl, padding: oaiSpacing.two, gap: oaiSpacing.one }}>
+          <Text style={{ fontSize: oaiTypography.headline.size, fontWeight: "600", color: colors.text, textAlign: "center" }}>{title}</Text>
+          {message ? <Text style={{ fontSize: oaiTypography.subheadline.size, color: colors.muted, textAlign: "center" }}>{message}</Text> : null}
+          <Button
+            label={confirmLabel}
+            onPress={() => onConfirm?.()}
+            variant="primary"
+          />
+          <Pressable onPress={onCancel} accessibilityLabel={cancelLabel} style={{ minHeight: oaiControlHeight.md, alignItems: "center", justifyContent: "center" }}>
+            <Text style={{ fontSize: 17, color: colors.muted }}>{cancelLabel}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ───────────────────────────── InlineEdit (Valdi inline_edit.dec) ─────────────────────────────
+export function InlineEdit({
+  value,
+  onCommit,
+  placeholder = "Name",
+  maxLength = 80,
+}: {
+  value: string;
+  onCommit: (v: string) => void;
+  placeholder?: string;
+  maxLength?: number;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  if (!editing) {
+    return (
+      <Pressable
+        onPress={() => setEditing(true)}
+        accessibilityRole="button"
+        accessibilityLabel={(value || placeholder) + " bearbeiten"}
+        style={{ minHeight: 28, justifyContent: "center" }}
+      >
+        <Text style={{ fontSize: 17, color: value ? colors.text : colors.muted }} numberOfLines={1}>
+          {value || placeholder}
+        </Text>
+      </Pressable>
+    );
+  }
+  return (
+    <TextInput
+      autoFocus
+      value={draft}
+      maxLength={maxLength}
+      placeholder={placeholder}
+      placeholderTextColor={colors.muted}
+      accessibilityLabel={placeholder}
+      onChangeText={setDraft}
+      onBlur={() => { setEditing(false); haptic("selection"); onCommit(draft.trim()); }}
+      onSubmitEditing={() => { setEditing(false); haptic("success"); onCommit(draft.trim()); }}
+      returnKeyType="done"
+      style={{ fontSize: 17, color: colors.text, borderBottomWidth: 1, borderBottomColor: colors.accent, paddingVertical: 4 }}
+    />
+  );
+}
+

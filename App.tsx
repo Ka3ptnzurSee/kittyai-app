@@ -7,6 +7,7 @@ import {
   AppState,
   FlatList,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -38,7 +39,7 @@ import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
-import { Pressable, haptic, ShimmerText, TabsHeader, PullToRefresh, CharacterCounter } from "./components";
+import { haptic, CharacterCounter, Pressable, PullToRefresh, SearchField, ShimmerText, TabsHeader } from "./components";
 import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
@@ -688,6 +689,8 @@ export default function App() {
   // hunderten Server-Sessions, die man hier nie angelegt hat.
   type ChatFilter = "all" | "app" | "server" | "whatsapp" | "terminal";
   const [chatFilter, setChatFilter] = useState<ChatFilter>("app");
+  // Titel-/Vorschau-Filter ueber der Chat-Liste (Volltext kommt in Welle 2).
+  const [chatSearch, setChatSearch] = useState("");
   // Storage-Keys, deren verschlüsselter Bestand vorhanden, aber nicht lesbar ist
   // (Key weg/korrupt bzw. Lesefehler) → NICHT mit leerem Stand überschreiben (kein stiller Datenverlust).
   const storageBlockedRef = useRef<Set<string>>(new Set());
@@ -2999,6 +3002,25 @@ export default function App() {
           ? mergedChats.filter((c) => (c.source || "app") === "app" && c.remote)
           : mergedChats.filter((c) => (c.source || "app") === chatFilter);
 
+  // Titel-/Vorschau-Suche ueber der Liste: Titel + letzte Nachricht, Gross-/Kleinschreibung egal.
+  // Volltext ueber alle Nachrichten folgt in Welle 2 (Index + Treffer-Snippets).
+  const searchedChats = (() => {
+    const q = chatSearch.trim().toLowerCase();
+    if (!q) return filteredChats;
+    return filteredChats.filter((c) => ((c.title || "") + " " + (c.preview || "")).toLowerCase().includes(q));
+  })();
+
+  // Tastatur oeffnen: die Liste selbst resized nicht (der Eingabebalken macht das),
+  // deshalb bleibt die letzte Bubble sonst hinter der Tastatur. ChatGPT haelt sie
+  // sichtbar — nur wenn man schon unten stand, nie beim Lesen alter Nachrichten.
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidShow", () => {
+      if (!activeChatId) return;
+      if (!isNearBottom(activeChatId)) return;
+      listRef.current?.scrollToEnd({ animated: false });
+    });
+    return () => sub.remove();
+  }, [activeChatId]);
   // Server-Verlauf löschen: liegt nur auf dem Hetzner (anderes Gerät, WhatsApp-Bot,
   // Terminal-Historie). Immer mit Rückfrage, denn löschen ist endgültig — bei
   // Terminal-Sessions ist es echte pi-Historie.
@@ -3242,8 +3264,7 @@ export default function App() {
       ) : tab === "chats" ? (
         activeChat ? (
           <>
-            <FlatList
-              ref={listRef}
+            <FlatList ref={listRef} maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
               data={activeChat.messages}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
@@ -3480,6 +3501,9 @@ export default function App() {
           </>
         ) : (
           <>
+            <View style={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+              <SearchField value={chatSearch} onChangeText={setChatSearch} placeholder="Chats durchsuchen" />
+            </View>
             {renderFolders()}
             <View style={styles.srcFilterRow}>
               {([["app", "Dieses Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"], ["all", "Alle"]] as const).map(([k, label]) => (
@@ -3492,7 +3516,7 @@ export default function App() {
               </Pressable>
             </View>
             <FlatList
-              data={filteredChats}
+              data={searchedChats}
               keyExtractor={(c) => c.id}
               renderItem={renderChatItem}
               style={styles.list}
