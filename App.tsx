@@ -1723,7 +1723,27 @@ export default function App() {
             }))
           : [];
         // Leere Server-Antwort nie über den lokalen Verlauf legen.
-        if (msgs.length) setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, messages: msgs } : c)));
+        // MERGE statt Ersetzen: die Server-Antwort kennt nur id/role/text/images —
+        // ein Voll-Ersetzen würde Tool-Karten (activity), DIL-Blöcke, Fehler- und
+        // Freigabe-Karten aus dem sichtbaren Verlauf löschen.
+        if (msgs.length) {
+          setChats((cs) =>
+            cs.map((c) => {
+              if (c.id !== chatId) return c;
+              const serverUsers = msgs.filter((m) => m.role === "user").length;
+              const localUsers = c.messages.filter((m) => m.role === "user").length;
+              if (serverUsers < localUsers) return c; // Server hinterher → nichts anwenden
+              const local = new Map(c.messages.map((m) => [m.id, m]));
+              const merged = msgs.map((m) => {
+                const prev = local.get(m.id);
+                if (!prev) return m;
+                const text = (m.text?.length ?? 0) > (prev.text?.length ?? 0) ? m.text : prev.text;
+                return { ...prev, text, images: m.images ?? prev.images };
+              });
+              return { ...c, messages: merged };
+            }),
+          );
+        }
       }
       void syncServerChats();
     } catch {
@@ -3390,7 +3410,7 @@ export default function App() {
                 </Pressable>
               </Modal>
               <View style={styles.counterRow}>
-                <CharacterCounter value={input} max={4000} />
+                <CharacterCounter value={input} />
               </View>
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (

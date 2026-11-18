@@ -47,7 +47,21 @@ for (const ref of refs) {
   inlined++;
 }
 
-// Sicherheitsnetz: keine externen URLs mehr in der CSS.
+// Sicherheitsnetz 1: JS/CSS werden roh in <style>/<script> eingebettet (MathView.tsx).
+// Ein "</script" oder "</style" im Quelltext würde aus dem Block ausbrechen und die
+// Formel-WebView zu beliebigem HTML machen -> harter Abbruch statt stiller Fehler.
+for (const [label, text, closer] of [["katex.min.js", js, "</script"], ["katex.min.css", css, "</style"]]) {
+  if (text.toLowerCase().includes(closer)) {
+    console.error(`FEHLER: ${label} enthält "${closer}" — kann nicht inline eingebettet werden.`);
+    process.exit(2);
+  }
+}
+if (js.includes("<!--")) {
+  console.error('FEHLER: katex.min.js enthält "<!--" (HTML-Kommentar-Ausbruch).');
+  process.exit(2);
+}
+
+// Sicherheitsnetz 2: keine externen URLs mehr in der CSS.
 const leftover = css.match(/url\(["']?(https?:)?\/\//g);
 if (leftover) {
   console.error(`FEHLER: CSS enthält weiterhin externe URLs (${leftover.length})`);

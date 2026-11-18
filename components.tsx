@@ -686,13 +686,15 @@ export function PullToRefresh({ refreshing, onRefresh }: { refreshing: boolean; 
 
 // ───────────────────────────── CharacterCounter (Valdi oai_ui FormField) ─────────────────────────────
 // Zeigt die Zeichenzahl erst, wenn sie relevant wird (ab 60 % des Limits) — sonst Rauschen.
-export function CharacterCounter({ value, max = 4000 }: { value: string; max?: number }) {
+// Ohne `max` wird nur die Zeichenzahl gezeigt — kein erfundenes Limit anzeigen,
+// das nirgends erzwungen wird (ChatGPT zeigt das Limit nur, wenn es eins gibt).
+export function CharacterCounter({ value, max }: { value: string; max?: number }) {
   const len = value.length;
-  if (len < max * 0.6) return null;
-  const near = len > max * 0.9;
+  if (max === undefined ? len < 1200 : len < max * 0.6) return null;
+  const near = max !== undefined && len > max * 0.9;
   return (
     <Text style={{ fontSize: 11, color: near ? colors.danger : colors.muted, fontVariant: ["tabular-nums"], paddingHorizontal: 8 }}>
-      {len} / {max}
+      {max !== undefined ? `${len} / ${max}` : `${len} Zeichen`}
     </Text>
   );
 }
