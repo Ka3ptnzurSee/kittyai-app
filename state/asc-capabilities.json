@@ -1,6 +1,6 @@
 {
-  "ts": "2026-11-18T12:43:36.325Z",
-  "apply": true,
+  "ts": "2026-11-18T13:44:37.641Z",
+  "apply": false,
   "team": "VW2SBC8228",
   "bundleIds": [
     {
@@ -9,11 +9,10 @@
       "created": false,
       "capsBefore": [
         "IN_APP_PURCHASE",
-        "PUSH_NOTIFICATIONS"
-      ],
-      "capsEnabled": [
+        "PUSH_NOTIFICATIONS",
         "APP_GROUPS"
       ],
+      "capsEnabled": [],
       "error": null,
       "id": "UXAV4PUDPY"
     },
@@ -22,11 +21,10 @@
       "existed": true,
       "created": false,
       "capsBefore": [
-        "IN_APP_PURCHASE"
-      ],
-      "capsEnabled": [
+        "IN_APP_PURCHASE",
         "APP_GROUPS"
       ],
+      "capsEnabled": [],
       "error": null,
       "id": "YA4W95VU9X"
     },
@@ -35,11 +33,10 @@
       "existed": true,
       "created": false,
       "capsBefore": [
-        "IN_APP_PURCHASE"
-      ],
-      "capsEnabled": [
+        "IN_APP_PURCHASE",
         "APP_GROUPS"
       ],
+      "capsEnabled": [],
       "error": null,
       "id": "STZ9SF8JU4"
     },
@@ -49,11 +46,10 @@
       "created": false,
       "capsBefore": [
         "IN_APP_PURCHASE",
-        "PUSH_NOTIFICATIONS"
-      ],
-      "capsEnabled": [
+        "PUSH_NOTIFICATIONS",
         "APP_GROUPS"
       ],
+      "capsEnabled": [],
       "error": null,
       "id": "4JUNQXHTSV"
     }

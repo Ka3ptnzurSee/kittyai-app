@@ -59,6 +59,7 @@ function decodeProfile(file) {
 
 async function main() {
   const dry = process.argv.includes('--dry-run');
+const recreate = process.argv.includes('--recreate');
   // Das Zertifikat MUSS zu credentials/ios_distribution.p12 passen, sonst schlaegt das Signieren fehl.
   // Vergleich ueber die Seriennummer der p12 (fuehrende Nullen ignorieren).
   const p12pw = execFileSync('keysafe', ['show', 'apple/ios-distribution-p12-password'], { encoding: 'utf8' }).trim();
@@ -77,7 +78,8 @@ async function main() {
     const row = { bundleId: t.bundleId, profileId: null, file: null, action: null, error: null };
     try {
       const bundles = await api('GET', '/v1/bundleIds?filter[identifier]=' + encodeURIComponent(t.bundleId) + '&limit=5');
-      const bundle = (bundles.data || [])[0];
+      // filter[identifier] matcht als Prefix: com.meister.piapp liefert auch .widget/.share/.notificationservice.
+      const bundle = (bundles.data || []).find((b) => b.attributes.identifier === t.bundleId);
       if (!bundle) { row.error = 'Bundle-ID fehlt'; report.push(row); continue; }
       const existing = (profiles.data || []).find((p) => p.attributes.name === t.name + ' App Store' || (p.attributes.name || '').startsWith(t.name + ' App Store'));
       let rec = existing;
@@ -95,6 +97,20 @@ async function main() {
         });
         rec = created.data;
         row.action = 'angelegt';
+      } else if (recreate) {
+        await api('DELETE', '/v1/profiles/' + existing.id);
+        const created = await api('POST', '/v1/profiles', {
+          data: {
+            type: 'profiles',
+            attributes: { name: t.name + ' App Store', profileType: 'IOS_APP_STORE' },
+            relationships: {
+              bundleId: { data: { type: 'bundleIds', id: bundle.id } },
+              certificates: { data: [{ type: 'certificates', id: cert.id }] },
+            },
+          },
+        });
+        rec = created.data;
+        row.action = 'neu angelegt';
       } else {
         row.action = 'vorhanden';
       }
