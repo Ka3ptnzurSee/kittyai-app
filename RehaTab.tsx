@@ -1098,6 +1098,11 @@ function RehaCoach({
   onClose: () => void;
 }) {
   const [verlauf, setVerlauf] = useState<{ role: "du" | "coach"; text: string }[]>([]);
+  // Eigene, frische chatId pro Coach-Sitzung: die feste ID "reha-coach" liess die
+  // Server-Session auf 473 KB anwachsen (jede Frage schickt das ganze Lagebild mit).
+  // Ab dieser Groesse lief der Turn in Zeitueberschreitungen / leere Antworten.
+  const chatIdRef = useRef<string>("");
+  if (!chatIdRef.current) chatIdRef.current = "reha-coach-" + Date.now().toString(36);
   const [text, setText] = useState("");
   const [laeuft, setLaeuft] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
@@ -1121,7 +1126,7 @@ function RehaCoach({
         const res = await fetch(base + "/api/chat", {
           method: "POST",
           headers,
-          body: JSON.stringify({ message: rehaLagebild(data) + f, chatId: "reha-coach" }),
+          body: JSON.stringify({ message: rehaLagebild(data) + f, chatId: chatIdRef.current }),
         });
         const j = await res.json().catch(() => ({}));
         if (!res.ok) {
