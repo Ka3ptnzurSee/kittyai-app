@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
+import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
@@ -389,6 +389,26 @@ test("sanitizeLoadedMessages lässt inhaltsvolle Nachrichten unangetastet", () =
 });
 
 // ── stripErrorFlags: Speichern ohne Fehlerkarten, Text bleibt ──
+test("isFallbackReply erkennt die Notausgang-Texte des Servers", () => {
+  assert.strictEqual(isFallbackReply("Fertig — das Modell hat eine leere Antwort geliefert. Bitte erneut senden."), true);
+  assert.strictEqual(isFallbackReply("Fertig — es kam keine Textantwort vom Modell, nur Werkzeug-Aufrufe (3×). Sag mach weiter, dann fasse ich das Ergebnis in Worte."), true);
+  assert.strictEqual(isFallbackReply("Fertig – das Modell hat eine leere Antwort geliefert. Bitte erneut senden."), true);
+  assert.strictEqual(isFallbackReply("Normale Antwort"), false);
+  assert.strictEqual(isFallbackReply(""), false);
+  assert.strictEqual(isFallbackReply(undefined), false);
+});
+
+test("sanitizeLoadedMessages wirft gespeicherte Fallback-Texte raus", () => {
+  const msgs = [
+    { id: "u1", role: "user", text: "reha" },
+    { id: "a1", role: "assistant", text: "Fertig — das Modell hat eine leere Antwort geliefert. Bitte erneut senden." },
+    { id: "a2", role: "assistant", text: "Echte Antwort" },
+  ];
+  const out = sanitizeLoadedMessages(msgs);
+  assert.strictEqual(out.length, 2);
+  assert.deepStrictEqual(out.map((m: any) => m.id), ["u1", "a2"]);
+});
+
 test("stripErrorFlags entfernt nur das error-Flag, Text bleibt stehen", () => {
   const msgs = [
     { id: "u1", role: "user", text: "hallo" },

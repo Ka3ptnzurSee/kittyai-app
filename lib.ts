@@ -169,6 +169,7 @@ export function sanitizeLoadedMessages<T extends { id?: string; role?: string; e
   if (!Array.isArray(messages)) return [];
   return messages
     .map((m) => (m && m.role === "assistant" && m.error ? ({ ...m, error: undefined } as T) : m))
+    .filter((m) => !isFallbackReply((m as { text?: string })?.text))
     .filter((m) => !isBlankAiMessage(m) || m?.id === anchorId);
 }
 
@@ -183,6 +184,25 @@ export function sanitizeLoadedMessages<T extends { id?: string; role?: string; e
 export function stripErrorFlags<T extends { error?: unknown }>(messages: T[]): T[] {
   if (!Array.isArray(messages)) return [];
   return messages.map((m) => (m && m.error ? ({ ...m, error: undefined } as T) : m));
+}
+
+/**
+ * Notausgang-Texte des Servers (lib.js: emptyReplyFallback) erkennen.
+ *
+ * Wenn das Modell einen Turn ohne Text-Block beendet, schickt der Server statt einer
+ * leeren Bubble einen Hinweis wie "Fertig — das Modell hat eine leere Antwort
+ * geliefert. Bitte erneut senden." Diese Nachricht ist KEIN Fehler-Flag und wurde
+ * deshalb als normaler Chat-Text gespeichert — sie blieb fuer immer im Verlauf.
+ */
+export function isFallbackReply(text: string | undefined | null): boolean {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  return (
+    t.startsWith("Fertig — das Modell hat eine leere Antwort geliefert") ||
+    t.startsWith("Fertig – das Modell hat eine leere Antwort geliefert") ||
+    t.startsWith("Fertig — es kam keine Textantwort vom Modell") ||
+    t.startsWith("Fertig – es kam keine Textantwort vom Modell")
+  );
 }
 
 // ── Tool-Berechtigungskarten: menschliche Namen + Icons für pi-Werkzeuge ──
