@@ -181,6 +181,8 @@ export const oaiTypography = {
   title3Semibold: { size: 20, lineHeight: 24, weight: "600" as const },
   headline: { size: 17, lineHeight: 22, weight: "600" as const },
   headlineRegular: { size: 17, lineHeight: 20, weight: "400" as const },
+  // Inline-Titel der Navigationsleiste (UIKit: UINavigationBar inline title, 17 pt semibold)
+  inlineTitle: { size: 17, lineHeight: 22, weight: "600" as const },
   body: { size: 17, lineHeight: 24, weight: "400" as const },
   bodyMedium: { size: 17, lineHeight: 22, weight: "500" as const },
   bodyStrong: { size: 17, lineHeight: 22, weight: "600" as const },
