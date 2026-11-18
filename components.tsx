@@ -1312,7 +1312,9 @@ export function SwipeNavigationSurface({
   const pan = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) => enabled && !!onBack && g.dx > 12 && Math.abs(g.dy) < 24,
+        // Nur am linken Rand starten (pageX - dx = Startpunkt), sonst klaut die Geste Tabellen-Scrolls.
+        onMoveShouldSetPanResponder: (e, g) =>
+          enabled && !!onBack && g.dx > 12 && Math.abs(g.dy) < 24 && e.nativeEvent.pageX - g.dx <= edgeWidth,
         onPanResponderMove: (_, g) => { if (g.dx > 0) x.setValue(Math.min(g.dx, 320)); },
         onPanResponderRelease: (_, g) => {
           const goBack = g.dx > 90 || g.vx > 0.6;
@@ -1323,10 +1325,10 @@ export function SwipeNavigationSurface({
         },
         onPanResponderTerminate: () => { Animated.spring(x, { toValue: 0, ...motion.springSidebar, useNativeDriver: true }).start(); },
       }),
-    [enabled, onBack, x],
+    [enabled, onBack, x, edgeWidth],
   );
   return (
-    <View style={{ flex: 1 }} {...pan.panHandlers} hitSlop={{ left: edgeWidth } as any}>
+    <View style={{ flex: 1 }} {...pan.panHandlers}>
       <Animated.View style={{ flex: 1, transform: [{ translateX: x }] }}>{children}</Animated.View>
     </View>
   );
