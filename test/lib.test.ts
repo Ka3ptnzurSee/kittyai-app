@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -412,4 +412,35 @@ test("sanitizeLoadedMessages ist robust gegen leere/kaputte Einträge", () => {
   assert.deepStrictEqual(sanitizeLoadedMessages([]), []);
   assert.deepStrictEqual(sanitizeLoadedMessages([{ id: "x", role: "user", text: "" }]).length, 1);
   assert.strictEqual(sanitizeLoadedMessages(null as unknown as []).length, 0);
+});
+
+// Reha: Wochentag kommt aus dem Datum, nicht aus dem Index. Der Server liefert
+// weekday 0-basiert (0 = Montag), alte Staende ISO (1 = Montag) -> frueher hiess
+// Mittwoch "Dienstag" und das Lagebild zeigte den Plan vom Vortag.
+test("rehaTagName liest den Wochentag aus dem Datum", () => {
+  assert.strictEqual(rehaTagName({ today: "2026-11-16", weekday: 0 }), "Montag");
+  assert.strictEqual(rehaTagName({ today: "2026-11-17", weekday: 1 }), "Dienstag");
+  assert.strictEqual(rehaTagName({ today: "2026-11-18", weekday: 2 }), "Mittwoch");
+  assert.strictEqual(rehaTagName({ today: "2026-11-21", weekday: 5 }), "Samstag");
+  assert.strictEqual(rehaTagName({ today: "2026-11-22", weekday: 6 }), "Sonntag");
+});
+
+test("rehaTagName ignoriert einen falschen weekday-Index", () => {
+  // Datum gewinnt: 2026-11-18 ist Mittwoch, auch wenn weekday=1 (Dienstag) kommt
+  assert.strictEqual(rehaTagName({ today: "2026-11-18", weekday: 1 }), "Mittwoch");
+  // Alt-Server-Format (ISO): weekday=3 = Mittwoch, Datum sagt auch Mittwoch
+  assert.strictEqual(rehaTagName({ today: "2026-11-18", weekday: 3 }), "Mittwoch");
+});
+
+test("rehaTagName faellt ohne Datum auf den 0-basierten Index zurueck", () => {
+  assert.strictEqual(rehaTagName({ weekday: 0 }), "Montag");
+  assert.strictEqual(rehaTagName({ weekday: 6 }), "Sonntag");
+});
+
+test("rehaTagName ist null-sicher", () => {
+  assert.strictEqual(rehaTagName(null), "");
+  assert.strictEqual(rehaTagName(undefined), "");
+  assert.strictEqual(rehaTagName({}), "");
+  assert.strictEqual(rehaTagName({ today: "18.11.2026" }), "");
+  assert.strictEqual(rehaTagName({ today: "2026-11-18", weekday: Number.NaN }), "Mittwoch");
 });

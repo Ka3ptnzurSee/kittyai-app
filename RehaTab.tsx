@@ -12,6 +12,7 @@ import {
 import Svg, { Line as SvgLine, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import { Ionicons } from "./icons";
 import { colors } from "./theme";
+import { rehaTagName } from "./lib";
 
 type IonName = React.ComponentProps<typeof Ionicons>["name"];
 
@@ -914,9 +915,8 @@ function VerlaufView({ data }: { data: ComebackData }) {
 
 function PlanView({ data }: { data: ComebackData }) {
   const wochenplan: any[] = data.wochenplan || [];
-  // state.weekday ist ISO (1 = Montag). Der Plan liefert nur den Namen -> ueber Namen matchen.
-  const DOW = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
-  const heuteName = DOW[(Number(data.state?.weekday ?? 0) || new Date().getDay() || 7) - 1] || "";
+  // Wochentag aus dem Datum ableiten (Server liefert 0-basiert, alte Staende ISO).
+  const heuteName = rehaTagName(data.state);
   const einheiten = wochenplan.map((w) => String(w.soll?.einheit || "Frei"));
   const kraft = wochenplan.filter((w) => w.krafttag).length;
   const physio = einheiten.filter((e) => /physio/i.test(e)).length;
@@ -1017,8 +1017,7 @@ function rehaLagebild(data: ComebackData | null): string {
   if (!data) return "";
   const s: any = data.state || {};
   const r: any = data.result || {};
-  const DOW = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
-  const tagName = DOW[(Number(s.weekday) || 1) - 1] || "";
+  const tagName = rehaTagName(s);
   const planHeute = (data.wochenplan || []).find((w: any) => w.wochentag === tagName);
   const soll: any = planHeute?.soll || {};
   const tiles: any[] = (data.wellness_tiles || []).filter((t: any) => t.wert);

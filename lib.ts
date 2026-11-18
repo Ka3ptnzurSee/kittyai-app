@@ -588,3 +588,27 @@ export function fileExtOf(uri: string): string {
   const m = String(uri || "").split(/[?#]/)[0].match(/\.([a-z0-9]+)$/i);
   return m ? m[1].toLowerCase() : "";
 }
+
+/** Wochentagsnamen, Index 0 = Montag (wie der Reha-Server plan.strength_days). */
+export const REHA_DOW = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
+
+/**
+ * Wochentagsname des Reha-Tags aus dem Zustand.
+ *
+ * Der Server liefert `state.today` (YYYY-MM-DD) und `state.weekday` 0-basiert
+ * (0 = Montag). Fruehere Server-Versionen schickten ISO (1 = Montag), deshalb
+ * wird der Name primaer aus dem DATUM berechnet — der Index ist nur Fallback.
+ * Vorher wurde `weekday` als ISO gelesen, dadurch hiess Mittwoch "Dienstag" und
+ * das Lagebild zeigte den Plan vom Vortag (Kraft-Tag als "Physio Dresden").
+ */
+export function rehaTagName(state: { today?: string; weekday?: number } | null | undefined): string {
+  const iso = String(state?.today || "");
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (!Number.isNaN(d.getTime())) return REHA_DOW[(d.getDay() + 6) % 7];
+  }
+  const n = Number(state?.weekday);
+  if (Number.isFinite(n)) return REHA_DOW[((Math.trunc(n) % 7) + 7) % 7];
+  return "";
+}
