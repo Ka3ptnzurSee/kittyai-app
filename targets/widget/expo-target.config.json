@@ -1,0 +1,9 @@
+{
+  "type": "widget",
+  "bundleIdentifier": "com.meister.piapp.widget",
+  "name": "KittyWidget",
+  "colors": {
+    "$accent": "#C96442",
+    "$widgetBackground": "#FAF9F5"
+  }
+}

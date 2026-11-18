@@ -1824,6 +1824,32 @@ export default function App() {
     setActiveChatId(id);
   }
 
+  // Deeplinks aus Widget, Shortcuts und Extensions: kittyai://new | voice | chats
+  const deepLinkRef = useRef<(url: string | null) => void>(() => {});
+  useEffect(() => {
+    deepLinkRef.current = (url: string | null) => {
+      if (!url) return;
+      const m = /^kittyai:\/\/([a-z]+)/i.exec(url);
+      if (!m) return;
+      const action = m[1].toLowerCase();
+      haptic("light");
+      if (action === "new") {
+        newChat();
+      } else if (action === "voice") {
+        newChat();
+        setTimeout(() => { void toggleMic(); }, 400);
+      } else if (action === "chats") {
+        setActiveChatId(null);
+        setTab("chats");
+      }
+    };
+  });
+  useEffect(() => {
+    Linking.getInitialURL().then((u) => deepLinkRef.current(u)).catch(() => {});
+    const sub = Linking.addEventListener("url", (e) => deepLinkRef.current(e.url));
+    return () => sub.remove();
+  }, []);
+
   function newChat(): string {
     const id = uid("c");
     const chat: Chat = { id, title: "Neuer Chat", messages: [], createdAt: Date.now(), updatedAt: Date.now() };
