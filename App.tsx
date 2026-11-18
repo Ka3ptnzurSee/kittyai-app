@@ -2412,6 +2412,7 @@ export default function App() {
         const KIND_LABEL: Record<string, string> = {
           compaction_busy: "Kontext wird kompaktiert",
           progress_timeout: "Keine Antwort erhalten",
+          empty_reply: "Keine Textantwort vom Modell",
           turn_timeout: "Zeitüberschreitung",
           session_reset: "Session zurückgesetzt",
           rate_limit: "Limit erreicht",
