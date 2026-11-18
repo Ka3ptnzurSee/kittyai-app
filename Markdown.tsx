@@ -25,6 +25,21 @@ import yaml from "highlight.js/lib/languages/yaml";
 import ini from "highlight.js/lib/languages/ini";
 import diff from "highlight.js/lib/languages/diff";
 import plaintext from "highlight.js/lib/languages/plaintext";
+// Claude-Grammatiksatz (highlight.js 11.11.2, alle 34 in bash.peg) — 18.11.2026 ergänzt:
+import csharp from "highlight.js/lib/languages/csharp";
+import dart from "highlight.js/lib/languages/dart";
+import graphql from "highlight.js/lib/languages/graphql";
+import handlebars from "highlight.js/lib/languages/handlebars";
+import less from "highlight.js/lib/languages/less";
+import lua from "highlight.js/lib/languages/lua";
+import makefile from "highlight.js/lib/languages/makefile";
+import objectivec from "highlight.js/lib/languages/objectivec";
+import perl from "highlight.js/lib/languages/perl";
+import php from "highlight.js/lib/languages/php";
+import powershell from "highlight.js/lib/languages/powershell";
+import r from "highlight.js/lib/languages/r";
+import ruby from "highlight.js/lib/languages/ruby";
+import scss from "highlight.js/lib/languages/scss";
 import { aiFontFamily, colors, monoFontFamily } from "./theme";
 import { MathView } from "./MathView";
 import { splitMathSegments, escapeInlineMathMeta } from "./dilviz";
@@ -52,6 +67,20 @@ hljs.registerLanguage("yaml", yaml);
 hljs.registerLanguage("ini", ini);
 hljs.registerLanguage("diff", diff);
 hljs.registerLanguage("plaintext", plaintext);
+hljs.registerLanguage("csharp", csharp);
+hljs.registerLanguage("dart", dart);
+hljs.registerLanguage("graphql", graphql);
+hljs.registerLanguage("handlebars", handlebars);
+hljs.registerLanguage("less", less);
+hljs.registerLanguage("lua", lua);
+hljs.registerLanguage("makefile", makefile);
+hljs.registerLanguage("objectivec", objectivec);
+hljs.registerLanguage("perl", perl);
+hljs.registerLanguage("php", php);
+hljs.registerLanguage("powershell", powershell);
+hljs.registerLanguage("r", r);
+hljs.registerLanguage("ruby", ruby);
+hljs.registerLanguage("scss", scss);
 
 // Übliche LLM-Sprach-Labels auf registrierte Sprachen mappen.
 hljs.registerAliases("js", { languageName: "javascript" });
@@ -66,6 +95,14 @@ hljs.registerAliases(["golang"], { languageName: "go" });
 hljs.registerAliases(["rs"], { languageName: "rust" });
 hljs.registerAliases(["kt"], { languageName: "kotlin" });
 hljs.registerAliases(["txt", "text"], { languageName: "plaintext" });
+hljs.registerAliases(["cs", "c#"], { languageName: "csharp" });
+hljs.registerAliases(["objc", "obj-c", "objective-c"], { languageName: "objectivec" });
+hljs.registerAliases(["ps1", "pwsh", "ps"], { languageName: "powershell" });
+hljs.registerAliases(["hbs", "mustache"], { languageName: "handlebars" });
+hljs.registerAliases(["rb"], { languageName: "ruby" });
+hljs.registerAliases(["gql"], { languageName: "graphql" });
+hljs.registerAliases(["mk", "make"], { languageName: "makefile" });
+hljs.registerAliases(["pl"], { languageName: "perl" });
 
 // GitHub-Light-Farbtöne für hljs-Klassen (dezent, passend zum warmen Claude-Theme).
 const HLJS_COLORS: Record<string, string> = {

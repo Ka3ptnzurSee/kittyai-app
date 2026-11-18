@@ -16,6 +16,7 @@ import {
   TextInput,
   Pressable as RNPressable,
   Animated,
+  RefreshControl,
   StyleSheet,
   type ViewStyle,
   type TextStyle,
@@ -24,6 +25,7 @@ import {
 } from "react-native";
 import * as Haptics from "expo-haptics";
 import { Ionicons } from "./icons";
+import type { ComponentProps } from "react";
 import {
   colors,
   oaiRadius,
@@ -37,10 +39,15 @@ import {
 // Haptics.*Async() liefert ein Promise: try/catch allein faengt nur synchrone
 // Fehler, auf Web/Android ohne Vibrator rejectet das Promise -> unhandled
 // rejection. Deshalb zusaetzlich .catch(() => {}) an jedem Aufruf.
-export function haptic(kind: "action_sheet" | "selection" | "light" | "medium" = "light"): void {
+export type HapticKind = "action_sheet" | "selection" | "light" | "medium" | "success" | "error" | "warning";
+
+export function haptic(kind: HapticKind = "light"): void {
   try {
     if (kind === "selection") Haptics.selectionAsync().catch(() => {});
     else if (kind === "medium") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    else if (kind === "success") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    else if (kind === "error") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+    else if (kind === "warning") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     else if (kind === "action_sheet") Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     else Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
   } catch {
@@ -124,6 +131,8 @@ export function Pressable({
   style,
   hitSlop,
   accessibilityLabel,
+  accessibilityHint,
+  selected,
   hapticOnPress = "light",
 }: {
   onPress?: () => void;
@@ -136,6 +145,9 @@ export function Pressable({
   style?: StyleProp<ViewStyle>;
   hitSlop?: number;
   accessibilityLabel?: string;
+  accessibilityHint?: string;
+  /** VoiceOver-Zustand (z. B. aktiver Chat, gewählter Tab). */
+  selected?: boolean;
   hapticOnPress?: "light" | "medium" | "selection" | "none";
 }) {
   return (
@@ -150,10 +162,11 @@ export function Pressable({
       }}
       delayLongPress={delayLongPress}
       accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
       // Ohne role liest VoiceOver nur den Text vor, nicht "Taste"; accessibilityState
       // sagt den deaktivierten Zustand an (sichtbar ist er nur ueber opacity).
       accessibilityRole="button"
-      accessibilityState={{ disabled: !!disabled }}
+      accessibilityState={{ disabled: !!disabled, selected: selected }}
       onPress={() => {
         if (disabled) return;
         if (hapticOnPress !== "none") haptic(hapticOnPress === "selection" ? "selection" : hapticOnPress);
@@ -555,5 +568,131 @@ export function OAIInput({
         rest.style as TextStyle,
       ]}
     />
+  );
+}
+
+// ───────────────────────────── ShimmerText (Valdi ShimmerText.js) ─────────────────────────────
+// ChatGPT animiert beim Warten den TEXT selbst (Glyph-Opazität 1 → 0.5, Zyklus 1400 ms,
+// Keyframes [0.5→0.35, 1→0.6]), nicht nur Platzhalter-Balken. Wird für die
+// „denkt nach …"-Zeile benutzt, damit Streaming/Warten lebendig wirkt statt statisch.
+export function ShimmerText({
+  children,
+  style,
+  durationMs = motion.shimmerCycleMs,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<TextStyle>;
+  durationMs?: number;
+}) {
+  const op = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    const half = Math.max(120, Math.round(durationMs / 2));
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(op, { toValue: motion.shimmerOpacityMin, duration: half, useNativeDriver: true }),
+        Animated.timing(op, { toValue: 1, duration: half, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [op, durationMs]);
+  return <Animated.Text style={[{ opacity: op }, style]}>{children}</Animated.Text>;
+}
+
+// ───────────────────────────── TabsHeader (Valdi widgets/tabs/TabsHeader.js) ─────────────────────────────
+// Animierter Underline (lerp + clamp auf die Breite des aktiven Tabs), Haptik „selection".
+export function TabsHeader<T extends string>({
+  items,
+  value,
+  onChange,
+}: {
+  items: { key: T; label: string; icon?: ComponentProps<typeof Ionicons>["name"] }[];
+  value: T;
+  onChange?: (key: T) => void;
+}) {
+  const [widths, setWidths] = useState<number[]>([]);
+  const [offsets, setOffsets] = useState<number[]>([]);
+  const x = useRef(new Animated.Value(0)).current;
+  const w = useRef(new Animated.Value(0)).current;
+  const idx = Math.max(0, items.findIndex((i) => i.key === value));
+  const measured = widths.length === items.length && offsets.length === items.length;
+
+  useEffect(() => {
+    if (!measured) return;
+    const goX = Math.max(0, offsets[idx] ?? 0);
+    const goW = Math.max(0, widths[idx] ?? 0);
+    Animated.parallel([
+      Animated.spring(x, { toValue: goX, ...motion.springDefault, useNativeDriver: false }),
+      Animated.spring(w, { toValue: goW, ...motion.springDefault, useNativeDriver: false }),
+    ]).start();
+  }, [idx, measured, widths, offsets, x, w]);
+
+  return (
+    <View style={{ flexDirection: "row", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, backgroundColor: colors.surface, position: "relative" }}>
+      {items.map((it, i) => {
+        const active = it.key === value;
+        const tint = active ? colors.accent : colors.muted;
+        return (
+          <RNPressable
+            key={it.key}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            accessibilityLabel={it.label}
+            onPress={() => {
+              haptic("selection");
+              onChange?.(it.key);
+            }}
+            onLayout={(e) => {
+              const { width } = e.nativeEvent.layout;
+              // offset = linke Kante des Tabs im Eltern-Container (Tabs sind gleich breit → index*width)
+              setWidths((prev) => { const n = [...prev]; n[i] = width; return n; });
+              setOffsets((prev) => { const n = [...prev]; n[i] = i * width; return n; });
+            }}
+            style={{ flex: 1, alignItems: "center", paddingVertical: 11 }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              {it.icon ? <Ionicons name={it.icon} size={16} color={tint} /> : null}
+              <Text style={{ fontSize: 15, color: tint, fontWeight: active ? "700" : "400" }}>{it.label}</Text>
+            </View>
+          </RNPressable>
+        );
+      })}
+      {measured ? (
+        <Animated.View
+          pointerEvents="none"
+          style={{ position: "absolute", bottom: 0, height: 2, backgroundColor: colors.accent, left: x, width: w }}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+// ───────────────────────────── PullToRefresh (Valdi widgets/PullToRefresh.js) ─────────────────────────────
+// RN-RefreshControl als Komponente verpackt, damit `refreshControl={<PullToRefresh …/>}`
+// überall gleich aussieht (Akzentfarbe, Haptik beim Auslösen).
+export function PullToRefresh({ refreshing, onRefresh }: { refreshing: boolean; onRefresh?: () => void }) {
+  return (
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={() => {
+        haptic("light");
+        onRefresh?.();
+      }}
+      tintColor={colors.accent}
+      colors={[colors.accent]}
+    />
+  );
+}
+
+// ───────────────────────────── CharacterCounter (Valdi oai_ui FormField) ─────────────────────────────
+// Zeigt die Zeichenzahl erst, wenn sie relevant wird (ab 60 % des Limits) — sonst Rauschen.
+export function CharacterCounter({ value, max = 4000 }: { value: string; max?: number }) {
+  const len = value.length;
+  if (len < max * 0.6) return null;
+  const near = len > max * 0.9;
+  return (
+    <Text style={{ fontSize: 11, color: near ? colors.danger : colors.muted, fontVariant: ["tabular-nums"], paddingHorizontal: 8 }}>
+      {len} / {max}
+    </Text>
   );
 }

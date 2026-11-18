@@ -38,7 +38,7 @@ import { preloadFonts } from "./fonts";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
-import { Pressable } from "./components";
+import { Pressable, haptic, ShimmerText, TabsHeader, PullToRefresh, CharacterCounter } from "./components";
 import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
@@ -312,6 +312,7 @@ function PermissionCard({ p, onDecision }: { p: PermissionRequest; onDecision?: 
   const statusLabel = p.status === "allowed" ? "erlaubt" : p.status === "denied" ? "verweigert" : "warte auf Freigabe …";
   const decide = async (decision: "allow" | "deny") => {
     if (!onDecision || busy) return;
+    haptic(decision === "allow" ? "success" : "warning");
     setBusy(true);
     try {
       await onDecision(p, decision);
@@ -334,11 +335,11 @@ function PermissionCard({ p, onDecision }: { p: PermissionRequest; onDecision?: 
       ) : null}
       {pending ? (
         <View style={styles.permissionActions}>
-          <Pressable onPress={() => decide("allow")} disabled={busy} style={[styles.permissionBtn, styles.permissionAllow, busy && styles.permissionBtnDisabled]}>
+          <Pressable onPress={() => decide("allow")} disabled={busy} accessibilityLabel="Werkzeug erlauben" style={[styles.permissionBtn, styles.permissionAllow, busy && styles.permissionBtnDisabled]}>
             <Ionicons name="checkmark-circle-outline" size={16} color="#fff" />
             <Text style={styles.permissionBtnText}>Erlauben</Text>
           </Pressable>
-          <Pressable onPress={() => decide("deny")} disabled={busy} style={[styles.permissionBtn, styles.permissionDeny, busy && styles.permissionBtnDisabled]}>
+          <Pressable onPress={() => decide("deny")} disabled={busy} accessibilityLabel="Werkzeug verweigern" style={[styles.permissionBtn, styles.permissionDeny, busy && styles.permissionBtnDisabled]}>
             <Ionicons name="close-circle-outline" size={16} color="#fff" />
             <Text style={styles.permissionBtnText}>Verweigern</Text>
           </Pressable>
@@ -508,7 +509,7 @@ function MessageBubble({
                 <Text style={styles.errorCardText}>{item.error.type}</Text>
               </View>
               {item.error.retryable && onRetry ? (
-                <Pressable onPress={() => onRetry(item)} style={styles.errorRetryBtn}>
+                <Pressable onPress={() => onRetry(item)} style={styles.errorRetryBtn} accessibilityLabel="Antwort erneut versuchen">
                   <View style={styles.errorRetryRow}>
                     <Ionicons name="refresh" size={13} color="#ffffff" />
                     <Text style={styles.errorRetryText}>Erneut versuchen</Text>
@@ -601,6 +602,7 @@ export default function App() {
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
+  const [refreshingChat, setRefreshingChat] = useState(false); // Pull-to-Refresh läuft
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
   const [listening, setListening] = useState(false);
@@ -771,6 +773,7 @@ export default function App() {
 
   // Setzt eine Fehlerkarte UND meldet sie (einheitlicher Pfad für alle Stellen).
   function setErrorCard(chatId: string, msgId: string, type: string, retryable: boolean, source: string, detail?: string) {
+    haptic("error"); // spürbar wie ChatGPT/Claude: Fehler meldet sich an, nicht nur visuell
     patchMsg(chatId, msgId, (m) => ({ ...m, error: { type, retryable } }));
     reportClientError(errorKindOf(type), source, detail || type, chatId);
   }
@@ -1699,6 +1702,37 @@ export default function App() {
     }
   }
 
+  // Pull-to-Refresh im Chat: Verlauf komplett vom Server nachladen (z. B. Antwort kam,
+  // während die App im Hintergrund war). Laufender Turn wird NICHT überschrieben.
+  async function refreshActiveChat() {
+    const chatId = activeChatId;
+    if (!chatId || busyChatIds.has(chatId) || refreshingChat) return;
+    setRefreshingChat(true);
+    haptic("light");
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${base}/api/session/${encodeURIComponent(chatId)}`, { headers: authHeaders() });
+      if (res.ok) {
+        const data = await res.json();
+        const msgs: Msg[] = Array.isArray(data?.messages)
+          ? data.messages.slice(-300).map((m: any, i: number) => ({
+              id: String(m.id || `r${i}`),
+              role: m.role === "user" ? "user" : "assistant",
+              text: String(m.text || ""),
+              images: Array.isArray(m.images) && m.images.length ? m.images : undefined,
+            }))
+          : [];
+        // Leere Server-Antwort nie über den lokalen Verlauf legen.
+        if (msgs.length) setChats((cs) => cs.map((c) => (c.id === chatId ? { ...c, messages: msgs } : c)));
+      }
+      void syncServerChats();
+    } catch {
+      // offline → lokaler Verlauf bleibt stehen
+    } finally {
+      setRefreshingChat(false);
+    }
+  }
+
   // Verlauf eines Server-Chats laden und als lokalen Chat übernehmen.
   async function adoptRemoteChat(r: Chat) {
     const chat: Chat = { ...r, remote: false, createdAt: Date.now() };
@@ -2079,6 +2113,7 @@ export default function App() {
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
+    haptic("light"); // Senden quittiert wie ChatGPT (UIImpactFeedbackGenerator.light)
     wentBackgroundRef.current = false; // neuer Turn → Hintergrund-Flag zurücksetzen
     let turnStillRunning = false; // Server-Turn läuft noch → kein Fehler, Busy-Polling übernimmt
     const isFirst = !chats.find((c) => c.id === chatId)?.messages.length;
@@ -2857,7 +2892,14 @@ export default function App() {
             : null;
     const avatarIcon = item.source === "whatsapp" ? "logo-whatsapp" : item.source === "terminal" ? "terminal-outline" : "chatbubbles-outline";
     return (
-      <Pressable onPress={() => openChat(item.id)} onLongPress={() => (item.readOnly ? undefined : setAssignChatId(item.id))} style={[styles.chatItem, isActive && styles.chatItemActive]}>
+      <Pressable
+        onPress={() => openChat(item.id)}
+        onLongPress={() => (item.readOnly ? undefined : setAssignChatId(item.id))}
+        accessibilityLabel={`${item.title || "Chat"}${item.source && item.source !== "app" ? `, ${item.source === "whatsapp" ? "WhatsApp" : "Terminal"}-Verlauf` : ""}`}
+        accessibilityHint={item.readOnly ? "Nur lesbar" : "Öffnet den Verlauf; lange drücken zum Verschieben in einen Ordner"}
+        selected={isActive}
+        style={[styles.chatItem, isActive && styles.chatItemActive]}
+      >
         <View style={[styles.chatAvatar, item.source === "whatsapp" && { backgroundColor: "#E7F9EE" }, item.source === "terminal" && { backgroundColor: "#EFEFF2" }]}>
           <Ionicons name={avatarIcon as any} size={20} color={item.source === "whatsapp" ? "#128C4A" : item.source === "terminal" ? "#5D5D5D" : colors.accent} />
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
@@ -3139,43 +3181,32 @@ export default function App() {
         </View>
         <View style={styles.headerActions}>
           {activeChatId && tab === "chats" ? (
-            <Pressable onPress={() => deleteChat(activeChatId)} style={styles.chip} hitSlop={6}>
+            <Pressable onPress={() => deleteChat(activeChatId)} style={styles.chip} hitSlop={6} accessibilityLabel="Chat löschen">
               <Ionicons name="trash-outline" size={16} color={colors.danger} />
             </Pressable>
           ) : (
-            <Pressable onPress={() => newChat()} style={[styles.chip, styles.chipNew]} hitSlop={6}>
+            <Pressable onPress={() => newChat()} style={[styles.chip, styles.chipNew]} hitSlop={6} accessibilityLabel="Neuer Chat">
               <View style={styles.chipRow}>
                 <Ionicons name="add" size={15} color="#fff" />
                 <Text style={styles.chipNewText}>Neu</Text>
               </View>
             </Pressable>
           )}
-          <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6}>
+          <Pressable onPress={() => setSpeak((s) => !s)} style={[styles.iconBtn, speak && styles.chipActive]} hitSlop={6} accessibilityLabel={speak ? "Antworten vorlesen: an" : "Antworten vorlesen: aus"}>
             <Ionicons name={speak ? "volume-high-outline" : "chatbubble-outline"} size={17} color={speak ? colors.accent : colors.text} />
           </Pressable>
         </View>
       </View>
 
-      <View style={styles.tabs}>
-        <Pressable onPress={() => setTab("chats")} style={[styles.tab, tab === "chats" && styles.tabActive]}>
-          <View style={styles.tabRow}>
-            <Ionicons name="chatbubbles-outline" size={16} color={tab === "chats" ? colors.accent : colors.muted} />
-            <Text style={[styles.tabText, tab === "chats" && styles.tabTextActive]}>Chats</Text>
-          </View>
-        </Pressable>
-        <Pressable onPress={() => setTab("plugins")} style={[styles.tab, tab === "plugins" && styles.tabActive]}>
-          <View style={styles.tabRow}>
-            <Ionicons name="grid-outline" size={16} color={tab === "plugins" ? colors.accent : colors.muted} />
-            <Text style={[styles.tabText, tab === "plugins" && styles.tabTextActive]}>Plugins</Text>
-          </View>
-        </Pressable>
-        <Pressable onPress={() => setTab("reha")} style={[styles.tab, tab === "reha" && styles.tabActive]}>
-          <View style={styles.tabRow}>
-            <Ionicons name="fitness-outline" size={16} color={tab === "reha" ? colors.accent : colors.muted} />
-            <Text style={[styles.tabText, tab === "reha" && styles.tabTextActive]}>Reha</Text>
-          </View>
-        </Pressable>
-      </View>
+      <TabsHeader
+        items={[
+          { key: "chats", label: "Chats", icon: "chatbubbles-outline" },
+          { key: "plugins", label: "Plugins", icon: "grid-outline" },
+          { key: "reha", label: "Reha", icon: "fitness-outline" },
+        ]}
+        value={tab === "plugins" ? "plugins" : tab === "reha" ? "reha" : "chats"}
+        onChange={(k) => setTab(k)}
+      />
 
       {tab === "reha" ? (
         <RehaTab serverUrl={serverUrl} authHeaders={authHeaders} />
@@ -3187,6 +3218,7 @@ export default function App() {
               data={activeChat.messages}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
+              refreshControl={<PullToRefresh refreshing={refreshingChat} onRefresh={() => { void refreshActiveChat(); }} />}
               keyExtractor={(m) => m.id}
               renderItem={renderMessage}
               style={styles.list}
@@ -3245,9 +3277,9 @@ export default function App() {
                         // klar ist, dass die App lebt und NICHT die Verbindung abgebrochen ist.
                         <ElapsedLabel style={styles.thinkingText} />
                       ) : thisStatus ? (
-                        <Text style={styles.thinkingText} numberOfLines={1}>{thisStatus}</Text>
+                        <ShimmerText style={styles.thinkingText} durationMs={1400}>{thisStatus}</ShimmerText>
                       ) : listening ? (
-                        <Text style={styles.thinkingText} numberOfLines={1}>höre zu …</Text>
+                        <ShimmerText style={styles.thinkingText} durationMs={1400}>höre zu …</ShimmerText>
                       ) : (
                         <ElapsedLabel style={styles.thinkingText} />
                       )}
@@ -3357,19 +3389,22 @@ export default function App() {
                   </Pressable>
                 </Pressable>
               </Modal>
+              <View style={styles.counterRow}>
+                <CharacterCounter value={input} max={4000} />
+              </View>
               <View style={styles.inputBar}>
                 {isThisChatBusy ? (
-                  <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]}>
+                  <Pressable onPress={() => abort(activeChatId || undefined)} style={[styles.micBtn, styles.stopBtn]} accessibilityLabel="Antwort stoppen">
                     <Ionicons name="stop" size={16} color="#ffffff" />
                   </Pressable>
                 ) : (
                   <Animated.View style={{ transform: [{ scale: micPulse }] }}>
-                    <Pressable onPress={toggleMic} style={[styles.micBtn, listening && styles.micBtnActive]}>
+                    <Pressable onPress={toggleMic} style={[styles.micBtn, listening && styles.micBtnActive]} accessibilityLabel={listening ? "Diktat beenden" : "Diktieren"}>
                       <Ionicons name="mic" size={18} color={listening ? "#ffffff" : colors.text} />
                     </Pressable>
                   </Animated.View>
                 )}
-                <Pressable onPress={() => setAttachOpen((o) => !o)} style={styles.micBtn}>
+                <Pressable onPress={() => setAttachOpen((o) => !o)} style={styles.micBtn} accessibilityLabel={attachOpen ? "Anhang-Menü schließen" : "Anhang hinzufügen"}>
                   <Ionicons name={attachOpen ? "close" : "add"} size={22} color={colors.accent} />
                 </Pressable>
                 <TextInput
@@ -3383,12 +3418,18 @@ export default function App() {
                   autoCapitalize="sentences"
                   autoCorrect
                   spellCheck
+                  scrollEnabled
                   onSubmitEditing={() => send()}
+                  // ChatGPT-Verhalten: Return SENDET (statt Zeilenumbruch einzufügen),
+                  // Tastatur bleibt offen. Zeilenumbruch weiter über die Grow-Höhe (max 120pt).
+                  submitBehavior="submit"
                   returnKeyType="send"
+                  accessibilityLabel="Nachricht an KittyAI"
                 />
                 <Animated.View style={{ transform: [{ scale: sendScale }] }}>
                   <Pressable
                     onPress={() => send()}
+                    accessibilityLabel="Nachricht senden"
                     onPressIn={() => Animated.spring(sendScale, { toValue: 0.88, useNativeDriver: true, friction: 6 }).start()}
                     onPressOut={() => Animated.spring(sendScale, { toValue: 1, useNativeDriver: true, friction: 6 }).start()}
                     disabled={isThisChatBusy || (!input.trim() && !pendingImages.length && !pendingFiles.length && !pendingDocuments.length)}
@@ -3970,6 +4011,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     backgroundColor: colors.surface2,
   },
+  counterRow: { flexDirection: "row", justifyContent: "flex-end", alignItems: "center", minHeight: 0 },
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
   disclaimer: { textAlign: "center", color: colors.muted, fontSize: 11, paddingTop: 2, paddingBottom: 6 },
