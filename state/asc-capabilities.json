@@ -1,0 +1,79 @@
+{
+  "ts": "2026-11-18T12:43:36.325Z",
+  "apply": true,
+  "team": "VW2SBC8228",
+  "bundleIds": [
+    {
+      "bundleId": "com.meister.piapp",
+      "existed": true,
+      "created": false,
+      "capsBefore": [
+        "IN_APP_PURCHASE",
+        "PUSH_NOTIFICATIONS"
+      ],
+      "capsEnabled": [
+        "APP_GROUPS"
+      ],
+      "error": null,
+      "id": "UXAV4PUDPY"
+    },
+    {
+      "bundleId": "com.meister.piapp.widget",
+      "existed": true,
+      "created": false,
+      "capsBefore": [
+        "IN_APP_PURCHASE"
+      ],
+      "capsEnabled": [
+        "APP_GROUPS"
+      ],
+      "error": null,
+      "id": "YA4W95VU9X"
+    },
+    {
+      "bundleId": "com.meister.piapp.share",
+      "existed": true,
+      "created": false,
+      "capsBefore": [
+        "IN_APP_PURCHASE"
+      ],
+      "capsEnabled": [
+        "APP_GROUPS"
+      ],
+      "error": null,
+      "id": "STZ9SF8JU4"
+    },
+    {
+      "bundleId": "com.meister.piapp.notificationservice",
+      "existed": true,
+      "created": false,
+      "capsBefore": [
+        "IN_APP_PURCHASE",
+        "PUSH_NOTIFICATIONS"
+      ],
+      "capsEnabled": [
+        "APP_GROUPS"
+      ],
+      "error": null,
+      "id": "4JUNQXHTSV"
+    }
+  ],
+  "appGroupProbe": {
+    "endpoint": null,
+    "ok": false,
+    "probes": [
+      {
+        "endpoint": "/v1/appGroups?limit=5",
+        "status": 404
+      },
+      {
+        "endpoint": "/v1/appGroupIdentifiers?limit=5",
+        "status": 404
+      },
+      {
+        "endpoint": "/v1/appGroups",
+        "status": 404
+      }
+    ]
+  }
+}

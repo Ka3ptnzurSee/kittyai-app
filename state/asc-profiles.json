@@ -1,0 +1,54 @@
+{
+  "ts": "2026-11-18T12:50:24.756Z",
+  "cert": "SS85KG94PB",
+  "report": [
+    {
+      "bundleId": "com.meister.piapp",
+      "profileId": "7C2RG3KQ7A",
+      "file": "credentials/profile_com_meister_piapp.mobileprovision",
+      "action": "angelegt",
+      "error": null,
+      "check": {
+        "plistOk": true,
+        "entitlements": "<key>beta-reports-active</key> <true/> <key>aps-environment</key> <string>production</string> <key>com.apple.security.application-groups</key> <array></array> <key>application-identifier</key> <string>VW2SBC8228.com.meister.piapp.notificationservice</string> <key>keychain-access-groups</key> <array> <string>VW2SBC8228.*</string> <string>com.apple.token</string> </array> <key>get-task-allow</key> <",
+        "bytes": 8301
+      }
+    },
+    {
+      "bundleId": "com.meister.piapp.share",
+      "profileId": "W9SYK2HGXP",
+      "file": "credentials/profile_com_meister_piapp_share.mobileprovision",
+      "action": "angelegt",
+      "error": null,
+      "check": {
+        "plistOk": true,
+        "entitlements": "<key>beta-reports-active</key> <true/> <key>com.apple.security.application-groups</key> <array></array> <key>application-identifier</key> <string>VW2SBC8228.com.meister.piapp.share</string> <key>keychain-access-groups</key> <array> <string>VW2SBC8228.*</string> <string>com.apple.token</string> </array> <key>get-task-allow</key> <false/> <key>com.apple.developer.team-identifier</key> <string>VW2SBC",
+        "bytes": 8158
+      }
+    },
+    {
+      "bundleId": "com.meister.piapp.widget",
+      "profileId": "7K2XPFGY5U",
+      "file": "credentials/profile_com_meister_piapp_widget.mobileprovision",
+      "action": "angelegt",
+      "error": null,
+      "check": {
+        "plistOk": true,
+        "entitlements": "<key>beta-reports-active</key> <true/> <key>com.apple.security.application-groups</key> <array></array> <key>application-identifier</key> <string>VW2SBC8228.com.meister.piapp.widget</string> <key>keychain-access-groups</key> <array> <string>VW2SBC8228.*</string> <string>com.apple.token</string> </array> <key>get-task-allow</key> <false/> <key>com.apple.developer.team-identifier</key> <string>VW2SB",
+        "bytes": 8165
+      }
+    },
+    {
+      "bundleId": "com.meister.piapp.notificationservice",
+      "profileId": "8453DDRT8L",
+      "file": "credentials/profile_com_meister_piapp_notificationservice.mobileprovision",
+      "action": "angelegt",
+      "error": null,
+      "check": {
+        "plistOk": true,
+        "entitlements": "<key>beta-reports-active</key> <true/> <key>aps-environment</key> <string>production</string> <key>com.apple.security.application-groups</key> <array></array> <key>application-identifier</key> <string>VW2SBC8228.com.meister.piapp.notificationservice</string> <key>keychain-access-groups</key> <array> <string>VW2SBC8228.*</string> <string>com.apple.token</string> </array> <key>get-task-allow</key> <",
+        "bytes": 8330
+      }
+    }
+  ]
+}
