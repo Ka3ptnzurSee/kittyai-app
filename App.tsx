@@ -24,6 +24,8 @@ import {
 } from "react-native";
 import * as Speech from "expo-speech";
 import { useAudioPlayer } from "expo-audio";
+import VoiceMode from "./VoiceMode";
+import { voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import * as Notifications from "expo-notifications";
@@ -640,6 +642,10 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<{ name: string; content: string }[]>([]);
   const [pendingDocuments, setPendingDocuments] = useState<{ name: string; data: string; mimeType: string }[]>([]);
   const [speak, setSpeak] = useState(false); // Standard: Textantwort; Sprachausgabe nur auf Wunsch
+  // Sprache-zu-Sprache-Modus: Vollbild, hoert zu, schickt ab, liest satzweise vor
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const voiceOpenRef = useRef(false);
+  useEffect(() => { voiceOpenRef.current = voiceOpen; }, [voiceOpen]);
   const [chatModel, setChatModel] = useState<string>("flash"); // Default-Modell für neue Chats (flash = schnell, liefert direkt Text; pro = Reasoning, langsam + bei knappem Token-Budget leerer content)
   const [serverUrl, setServerUrl] = useState<string>(() => detectBase());
   // Server-Basis für relative Bild-URLs (/generated/…) global bekannt machen —
@@ -1824,6 +1830,45 @@ export default function App() {
     setActiveChatId(id);
   }
 
+  // Geteilter Inhalt aus der Share-Extension (App Group "group.com.meister.piapp").
+  // Die Extension legt JSON unter "kittyai.pendingShare" ab, hier wird es beim
+  // naechsten Vordergrund-Wechsel gelesen und in den Eingabetext uebernommen.
+  const shareStore = useMemo(() => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const mod = require("@bacons/apple-targets/build/ExtensionStorage");
+      return new mod.ExtensionStorage("group.com.meister.piapp") as {
+        get: (k: string) => string | null;
+        remove: (k: string) => void;
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+  const pullPendingShare = useCallback(() => {
+    if (!shareStore) return;
+    let raw: string | null = null;
+    try {
+      raw = shareStore.get("kittyai.pendingShare");
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    shareStore.remove("kittyai.pendingShare");
+    try {
+      const payload = JSON.parse(raw) as { text?: string; url?: string };
+      const shared = [payload.url, payload.text].filter((v): v is string => !!v && v.length > 0).join("\n");
+      if (!shared) return;
+      newChat();
+      setTimeout(() => {
+        setInput((prev) => (prev.trim() ? prev + "\n" + shared : shared));
+      }, 50);
+      haptic("light");
+    } catch {
+      /* kaputter Eintrag: ignorieren */
+    }
+  }, [shareStore]);
+
   // Deeplinks aus Widget, Shortcuts und Extensions: kittyai://new | voice | chats
   const deepLinkRef = useRef<(url: string | null) => void>(() => {});
   useEffect(() => {
@@ -1845,10 +1890,17 @@ export default function App() {
     };
   });
   useEffect(() => {
+    pullPendingShare();
+    const appStateSub = AppState.addEventListener("change", (st) => {
+      if (st === "active") pullPendingShare();
+    });
     Linking.getInitialURL().then((u) => deepLinkRef.current(u)).catch(() => {});
     const sub = Linking.addEventListener("url", (e) => deepLinkRef.current(e.url));
-    return () => sub.remove();
-  }, []);
+    return () => {
+      sub.remove();
+      appStateSub.remove();
+    };
+  }, [pullPendingShare]);
 
   function newChat(): string {
     const id = uid("c");
@@ -2419,6 +2471,8 @@ export default function App() {
       if (t === "text") {
         const delta = typeof e.data === "string" ? e.data : "";
         patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(0, MAX_REPLY_CHARS) }));
+        // Sprachmodus liest mit (satzweise Sprachausgabe schon waehrend des Streams)
+        if (delta) voiceHooks.delta?.(delta);
       } else if (t === "dil") {
         patchMsg(chatId, aiId, (m) => ({ ...m, dil: Array.isArray(e.data) ? e.data : [] }));
       } else if (t === "thinking") {
@@ -2580,7 +2634,9 @@ export default function App() {
       // über der fertigen Antwort stehen bleiben → beim Abschluss immer löschen.
       error: undefined,
     }));
-    if (speak && finalReply.trim()) speakReply(finalReply.trim());
+    voiceHooks.done?.(finalReply.trim());
+    // Im Sprachmodus liest VoiceMode selbst vor - speakReply wuerde doppelt sprechen
+    if (speak && !voiceOpenRef.current && finalReply.trim()) speakReply(finalReply.trim());
     } catch (e) {
       // Nutzer-Abbruch (Stop gedrückt): nur WIRKLICH leere KI-Nachricht entfernen,
       // bereits gestreamten Teilext behalten.
@@ -3257,6 +3313,16 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="dark" />
+      <VoiceMode
+        visible={voiceOpen}
+        serverUrl={serverUrl}
+        authHeaders={authHeaders}
+        busy={activeChatId ? busyChatIds.has(activeChatId) : false}
+        colors={colors}
+        onSend={(text: string) => { void send(text); }}
+        onInterrupt={() => { if (activeChatId) void abort(activeChatId); }}
+        onClose={() => setVoiceOpen(false)}
+      />
 
       <View style={styles.header}>
         {activeChatId && tab === "chats" ? (
@@ -3497,6 +3563,15 @@ export default function App() {
                     </Pressable>
                   </Animated.View>
                 )}
+                {/* Sprachmodus (Sprache-zu-Sprache): antippen -> zuhoeren -> Antwort wird
+                    gesprochen -> Mikro geht wieder auf. Sitzt bewusst NEBEN dem Diktat-Mikrofon. */}
+                <Pressable
+                  onPress={() => { haptic("light"); setVoiceOpen(true); }}
+                  style={[styles.micBtn, voiceOpen && styles.micBtnActive]}
+                  accessibilityLabel="Sprachmodus: Sprache zu Sprache"
+                >
+                  <Ionicons name="radio-outline" size={18} color={voiceOpen ? "#ffffff" : colors.accent} />
+                </Pressable>
                 <Pressable onPress={() => setAttachOpen((o) => !o)} style={styles.micBtn} accessibilityLabel={attachOpen ? "Anhang-Menü schließen" : "Anhang hinzufügen"}>
                   <Ionicons name={attachOpen ? "close" : "add"} size={22} color={colors.accent} />
                 </Pressable>

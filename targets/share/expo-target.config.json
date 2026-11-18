@@ -1,0 +1,10 @@
+{
+  "type": "share",
+  "name": "KittyShare",
+  "bundleIdentifier": "com.meister.piapp.share",
+  "entitlements": {
+    "com.apple.security.application-groups": [
+      "group.com.meister.piapp"
+    ]
+  }
+}

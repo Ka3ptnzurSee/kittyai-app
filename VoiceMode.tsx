@@ -1,0 +1,392 @@
+/**
+ * VoiceMode.tsx - Sprache-zu-Sprache-Modus (Freisprechen) fuer die KittyAI-App.
+ *
+ * Ablauf: Mikrofon hoert zu -> Stille beendet den Satz -> der Text geht durch den
+ * NORMALEN Chat (send() in App.tsx, also gleiche Tools/Modelle/Plugins wie tippen)
+ * -> waehrend die Antwort streamt, wird sie satzweise vorgelesen.
+ *
+ * Stimme: /api/voice/tts erkennt die Sprache und nimmt fuer Englisch Kittys
+ * geklonte Stimme (PocketTTS, ~1-2 s pro Satz), fuer Deutsch Edge-Neural.
+ */
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { File, Paths } from "expo-file-system";
+import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
+import { takeSentences, voiceHooks } from "./voice";
+
+type Phase = "hoeren" | "denkt" | "spricht" | "pause";
+
+export type VoiceModeProps = {
+  visible: boolean;
+  serverUrl: string;
+  authHeaders: () => Record<string, string>;
+  busy: boolean;
+  colors: {
+    accent: string;
+    text: string;
+    muted: string;
+    surface: string;
+    surface2?: string;
+    border: string;
+    background?: string;
+  };
+  onSend: (text: string) => void;
+  onInterrupt: () => void;
+  onClose: () => void;
+  language?: string;
+};
+
+const SILENCE_MS = 1200;   // so lange muss es still sein, damit der Satz als fertig gilt
+const RESTART_MS = 350;    // kleine Pause, bevor das Mikro wieder aufgeht
+
+export default function VoiceMode(props: VoiceModeProps) {
+  const { visible, serverUrl, authHeaders, busy, colors, onSend, onInterrupt, onClose } = props;
+  const language = props.language || "de-DE";
+
+  const player = useAudioPlayer();
+  const status = useAudioPlayerStatus(player);
+
+  const [phase, setPhase] = useState<Phase>("hoeren");
+  const [transcript, setTranscript] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [engine, setEngine] = useState("");
+  const [metrics, setMetrics] = useState("");
+  const [error, setError] = useState("");
+  const [handsfree, setHandsfree] = useState(true);
+
+  const phaseRef = useRef<Phase>("hoeren");
+  const visibleRef = useRef(visible);
+  const busyRef = useRef(busy);
+  const queueRef = useRef<string[]>([]);
+  const bufferRef = useRef("");
+  const answerRef = useRef("");
+  const transcriptRef = useRef("");
+  const sentRef = useRef(false);
+  const playingRef = useRef(false);
+  const wasPlayingRef = useRef(false);
+  const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const turnStartRef = useRef(0);
+  const firstAudioRef = useRef(0);
+
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
+  useEffect(() => { visibleRef.current = visible; }, [visible]);
+  useEffect(() => { busyRef.current = busy; }, [busy]);
+
+  const clearTimers = () => {
+    if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
+    if (restartRef.current) { clearTimeout(restartRef.current); restartRef.current = null; }
+  };
+
+  /** MP3 fuer einen Satz holen (Server waehlt Klon- oder Edge-Stimme). */
+  const synth = useCallback(async (text: string): Promise<string> => {
+    const base = serverUrl.replace(/\/+$/, "");
+    const res = await fetch(base + "/api/voice/tts", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error("TTS HTTP " + res.status);
+    const data = (await res.json()) as { audioBase64?: string; engine?: string; language?: string; error?: string };
+    if (!data.audioBase64) throw new Error(data.error || "keine Audiodaten");
+    setEngine([data.engine, data.language].filter(Boolean).join(" / "));
+    const file = new File(Paths.cache, "vm-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) + ".mp3");
+    file.create({ overwrite: true, intermediates: true });
+    await file.write(data.audioBase64, { encoding: "base64" });
+    return file.uri;
+  }, [serverUrl, authHeaders]);
+
+  /** Naechsten Satz abspielen; Queue wird waehrend des Sprechens gefuellt. */
+  const pump = useCallback(async () => {
+    if (playingRef.current || !visibleRef.current) return;
+    const next = queueRef.current.shift();
+    if (!next) {
+      if (!busyRef.current) {
+        setPhase("pause");
+        if (handsfree) {
+          if (restartRef.current) clearTimeout(restartRef.current);
+          restartRef.current = setTimeout(() => { startListening(); }, RESTART_MS);
+        }
+      }
+      return;
+    }
+    playingRef.current = true;
+    setPhase("spricht");
+    try {
+      const uri = await synth(next);
+      if (!firstAudioRef.current) firstAudioRef.current = Date.now();
+      player.replace({ uri });
+      player.play();
+    } catch (e) {
+      playingRef.current = false;
+      setError(e instanceof Error ? e.message : String(e));
+      pump();
+    }
+  }, [player, synth, handsfree]);
+
+  const enqueue = useCallback((sentences: string[]) => {
+    if (!sentences.length) return;
+    for (const s of sentences) queueRef.current.push(s);
+    pump();
+  }, [pump]);
+
+  /** Mikrofon oeffnen. */
+  const startListening = useCallback(async () => {
+    if (!visibleRef.current) return;
+    try {
+      const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+      if (!perm.granted) {
+        setError("Mikrofon/Spracherkennung nicht erlaubt (iOS-Einstellungen → KittyAI).");
+        return;
+      }
+      sentRef.current = false;
+      transcriptRef.current = "";
+      setTranscript("");
+      setPhase("hoeren");
+      ExpoSpeechRecognitionModule.start({
+        lang: language,
+        interimResults: true,
+        continuous: true,
+        addsPunctuation: true,
+        iosTaskHint: "dictation",
+      });
+    } catch (e) {
+      setError("Spracherkennung: " + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [language]);
+
+  /** Stille erkannt -> Satz abschicken (ueber den normalen Chat). */
+  const finishUtterance = useCallback(() => {
+    if (sentRef.current) return;
+    const text = transcriptRef.current.trim();
+    try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
+    if (!text) {
+      if (restartRef.current) clearTimeout(restartRef.current);
+      restartRef.current = setTimeout(() => startListening(), 600);
+      return;
+    }
+    sentRef.current = true;
+    turnStartRef.current = Date.now();
+    firstAudioRef.current = 0;
+    bufferRef.current = "";
+    answerRef.current = "";
+    queueRef.current = [];
+    setAnswer("");
+    setError("");
+    setMetrics("");
+    setPhase("denkt");
+    onSend(text);
+  }, [onSend, startListening]);
+
+  const armSilence = useCallback(() => {
+    if (silenceRef.current) clearTimeout(silenceRef.current);
+    silenceRef.current = setTimeout(() => finishUtterance(), SILENCE_MS);
+  }, [finishUtterance]);
+
+  // --- Spracherkennung -----------------------------------------------------
+  useSpeechRecognitionEvent("result", (event) => {
+    const t = (event.results?.[0]?.transcript ?? "").trim();
+    if (!t) return;
+    transcriptRef.current = t;
+    setTranscript(t);
+    armSilence();
+  });
+  useSpeechRecognitionEvent("end", () => {
+    // iOS beendet die Session nach Stille selbst -> wenn noch nichts gesendet
+    // wurde, den erkannten Text trotzdem abschicken.
+    if (!sentRef.current && visibleRef.current && phaseRef.current === "hoeren") finishUtterance();
+  });
+  useSpeechRecognitionEvent("error", (event) => {
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    setError("Spracherkennung: " + (event.message || event.error || "unbekannt"));
+  });
+
+  // --- Antwort-Stream mitlesen --------------------------------------------
+  useEffect(() => {
+    voiceHooks.delta = (delta: string) => {
+      if (!visibleRef.current) return;
+      bufferRef.current += delta;
+      answerRef.current = (answerRef.current + delta).slice(-4000);
+      setAnswer(answerRef.current);
+      const { sentences, rest } = takeSentences(bufferRef.current);
+      bufferRef.current = rest;
+      enqueue(sentences);
+    };
+    voiceHooks.done = (full: string) => {
+      if (!visibleRef.current) return;
+      const { sentences, rest } = takeSentences(bufferRef.current, true);
+      bufferRef.current = rest;
+      enqueue(sentences);
+      const took = Date.now() - turnStartRef.current;
+      const firstAudio = firstAudioRef.current ? firstAudioRef.current - turnStartRef.current : null;
+      setMetrics(
+        (full ? full.length + " Zeichen · " : "") + (took / 1000).toFixed(1) + " s Antwort" +
+        (firstAudio ? " · " + (firstAudio / 1000).toFixed(1) + " s bis Stimme" : ""),
+      );
+    };
+    return () => { voiceHooks.delta = undefined; voiceHooks.done = undefined; };
+  }, [enqueue]);
+
+  // --- Wiedergabe-Ende -> naechster Satz ----------------------------------
+  useEffect(() => {
+    if (wasPlayingRef.current && !status.playing && status.didJustFinish) {
+      playingRef.current = false;
+      pump();
+    }
+    wasPlayingRef.current = status.playing;
+  }, [status.playing, status.didJustFinish, pump]);
+
+  // --- Ein/Aus -------------------------------------------------------------
+  useEffect(() => {
+    if (!visible) {
+      clearTimers();
+      queueRef.current = [];
+      bufferRef.current = "";
+      playingRef.current = false;
+      try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
+      try { player.pause(); } catch { /* aus */ }
+      return;
+    }
+    startListening();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
+  // --- Unterbrechen: Stimme stoppen, Chat abbrechen, wieder zuhoeren -------
+  const interrupt = useCallback(() => {
+    clearTimers();
+    queueRef.current = [];
+    bufferRef.current = "";
+    playingRef.current = false;
+    try { player.pause(); } catch { /* aus */ }
+    try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
+    onInterrupt();
+    sentRef.current = false;
+    setPhase("hoeren");
+    if (restartRef.current) clearTimeout(restartRef.current);
+    restartRef.current = setTimeout(() => startListening(), 200);
+  }, [player, onInterrupt, startListening]);
+
+  const orbPress = () => {
+    if (phase === "hoeren") {
+      finishUtterance();
+    } else {
+      interrupt();
+    }
+  };
+
+  // Puls-Animation am Orb
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const active = phase === "hoeren" || phase === "spricht";
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: active ? 900 : 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: active ? 900 : 2000, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ]),
+    );
+    if (visible) loop.start();
+    return () => loop.stop();
+  }, [visible, phase, pulse]);
+
+  if (!visible) return null;
+
+  const label =
+    phase === "hoeren" ? "Ich höre zu …"
+    : phase === "denkt" ? "Kitty denkt …"
+    : phase === "spricht" ? "Kitty spricht …"
+    : "Tippen zum Weitersprechen";
+
+  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] });
+
+  return (
+    <View style={[styles.root, { backgroundColor: colors.background || colors.surface }]}>
+      <View style={styles.topBar}>
+        <Pressable onPress={onClose} style={styles.iconBtn} hitSlop={8} accessibilityLabel="Sprachmodus schließen">
+          <Ionicons name="close" size={22} color={colors.text} />
+        </Pressable>
+        <Text style={[styles.topTitle, { color: colors.text }]}>Sprachmodus</Text>
+        <Pressable
+          onPress={() => setHandsfree((h) => !h)}
+          style={styles.iconBtn}
+          hitSlop={8}
+          accessibilityLabel={handsfree ? "Freihändig: an" : "Freihändig: aus"}
+        >
+          <Ionicons name={handsfree ? "infinite" : "hand-left-outline"} size={20} color={handsfree ? colors.accent : colors.muted} />
+        </Pressable>
+      </View>
+
+      <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+        <Animated.View
+          style={[
+            styles.orb,
+            {
+              backgroundColor: phase === "spricht" ? colors.accent : (colors.surface2 || colors.surface),
+              borderColor: colors.accent,
+              transform: [{ scale }],
+            },
+          ]}
+        >
+          <Pressable onPress={orbPress} style={styles.orbHit} accessibilityLabel={label}>
+            <Ionicons
+              name={phase === "hoeren" ? "mic" : phase === "denkt" ? "ellipsis-horizontal" : phase === "spricht" ? "stop" : "mic-outline"}
+              size={44}
+              color={phase === "spricht" ? "#ffffff" : colors.accent}
+            />
+          </Pressable>
+        </Animated.View>
+
+        <Text style={[styles.phase, { color: colors.muted }]}>{label}</Text>
+
+        {transcript ? (
+          <Text style={[styles.transcript, { color: colors.text }]}>{transcript}</Text>
+        ) : null}
+
+        {answer ? (
+          <Text style={[styles.answer, { color: colors.text }]} numberOfLines={12}>
+            {answer}
+          </Text>
+        ) : null}
+
+        <View style={styles.metaRow}>
+          {engine ? <Text style={[styles.meta, { color: colors.muted }]}>{engine}</Text> : null}
+          {metrics ? <Text style={[styles.meta, { color: colors.muted }]}>{metrics}</Text> : null}
+        </View>
+
+        {error ? <Text style={[styles.error, { color: "#e2574c" }]}>{error}</Text> : null}
+      </ScrollView>
+
+      <View style={styles.footer}>
+        <Pressable onPress={interrupt} style={[styles.footerBtn, { borderColor: colors.border }]} accessibilityLabel="Unterbrechen">
+          <Ionicons name="hand-left-outline" size={18} color={colors.text} />
+          <Text style={[styles.footerText, { color: colors.text }]}>Unterbrechen</Text>
+        </Pressable>
+        <Pressable onPress={onClose} style={[styles.footerBtn, { borderColor: colors.border }]} accessibilityLabel="Sprachmodus beenden">
+          <Ionicons name="chatbubble-ellipses-outline" size={18} color={colors.text} />
+          <Text style={[styles.footerText, { color: colors.text }]}>Zum Text</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 50 },
+  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingTop: 8, paddingBottom: 4 },
+  topTitle: { fontSize: 16, fontWeight: "700" },
+  iconBtn: { padding: 8 },
+  body: { flexGrow: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 22, paddingVertical: 18, gap: 14 },
+  orb: { width: 132, height: 132, borderRadius: 66, borderWidth: 2, alignItems: "center", justifyContent: "center" },
+  orbHit: { width: 132, height: 132, borderRadius: 66, alignItems: "center", justifyContent: "center" },
+  phase: { fontSize: 15, fontWeight: "600" },
+  transcript: { fontSize: 17, textAlign: "center", lineHeight: 24 },
+  answer: { fontSize: 15, textAlign: "center", lineHeight: 22, opacity: 0.9 },
+  metaRow: { flexDirection: "row", gap: 10, flexWrap: "wrap", justifyContent: "center" },
+  meta: { fontSize: 12 },
+  error: { fontSize: 13, textAlign: "center" },
+  footer: { flexDirection: "row", justifyContent: "center", gap: 12, paddingBottom: 26, paddingTop: 6 },
+  footerBtn: { flexDirection: "row", alignItems: "center", gap: 7, borderWidth: 1, borderRadius: 999, paddingHorizontal: 16, paddingVertical: 10 },
+  footerText: { fontSize: 14, fontWeight: "600" },
+});
+
