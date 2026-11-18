@@ -5,6 +5,14 @@ on:
   push:
     branches: [master]
 
+# Zwei parallele Pushes (z. B. zwei Agenten) bauten gleichzeitig dieselbe Build-Nummer
+# und der zweite Upload scheiterte mit "Build number 110 ... has already been used"
+# (18.11.2026). Deshalb: Läufe in eine Warteschlange, NICHT abbrechen — ein laufender
+# Build wird zu Ende gefahren, der nächste startet danach.
+concurrency:
+  group: ios-build-testflight
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: macos-latest
