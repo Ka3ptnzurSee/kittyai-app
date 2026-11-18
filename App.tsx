@@ -2519,8 +2519,20 @@ export default function App() {
       } else if (t === "compaction_start") {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "kompaktiere Kontext …" }));
       } else if (t === "compaction_end") {
-        const d = (e.data || {}) as { aborted?: boolean; tokensBefore?: number | null; estimatedTokensAfter?: number | null };
-        setStatusByChat((prev) => ({ ...prev, [chatId]: d.aborted ? "" : `Kontext kompaktiert (${Math.round((d.tokensBefore ?? 0) / 1000)}k → ${Math.round((d.estimatedTokensAfter ?? 0) / 1000)}k Tokens)` }));
+        const d = (e.data || {}) as {
+          aborted?: boolean;
+          tokensBefore?: number | null;
+          estimatedTokensAfter?: number | null;
+          errorMessage?: string;
+        };
+        // Kein Erfolg melden, wenn gar nichts kompaktiert wurde: pi antwortet z. B. bei
+        // einer bereits kompaktierten Session mit "Nothing to compact (session too small)"
+        // und liefert keine Token-Zahlen. Vorher stand dann 4 s "Kontext kompaktiert
+        // (0k → 0k Tokens)" in der Statuszeile (gemessen 18.11.2026).
+        const hasNumbers = typeof d.tokensBefore === "number" && typeof d.estimatedTokensAfter === "number";
+        const ok = !d.aborted && !d.errorMessage && hasNumbers;
+        setStatusByChat((prev) => ({ ...prev, [chatId]: ok ? `Kontext kompaktiert (${Math.round((d.tokensBefore as number) / 1000)}k → ${Math.round((d.estimatedTokensAfter as number) / 1000)}k Tokens)` : "" }));
+        if (!ok) return;
         setTimeout(() => setStatusByChat((prev) => (prev[chatId]?.startsWith("Kontext kompaktiert") ? { ...prev, [chatId]: "" } : prev)), 4000);
       } else if (t === "auto_retry_start" || t === "summarization_retry_attempt_start") {
         const d = (e.data || {}) as { attempt?: number; maxAttempts?: number };
