@@ -117,7 +117,7 @@ function ThinkingBlock({ text }: { text: string }) {
   if (!trimmed) return null;
   return (
     <View style={styles.thinkingBlock}>
-      <Pressable onPress={() => setOpen((o) => !o)} style={styles.thinkingHeader} hitSlop={6}>
+      <Pressable onPress={() => setOpen((o) => !o)} style={styles.thinkingHeader} hitSlop={6} accessibilityRole="button" accessibilityLabel={open ? "Denkprozess ausblenden" : "Denkprozess anzeigen"}>
         <Text style={styles.thinkingText} numberOfLines={1}>
           {open ? "Denkprozess ausblenden" : "Denkprozess anzeigen"}
         </Text>
@@ -294,7 +294,7 @@ function ActivityList({ activity }: { activity: Activity[] }) {
   const hasError = activity.some((a) => a.status === "error");
   return (
     <View style={styles.activityWrap}>
-      <Pressable onPress={() => setOpen((o) => !o)} style={styles.activityToggle}>
+      <Pressable onPress={() => setOpen((o) => !o)} style={styles.activityToggle} accessibilityRole="button" accessibilityLabel={open ? "Werkzeug-Aktivität ausblenden" : "Werkzeug-Aktivität anzeigen"}>
         <Text style={[styles.activitySummary, hasError && { color: colors.danger }]}>
           {hasError ? "⚠ " : ""}{open ? "▴" : "▾"} {activity.length} Werkzeug{activity.length === 1 ? "" : "e"} {open ? "" : "· versteckt"}
         </Text>
@@ -551,7 +551,7 @@ function MessageBubble({
       </View>
     ) : null}
     {tooBig ? (
-      <Pressable onPress={() => setForceOpen(true)} style={styles.tooBigRow} hitSlop={8}>
+      <Pressable onPress={() => setForceOpen(true)} style={styles.tooBigRow} hitSlop={8} accessibilityRole="button" accessibilityLabel="Volle Antwort anzeigen">
         <Ionicons name="chevron-down" size={14} color={colors.accent} />
         <Text style={styles.tooBigText}>
           Nachricht ist ungewöhnlich groß ({Math.round(bigH)} pt) und wurde eingeklappt — antippen zum Aufklappen
@@ -2949,11 +2949,11 @@ export default function App() {
           <Text style={styles.chatTime}>{formatTime(item.updatedAt)}</Text>
           <View style={styles.chatRightRow}>
             {item.readOnly ? null : (
-              <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8}>
+              <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8} accessibilityRole="button" accessibilityLabel="Bearbeiten">
                 <Ionicons name="pencil" size={13} color={colors.muted} />
               </Pressable>
             )}
-            <Pressable onPress={() => (item.remote || item.readOnly ? deleteRemoteChat(item) : deleteChat(item.id))} hitSlop={8}>
+            <Pressable onPress={() => (item.remote || item.readOnly ? deleteRemoteChat(item) : deleteChat(item.id))} hitSlop={8} accessibilityRole="button" accessibilityLabel="Chat löschen">
               <Ionicons name="close" size={14} color={colors.danger} />
             </Pressable>
           </View>
@@ -3110,7 +3110,7 @@ export default function App() {
               <View key={c.id} style={styles.metaCard}>
                 <View style={styles.metaCardHeader}>
                   <Text style={styles.metaName}>{c.name}</Text>
-                  <Pressable onPress={() => deleteConnector(c.id)} hitSlop={8}>
+                  <Pressable onPress={() => deleteConnector(c.id)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Connector löschen">
                     <Ionicons name="close" size={14} color={colors.danger} />
                   </Pressable>
                 </View>
@@ -3146,7 +3146,7 @@ export default function App() {
             placeholderTextColor={colors.muted}
             multiline
           />
-          <Pressable onPress={addConnector} disabled={!connectorForm.name.trim()} style={[styles.schedAddBtn, !connectorForm.name.trim() && styles.sendBtnDisabled]}>
+          <Pressable onPress={addConnector} disabled={!connectorForm.name.trim()} style={[styles.schedAddBtn, !connectorForm.name.trim() && styles.sendBtnDisabled]} accessibilityRole="button" accessibilityLabel="Connector anlegen">
             <View style={styles.chipRow}>
               <Ionicons name="add" size={15} color="#fff" />
               <Text style={styles.schedAddText}>Connector anlegen</Text>
@@ -3161,7 +3161,7 @@ export default function App() {
     if (folders.length === 0) {
       return (
         <View style={styles.foldersBar}>
-          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip}>
+          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip} accessibilityRole="button" accessibilityLabel="Neuer Ordner">
             <Ionicons name="folder-open-outline" size={14} color={colors.accent} />
             <Text style={styles.folderChipText}>Ordner anlegen</Text>
           </Pressable>
@@ -3172,15 +3172,15 @@ export default function App() {
     return (
       <View style={styles.foldersBar}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.foldersBarContent}>
-          <Pressable onPress={() => setFolderFilter(null)} style={[styles.folderChip, folderFilter === null && styles.folderChipActive]}>
+          <Pressable onPress={() => setFolderFilter(null)} style={[styles.folderChip, folderFilter === null && styles.folderChipActive]} accessibilityRole="button" accessibilityLabel="Ordner-Filter aufheben">
             <Text style={[styles.folderChipText, folderFilter === null && styles.folderChipTextActive]}>Alle</Text>
           </Pressable>
           {ordered.map((f) => (
-            <Pressable key={f.id} onPress={() => setFolderFilter(folderFilter === f.id ? null : f.id)} onLongPress={() => openFolderModal("edit", f.id)} style={[styles.folderChip, folderFilter === f.id && styles.folderChipActive]}>
+            <Pressable key={f.id} onPress={() => setFolderFilter(folderFilter === f.id ? null : f.id)} onLongPress={() => openFolderModal("edit", f.id)} style={[styles.folderChip, folderFilter === f.id && styles.folderChipActive]} accessibilityRole="button" accessibilityLabel={`Ordner ${f.name}`} accessibilityState={{ selected: folderFilter === f.id }}>
               <Text style={[styles.folderChipText, folderFilter === f.id && styles.folderChipTextActive]}>{f.parentId ? "↳ " : ""}{f.name}</Text>
             </Pressable>
           ))}
-          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip}>
+          <Pressable onPress={() => openFolderModal("create")} style={styles.folderChip} accessibilityRole="button" accessibilityLabel="Neu">
             <Ionicons name="add" size={14} color={colors.accent} />
             <Text style={styles.folderChipText}>Ordner</Text>
           </Pressable>
@@ -3195,7 +3195,7 @@ export default function App() {
 
       <View style={styles.header}>
         {activeChatId && tab === "chats" ? (
-          <Pressable onPress={() => openChat(null)} style={styles.backBtn} hitSlop={8}>
+          <Pressable onPress={() => openChat(null)} style={styles.backBtn} hitSlop={8} accessibilityRole="button" accessibilityLabel="Zurück">
             <Ionicons name="chevron-back" size={24} color={colors.accent} />
           </Pressable>
         ) : (
@@ -3284,7 +3284,7 @@ export default function App() {
                   <Text style={styles.emptyText}>Wie kann ich dir heute helfen?</Text>
                   <View style={styles.suggestionRow}>
                     {["Fasse den Tag zusammen", "Recherchiere etwas für mich", "Schreibe mir eine Nachricht", "Erkläre mir ein Thema"].map((s) => (
-                      <Pressable key={s} onPress={() => send(s)} style={styles.suggestionChip}>
+                      <Pressable key={s} accessibilityRole="button" accessibilityLabel={`Vorschlag: ${s}`} onPress={() => send(s)} style={styles.suggestionChip}>
                         <Text style={styles.suggestionChipText}>{s}</Text>
                       </Pressable>
                     ))}
@@ -3322,10 +3322,10 @@ export default function App() {
               <View style={styles.folderSuggestion}>
                 <Ionicons name="folder-open-outline" size={16} color={colors.accent} />
                 <Text style={styles.folderSuggestionText} numberOfLines={1}>In Ordner „{folderSuggestion.name}“ verschieben?</Text>
-                <Pressable onPress={() => assignChatToFolder(folderSuggestion.chatId, folderSuggestion.folderId)} hitSlop={8}>
+                <Pressable onPress={() => assignChatToFolder(folderSuggestion.chatId, folderSuggestion.folderId)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Vorschlag annehmen">
                   <Text style={styles.folderSuggestionYes}>Ja</Text>
                 </Pressable>
-                <Pressable onPress={() => setFolderSuggestion(null)} hitSlop={8}>
+                <Pressable onPress={() => setFolderSuggestion(null)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Schließen">
                   <Ionicons name="close" size={16} color={colors.muted} />
                 </Pressable>
               </View>
@@ -3339,7 +3339,7 @@ export default function App() {
                     ? "Terminal-Verlauf — hier nur lesbar. Weiterschreiben im Terminal (pi --resume)."
                     : "WhatsApp-Verlauf — Antworten laufen über WhatsApp."}
                 </Text>
-                <Pressable onPress={() => forkReadOnlyChat(activeChat)} hitSlop={8} style={styles.readOnlyBtn}>
+                <Pressable onPress={() => forkReadOnlyChat(activeChat)} hitSlop={8} style={styles.readOnlyBtn} accessibilityRole="button" accessibilityLabel="Als eigenen Chat fortsetzen">
                   <Text style={styles.readOnlyBtnText}>Übernehmen</Text>
                 </Pressable>
               </View>
@@ -3354,7 +3354,7 @@ export default function App() {
                       {replyingTo.text.replace(/\n+/g, " ").trim().slice(0, 120)}
                     </Text>
                   </View>
-                  <Pressable onPress={() => setReplyingTo(null)} hitSlop={8}>
+                  <Pressable onPress={() => setReplyingTo(null)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Antwort abbrechen">
                     <Ionicons name="close" size={16} color={colors.danger} />
                   </Pressable>
                 </View>
@@ -3378,7 +3378,7 @@ export default function App() {
                       <Text style={styles.attachChip} numberOfLines={1}>{f.name}</Text>
                     </View>
                   ))}
-                  <Pressable onPress={clearPendingAttachments} hitSlop={8}>
+                  <Pressable onPress={clearPendingAttachments} hitSlop={8} accessibilityRole="button" accessibilityLabel="Anhänge entfernen">
                     <Ionicons name="close" size={16} color={colors.danger} />
                   </Pressable>
                 </View>
@@ -3390,29 +3390,29 @@ export default function App() {
                 onDismiss={runPendingAttachAction}
                 onRequestClose={() => setAttachOpen(false)}
               >
-                <Pressable style={styles.sheetBackdrop} onPress={() => setAttachOpen(false)}>
-                  <Pressable style={styles.attachSheet} onPress={() => {}}>
+                <Pressable style={styles.sheetBackdrop} onPress={() => setAttachOpen(false)} accessibilityRole="button" accessibilityLabel="Anhang-Menü schließen">
+                  <Pressable style={styles.attachSheet} onPress={() => {}} >
                     <View style={styles.attachSheetHandle} />
                     <Text style={styles.attachSheetTitle}>Anhang hinzufügen</Text>
                     <View style={styles.attachSheetRow}>
-                      <Pressable onPress={() => presentAfterSheet(() => { void pickImage(); })} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickImage(); })} style={styles.attachSheetItem} accessibilityRole="button" accessibilityLabel="Bilder">
                         <View style={styles.attachSheetIcon}><Ionicons name="image-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Bilder</Text>
                       </Pressable>
-                      <Pressable onPress={() => presentAfterSheet(() => { void pickCameraImage(); })} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickCameraImage(); })} style={styles.attachSheetItem} accessibilityRole="button" accessibilityLabel="Kamera">
                         <View style={styles.attachSheetIcon}><Ionicons name="camera-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Kamera</Text>
                       </Pressable>
-                      <Pressable onPress={() => presentAfterSheet(() => { void pickFile(); })} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void pickFile(); })} style={styles.attachSheetItem} accessibilityRole="button" accessibilityLabel="Datei">
                         <View style={styles.attachSheetIcon}><Ionicons name="attach-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Datei</Text>
                       </Pressable>
-                      <Pressable onPress={() => presentAfterSheet(() => { void generateImageInChat(); })} style={styles.attachSheetItem}>
+                      <Pressable onPress={() => presentAfterSheet(() => { void generateImageInChat(); })} style={styles.attachSheetItem} accessibilityRole="button" accessibilityLabel="Bild erstellen">
                         <View style={styles.attachSheetIcon}><Ionicons name="color-palette-outline" size={22} color={colors.accent} /></View>
                         <Text style={styles.attachSheetLabel}>Bild erstellen</Text>
                       </Pressable>
                     </View>
-                    <Pressable onPress={() => setAttachOpen(false)} style={styles.attachSheetCancel}>
+                    <Pressable onPress={() => setAttachOpen(false)} style={styles.attachSheetCancel} accessibilityRole="button" accessibilityLabel="Abbrechen">
                       <Text style={styles.attachSheetCancelText}>Abbrechen</Text>
                     </Pressable>
                   </Pressable>
@@ -3469,7 +3469,7 @@ export default function App() {
                 </Animated.View>
               </View>
               <View style={styles.modelBar}>
-                <Pressable onPress={() => setModelMenuOpen(true)} style={styles.modelBarChip} hitSlop={6}>
+                <Pressable onPress={() => setModelMenuOpen(true)} style={styles.modelBarChip} hitSlop={6} accessibilityRole="button" accessibilityLabel="Modell wählen">
                   <Ionicons name="hardware-chip-outline" size={13} color={colors.muted} />
                   <Text style={styles.modelBarText} numberOfLines={1}>{modelOptions().find((o) => o.key === activeModel)?.label ?? "FLASH"}</Text>
                   <Ionicons name="chevron-down" size={12} color={colors.muted} />
@@ -3483,11 +3483,11 @@ export default function App() {
             {renderFolders()}
             <View style={styles.srcFilterRow}>
               {([["app", "Dieses Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"], ["all", "Alle"]] as const).map(([k, label]) => (
-                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4}>
+                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4} accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected: chatFilter === k }}>
                   <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{label}</Text>
                 </Pressable>
               ))}
-              <Pressable onPress={() => syncServerChats()} style={styles.srcFilterChip} hitSlop={6}>
+              <Pressable onPress={() => syncServerChats()} style={styles.srcFilterChip} hitSlop={6} accessibilityRole="button" accessibilityLabel="Server-Chats neu laden">
                 <Ionicons name="refresh" size={13} color={colors.muted} />
               </Pressable>
             </View>
@@ -3512,7 +3512,7 @@ export default function App() {
         <>
           <View style={styles.pluginsSubTabs}>
             {PLUGIN_TABS.map((p) => (
-              <Pressable key={p.key} onPress={() => setPluginsTab(p.key)} style={[styles.pluginsSubTab, pluginsTab === p.key && styles.pluginsSubTabActive]}>
+              <Pressable key={p.key} accessibilityRole="tab" accessibilityLabel={p.label} accessibilityState={{ selected: pluginsTab === p.key }} onPress={() => setPluginsTab(p.key)} style={[styles.pluginsSubTab, pluginsTab === p.key && styles.pluginsSubTabActive]}>
                 <Text style={[styles.pluginsSubTabText, pluginsTab === p.key && styles.pluginsSubTabTextActive]}>{p.label}</Text>
               </Pressable>
             ))}
@@ -3528,7 +3528,7 @@ export default function App() {
               placeholderTextColor={colors.muted}
               multiline
             />
-            <Pressable onPress={addTask} disabled={!taskInput.trim()} style={[styles.sendBtn, !taskInput.trim() && styles.sendBtnDisabled]}>
+            <Pressable onPress={addTask} disabled={!taskInput.trim()} style={[styles.sendBtn, !taskInput.trim() && styles.sendBtnDisabled]} accessibilityRole="button" accessibilityLabel="Aufgabe hinzufügen">
               <Ionicons name="arrow-up" size={20} color="#ffffff" />
             </Pressable>
           </View>
@@ -3561,7 +3561,7 @@ export default function App() {
                     key={p.id}
                     onPress={() => setSchedPreset(p.id)}
                     style={[styles.schedChip, schedPreset === p.id && styles.schedChipActive]}
-                  >
+                   accessibilityRole="button" accessibilityLabel={p.label} accessibilityState={{ selected: schedPreset === p.id }}>
                     <Text style={[styles.schedChipText, schedPreset === p.id && styles.schedChipTextActive]}>{p.label}</Text>
                   </Pressable>
                 ))}
@@ -3581,7 +3581,7 @@ export default function App() {
                     <View style={styles.schedDays}>
                       {WEEKDAYS_DE.map((d, i) => (
                         <Pressable
-                          key={d}
+                          key={d} accessibilityRole="button" accessibilityLabel={`Wochentag ${d}`} accessibilityState={{ selected: schedDay === i }}
                           onPress={() => setSchedDay(i)}
                           style={[styles.dayChip, schedDay === i && styles.dayChipActive]}
                         >
@@ -3615,7 +3615,7 @@ export default function App() {
                 onPress={addSchedule}
                 disabled={!schedInput.trim()}
                 style={[styles.schedAddBtn, !schedInput.trim() && styles.sendBtnDisabled]}
-              >
+               accessibilityRole="button" accessibilityLabel="Zeitplan">
                 <View style={styles.chipRow}>
                   <Ionicons name="time-outline" size={15} color="#fff" />
                   <Text style={styles.schedAddText}>Routine anlegen</Text>
@@ -3629,7 +3629,7 @@ export default function App() {
                         <Text style={styles.schedCardLabel}>{cronLabel(s.cron)}</Text>
                         <Text style={styles.schedCardMsg} numberOfLines={2}>{s.message}</Text>
                       </View>
-                      <Pressable onPress={() => deleteSchedule(s.id)} hitSlop={8}>
+                      <Pressable onPress={() => deleteSchedule(s.id)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Zeitplan löschen">
                         <Ionicons name="close" size={14} color={colors.danger} />
                       </Pressable>
                     </View>
@@ -3649,8 +3649,8 @@ export default function App() {
 
       {/* Modell-Auswahl (Bottom-Sheet) */}
       <Modal visible={modelMenuOpen} transparent animationType="fade" onRequestClose={() => setModelMenuOpen(false)}>
-        <Pressable style={styles.sheetBackdrop} onPress={() => setModelMenuOpen(false)}>
-          <Pressable style={styles.attachSheet} onPress={() => {}}>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setModelMenuOpen(false)} accessibilityRole="button" accessibilityLabel="Modell-Menü schließen">
+          <Pressable style={styles.attachSheet} onPress={() => {}} accessibilityElementsHidden>
             <View style={styles.attachSheetHandle} />
             <Text style={styles.attachSheetTitle}>Modell auswählen</Text>
             {modelOptions().map((o) => (
@@ -3659,7 +3659,7 @@ export default function App() {
                 disabled={!!o.deactivated}
                 onPress={() => setActiveModel(o.key)}
                 style={[styles.modelMenuItem, activeModel === o.key && styles.modelMenuItemActive]}
-              >
+               accessibilityRole="button" accessibilityLabel={`Modell ${o.label}`} accessibilityState={{ selected: activeModel === o.key }}>
                 <Text style={[styles.modelMenuItemText, activeModel === o.key && styles.modelMenuItemTextActive, o.deactivated && styles.modelMenuItemTextDeactivated]}>
                   {o.label}{o.deactivated ? "  ·  INAKTIV" : ""}
                 </Text>
@@ -3685,8 +3685,8 @@ export default function App() {
               maxLength={MAX_TITLE_CHARS}
             />
             <View style={styles.modalButtons}>
-              <Pressable onPress={() => setRenameChatId(null)} style={styles.modalCancel}><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
-              <Pressable onPress={() => { if (renameChatId) patchChat(renameChatId, (c) => ({ ...c, title: deriveTitle(renameInput) || c.title })); setRenameChatId(null); }} style={styles.modalSave}><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
+              <Pressable onPress={() => setRenameChatId(null)} style={styles.modalCancel} accessibilityRole="button" accessibilityLabel="Abbrechen"><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
+              <Pressable onPress={() => { if (renameChatId) patchChat(renameChatId, (c) => ({ ...c, title: deriveTitle(renameInput) || c.title })); setRenameChatId(null); }} style={styles.modalSave} accessibilityRole="button" accessibilityLabel="Speichern"><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
             </View>
           </View>
         </View>
@@ -3717,16 +3717,16 @@ export default function App() {
             <View style={styles.modalButtons}>
               {folderModal?.mode === "edit" ? (
                 <>
-                  <Pressable onPress={() => openFolderModal("create", undefined, folderModal.folderId)} style={styles.modalCancel}>
+                  <Pressable onPress={() => openFolderModal("create", undefined, folderModal.folderId)} style={styles.modalCancel} accessibilityRole="button" accessibilityLabel="Unterordner anlegen">
                     <Text style={styles.folderSubBtn}>↳ Unterordner</Text>
                   </Pressable>
-                  <Pressable onPress={() => { if (folderModal.folderId) deleteFolder(folderModal.folderId); setFolderModal(null); }} style={styles.modalCancel}>
+                  <Pressable onPress={() => { if (folderModal.folderId) deleteFolder(folderModal.folderId); setFolderModal(null); }} style={styles.modalCancel} accessibilityRole="button" accessibilityLabel="Löschen">
                     <Text style={styles.modalCancelText}>Löschen</Text>
                   </Pressable>
                 </>
               ) : null}
-              <Pressable onPress={() => setFolderModal(null)} style={styles.modalCancel}><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
-              <Pressable onPress={submitFolder} style={styles.modalSave}><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
+              <Pressable onPress={() => setFolderModal(null)} style={styles.modalCancel} accessibilityRole="button" accessibilityLabel="Abbrechen"><Text style={styles.modalCancelText}>Abbrechen</Text></Pressable>
+              <Pressable onPress={submitFolder} style={styles.modalSave} accessibilityRole="button" accessibilityLabel="Speichern"><Text style={styles.modalSaveText}>Speichern</Text></Pressable>
             </View>
           </View>
         </View>
@@ -3734,15 +3734,15 @@ export default function App() {
 
       {/* Chat einem Ordner zuordnen */}
       <Modal visible={!!assignChatId} transparent animationType="fade" onRequestClose={() => setAssignChatId(null)}>
-        <Pressable style={styles.sheetBackdrop} onPress={() => setAssignChatId(null)}>
-          <Pressable style={styles.attachSheet} onPress={() => {}}>
+        <Pressable style={styles.sheetBackdrop} onPress={() => setAssignChatId(null)} accessibilityRole="button" accessibilityLabel="Ordner-Menü schließen">
+          <Pressable style={styles.attachSheet} onPress={() => {}} accessibilityElementsHidden>
             <View style={styles.attachSheetHandle} />
             <Text style={styles.attachSheetTitle}>In Ordner verschieben</Text>
-            <Pressable onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, null); }} style={styles.modelMenuItem}>
+            <Pressable onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, null); }} style={styles.modelMenuItem} accessibilityRole="button" accessibilityLabel="Aus Ordner entfernen">
               <Text style={styles.modelMenuItemText}>Kein Ordner</Text>
             </Pressable>
             {folders.map((f) => (
-              <Pressable key={f.id} onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, f.id); }} style={styles.modelMenuItem}>
+              <Pressable key={f.id} onPress={() => { if (assignChatId) assignChatToFolder(assignChatId, f.id); }} style={styles.modelMenuItem} accessibilityRole="button" accessibilityLabel={`In Ordner ${f.name} verschieben`}>
                 <Text style={styles.modelMenuItemText}>{f.name}</Text>
               </Pressable>
             ))}

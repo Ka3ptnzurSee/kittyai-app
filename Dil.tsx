@@ -217,7 +217,7 @@ function CheckboxWidget({ props }: { props: Props }) {
     if (typeof checkedProp === "boolean") setChecked(checkedProp);
   }, [checkedProp]);
   return (
-    <Pressable
+    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked }} accessibilityLabel={t(getProp(props, "label"), "Auswahl")}
       style={styles.checkboxRow}
       onPress={() => {
         const next = !checked;
@@ -249,7 +249,7 @@ function RadioGroupWidget({ props }: { props: Props }) {
         const val = typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, label);
         const active = value === val;
         return (
-          <Pressable
+          <Pressable accessibilityRole="radio" accessibilityState={{ selected: active }} accessibilityLabel={t(o, "?")}
             key={i}
             style={styles.checkboxRow}
             onPress={() => {
@@ -362,7 +362,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       const fg = variant === "secondary" || variant === "ghost" ? colors.text : "#ffffff";
       const actions = actionsOf(props);
       return (
-        <Pressable
+        <Pressable accessibilityRole="button" accessibilityState={{ disabled: !!disabled || !!loading }} accessibilityLabel={label || "Aktion"}
           disabled={disabled || loading}
           onPress={() => {
             // Follow-up-Frage: Action → Effekt „message" → App schickt sie als Turns an das Modell.
@@ -391,7 +391,7 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return (
         <View style={styles.select}>
           {opts.map((o, i) => (
-            <Pressable
+            <Pressable accessibilityRole="radio" accessibilityState={{ selected: selected === values[i] }} accessibilityLabel={t(o, "?")}
               key={i}
               onPress={() => {
                 fireControl(dispatch, props, values[i]);
@@ -694,7 +694,7 @@ function BarChart({ points, horizontal, onPick }: { points: ChartPoint[]; horizo
     return (
       <View style={styles.chart}>
         {points.map((p, i) => (
-          <Pressable key={i} style={styles.hBarRow} disabled={!onPick} onPress={() => onPick?.(p, i)}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Balken: ${p.label}`} key={i} style={styles.hBarRow} disabled={!onPick} onPress={() => onPick?.(p, i)}>
             <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
             <View style={styles.hBarTrack}>
               <View style={[styles.hBarFill, { width: `${Math.round((p.value / max) * 100)}%`, backgroundColor: barColor }]} />
@@ -709,7 +709,7 @@ function BarChart({ points, horizontal, onPick }: { points: ChartPoint[]; horizo
     <View style={styles.chart}>
       <View style={styles.vBarArea}>
         {points.map((p, i) => (
-          <Pressable key={i} style={styles.vBarCol} disabled={!onPick} onPress={() => onPick?.(p, i)}>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Säule: ${p.label}`} key={i} style={styles.vBarCol} disabled={!onPick} onPress={() => onPick?.(p, i)}>
             <View style={styles.vBarTrack}>
               <View style={[styles.vBarFill, { height: `${Math.min(100, Math.max(0, Math.round(((Number.isFinite(p.value) ? p.value : 0) / max) * 100)))}%`, backgroundColor: barColor }]} />
             </View>

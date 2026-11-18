@@ -132,6 +132,9 @@ export function Pressable({
   hitSlop,
   accessibilityLabel,
   accessibilityHint,
+  accessibilityRole,
+  accessibilityState,
+  accessibilityElementsHidden,
   selected,
   hapticOnPress = "light",
 }: {
@@ -146,6 +149,11 @@ export function Pressable({
   hitSlop?: number;
   accessibilityLabel?: string;
   accessibilityHint?: string;
+  /** z. B. "button" | "tab" | "link" — VoiceOver-Ansage (Valdi: a11y_role). */
+  accessibilityRole?: "button" | "tab" | "link" | "header" | "image" | "none";
+  accessibilityState?: { selected?: boolean; disabled?: boolean; busy?: boolean; expanded?: boolean; checked?: boolean };
+  /** Container, der nur Taps schluckt: komplett aus der VoiceOver-Reihenfolge nehmen. */
+  accessibilityElementsHidden?: boolean;
   /** VoiceOver-Zustand (z. B. aktiver Chat, gewählter Tab). */
   selected?: boolean;
   hapticOnPress?: "light" | "medium" | "selection" | "none";
@@ -165,8 +173,11 @@ export function Pressable({
       accessibilityHint={accessibilityHint}
       // Ohne role liest VoiceOver nur den Text vor, nicht "Taste"; accessibilityState
       // sagt den deaktivierten Zustand an (sichtbar ist er nur ueber opacity).
-      accessibilityRole="button"
-      accessibilityState={{ disabled: !!disabled, selected: selected }}
+      // Caller koennen role/state ueberschreiben (Tab, Link) — Default bleibt "button".
+      accessibilityRole={accessibilityRole ?? "button"}
+      accessibilityState={{ disabled: !!disabled, selected: selected, ...accessibilityState }}
+      accessibilityElementsHidden={accessibilityElementsHidden}
+      importantForAccessibility={accessibilityElementsHidden ? "no-hide-descendants" : "auto"}
       onPress={() => {
         if (disabled) return;
         if (hapticOnPress !== "none") haptic(hapticOnPress === "selection" ? "selection" : hapticOnPress);
