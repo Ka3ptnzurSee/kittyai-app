@@ -2654,8 +2654,12 @@ export default function App() {
       const e0 = evt as { type?: string; data?: { turnId?: string }; seq?: number };
       if (typeof e0.seq === "number" && e0.seq > lastSeq) lastSeq = e0.seq;
       if (e0.type === "turn_start" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
+      // Sofort-ACK des Servers: die Turn-Id ist schon vergeben, waehrend die Nachricht
+      // noch in der Warteschlange steht. Damit hat die App den Resume-Anker sofort
+      // (App-Kill/Netzabbruch direkt nach dem Senden verliert nichts mehr).
+      if (e0.type === "queued" && e0.data && e0.data.turnId) turnId = e0.data.turnId;
       streamStateRef.current[chatId] = { turnId, lastSeq, clientMessageId };
-      if (e0.type === "turn_start") persistStreamState(chatId);
+      if (e0.type === "turn_start" || e0.type === "queued") persistStreamState(chatId);
       apply(evt);
     };
 
