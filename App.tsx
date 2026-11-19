@@ -198,9 +198,6 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[
   { key: "flash", label: "FLASH" },
   // --goeran-options:start--
   { key: "muse", label: "MUSE" },
-  { key: "coder", label: "CODER" },
-  { key: "qwen38", label: "QWEN38" },
-  { key: "qwen", label: "QWEN" },
   // --goeran-options:end--
   // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
   // deactivated: hängen am Laptop-Tunnel → im UI als INAKTIV markiert, nicht wählbar.
@@ -1845,6 +1842,38 @@ export default function App() {
       return null;
     }
   }, []);
+  // Geteilte Dateien aus der Share-Extension: Bilder -> pendingImages, PDF/Office ->
+  // pendingDocuments, Text -> pendingFiles. Die Dateien liegen im App-Group-Container,
+  // im Payload steht nur der Pfad (Base64 waere fuer UserDefaults zu gross).
+  const attachSharedFiles = useCallback(async (files: { path: string; name?: string }[]) => {
+    const imageMime: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", heic: "image/heic", heif: "image/heic", gif: "image/gif", webp: "image/webp" };
+    const docMime: Record<string, string> = {
+      pdf: "application/pdf",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+    for (const f of files.slice(0, 5)) {
+      try {
+        const uri = f.path.startsWith("file://") ? f.path : "file://" + f.path;
+        const name = f.name || f.path.split("/").pop() || "datei";
+        const ext = (name.split(".").pop() || "").toLowerCase();
+        const file = new File(uri);
+        if (imageMime[ext]) {
+          const b64 = await file.base64();
+          if (b64) setPendingImages((p) => [...p, { data: b64, mediaType: imageMime[ext], uri }].slice(0, 5));
+        } else if (docMime[ext]) {
+          const b64 = await file.base64();
+          if (b64) setPendingDocuments((p) => [...p, { name, data: b64, mimeType: docMime[ext] }].slice(0, 5));
+        } else {
+          const text = await file.text();
+          if (text) setPendingFiles((p) => [...p, { name, content: text.slice(0, 20000) }].slice(0, 5));
+        }
+      } catch {
+        /* Datei nicht lesbar: ignorieren, der Rest geht trotzdem in den Chat */
+      }
+    }
+  }, []);
   const pullPendingShare = useCallback(() => {
     if (!shareStore) return;
     let raw: string | null = null;
@@ -1856,18 +1885,22 @@ export default function App() {
     if (!raw) return;
     shareStore.remove("kittyai.pendingShare");
     try {
-      const payload = JSON.parse(raw) as { text?: string; url?: string };
+      const payload = JSON.parse(raw) as { text?: string; url?: string; files?: { path: string; name?: string }[] };
       const shared = [payload.url, payload.text].filter((v): v is string => !!v && v.length > 0).join("\n");
-      if (!shared) return;
+      const sharedFiles = Array.isArray(payload.files) ? payload.files.filter((f) => f && typeof f.path === "string" && f.path) : [];
+      if (!shared && !sharedFiles.length) return;
       newChat();
-      setTimeout(() => {
-        setInput((prev) => (prev.trim() ? prev + "\n" + shared : shared));
-      }, 50);
+      if (shared) {
+        setTimeout(() => {
+          setInput((prev) => (prev.trim() ? prev + "\n" + shared : shared));
+        }, 50);
+      }
+      if (sharedFiles.length) void attachSharedFiles(sharedFiles);
       haptic("light");
     } catch {
       /* kaputter Eintrag: ignorieren */
     }
-  }, [shareStore]);
+  }, [attachSharedFiles, shareStore]);
 
   // Deeplinks aus Widget, Shortcuts und Extensions: kittyai://new | voice | chats
   const deepLinkRef = useRef<(url: string | null) => void>(() => {});
