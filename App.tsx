@@ -1853,25 +1853,40 @@ export default function App() {
       pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
       xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     };
+    const textExt = new Set(["txt", "md", "markdown", "csv", "json", "log", "html", "xml", "yml", "yaml", "tsv"]);
+    const MAX_SHARE_BYTES = 8 * 1024 * 1024;
+    let skipped = 0;
     for (const f of files.slice(0, 5)) {
       try {
         const uri = f.path.startsWith("file://") ? f.path : "file://" + f.path;
         const name = f.name || f.path.split("/").pop() || "datei";
         const ext = (name.split(".").pop() || "").toLowerCase();
         const file = new File(uri);
+        const size = typeof file.size === "number" ? file.size : 0;
+        if (size > MAX_SHARE_BYTES) {
+          skipped += 1;
+          continue;
+        }
         if (imageMime[ext]) {
           const b64 = await file.base64();
           if (b64) setPendingImages((p) => [...p, { data: b64, mediaType: imageMime[ext], uri }].slice(0, 5));
         } else if (docMime[ext]) {
           const b64 = await file.base64();
           if (b64) setPendingDocuments((p) => [...p, { name, data: b64, mimeType: docMime[ext] }].slice(0, 5));
-        } else {
+          try { file.delete(); } catch { /* ignorieren */ }
+        } else if (textExt.has(ext)) {
           const text = await file.text();
           if (text) setPendingFiles((p) => [...p, { name, content: text.slice(0, 20000) }].slice(0, 5));
+          try { file.delete(); } catch { /* ignorieren */ }
+        } else {
+          skipped += 1;
         }
       } catch {
-        /* Datei nicht lesbar: ignorieren, der Rest geht trotzdem in den Chat */
+        skipped += 1;
       }
+    }
+    if (skipped) {
+      Alert.alert("Nicht übernommen", skipped + " Anhang/Anhänge passten nicht (max. 8 MB, erlaubt: Bilder, PDF, Word, PowerPoint, Excel, Text).");
     }
   }, []);
   const pullPendingShare = useCallback(() => {
@@ -2104,6 +2119,10 @@ export default function App() {
           : lower.endsWith(".xlsx")
             ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             : "";
+      if (/(?:^|\.)(?:doc|xls|ppt)$/i.test(lower)) {
+        Alert.alert("Format nicht unterstützt", "Bitte als .docx, .xlsx oder .pptx exportieren — das alte .doc/.xls/.ppt-Format kann nicht gelesen werden.");
+        return;
+      }
       const isDocument = isPdf || !!officeMime;
       const maxBytes = isDocument ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
       if (a.size && a.size > maxBytes) {
@@ -2115,6 +2134,10 @@ export default function App() {
         const b64 = await f.base64();
         if (b64.length * 0.75 > maxBytes) {
           Alert.alert("Datei zu groß", "Maximal 8 MB für PDF, Word, PowerPoint und Excel");
+          return;
+        }
+        if (pendingDocuments.length >= 5) {
+          Alert.alert("Maximal 5 Dokumente", "Bitte erst eines der angehängten Dokumente entfernen.");
           return;
         }
         setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: isPdf ? "application/pdf" : officeMime }]);
@@ -2613,6 +2636,7 @@ export default function App() {
           context_too_long: "Kontext zu lang",
           engine_down: "Server nicht bereit",
           capacity: "Server ausgelastet",
+          server_restart: "Server neu gestartet",
         };
         const label = KIND_LABEL[kind] || classifyError(raw);
         setErrorCard(chatId, aiId, label, isRetryable(raw), "sse_error", raw);

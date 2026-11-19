@@ -493,6 +493,9 @@ export function classifyError(raw: string): string {
   if (/timeout|timed out|zeitüberschreitung/i.test(s)) return "Zeitüberschreitung";
   if (/overload|busy|capacity|ausgelastet|überlast/i.test(s)) return "Server ausgelastet";
   if (/context length|maximum context|token limit/i.test(s)) return "Kontext zu lang";
+  // WICHTIG: VOR der Netzwerk-Heuristik prüfen. Ein Server-Neustart mitten im Turn
+  // sah früher wie "Verbindung unterbrochen" aus (irreführend, 19.11.2026).
+  if (/server wurde neu gestartet|server-neustart|server restart/i.test(s)) return "Server neu gestartet";
   if (/network|fetch failed|connection|econnreset|socket|dns|netzwerk|verbindung/i.test(s)) return "Netzwerk unterbrochen";
   return "Fehler";
 }
