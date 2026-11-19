@@ -2360,7 +2360,7 @@ export default function App() {
             // lastSeq aus dem REF (nicht aus `e.lastSeq`): ein teilweise erfolgreicher
             // Resume-Versuch hat den Ref bereits weitergezählt — der feste Wert aus dem
             // ersten StreamInterrupted würde Deltas doppelt anhängen (Text-Duplikation).
-            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0 }, clientMessageId);
+            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId);
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
           } catch {
@@ -2402,11 +2402,11 @@ export default function App() {
             if (!st || !st.lastSeq) setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
             if (st && st.turnId) {
               // Resumable: an der Abbruchstelle fortsetzen statt von vorn zu streamen.
-              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, clientMessageId);
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0, canReset: true }, clientMessageId);
             } else {
               // Kein turnId bekannt (App evtl. vor turn_start getötet) → Server sucht
               // den letzten Turn dieses Chats selbst (vermeidet doppeltes Senden).
-              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: "", lastSeq: 0 }, clientMessageId);
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: "", lastSeq: 0, canReset: true }, clientMessageId);
             }
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
@@ -2424,7 +2424,7 @@ export default function App() {
       if (abortedRef.current.has(chatId)) return;
       const st = streamStateRef.current[chatId];
       try {
-        await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0 }, clientMessageId);
+        await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId);
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } catch (e2) {
         // Letzter Ausweg: Antwort aus der Server-Session-Datei holen (falls der Turn
@@ -2480,7 +2480,7 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number }, clientMessageId?: string) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number; canReset?: boolean }, clientMessageId?: string) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
@@ -2534,6 +2534,13 @@ export default function App() {
       } else if (t === "thinking") {
         const delta = typeof e.data === "string" ? e.data : "";
         setThinkingByChat((prev) => ({ ...prev, [chatId]: ((prev[chatId] || "") + delta).slice(-MAX_THINKING_CHARS) }));
+      } else if (t === "reset") {
+        // Server hat den abgebrochenen Turn nach einem Neustart neu gestartet: die
+        // bisher gesammelten Fragmente (Text/Denkvorgang/Activity) gehoeren zu einem
+        // toten pi-Prozess und wuerden den neuen Text verfaelschen -> Bubble leeren.
+        patchMsg(chatId, aiId, (m) => ({ ...m, text: "", activity: [], dil: undefined }));
+        setThinkingByChat((prev) => ({ ...prev, [chatId]: "" }));
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } else if (t === "status") {
         const msg = typeof e.data === "string" ? e.data : "";
         setStatusByChat((prev) => ({ ...prev, [chatId]: msg }));
