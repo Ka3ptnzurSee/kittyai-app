@@ -1594,10 +1594,15 @@ export default function App() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
 
-  // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 5000 Nachrichten je Chat)
-  // 5000 statt 200: ältere Nachrichten verschwanden sonst beim Neuladen endgültig.
+  // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat).
+  // WICHTIG (Performance, gemessen 20.11.): während eines Turns ändert sich `chats` bei
+  // JEDEM Delta. Das Speichern verschlüsselt den ganzen Bestand per AES-GCM im JS-Thread
+  // (331 ms bei 2,2 MB, 664 ms bei 4,3 MB) + hex-verdoppelt in AsyncStorage — hundertfach
+  // pro Antwort war das die Ursache für ~2 s verzögerte Taps. Deshalb: beim Streamen NICHT
+  // speichern, sondern einmal, wenn nichts mehr läuft (busyChatIds leer).
   useEffect(() => {
     if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
+    if (busyChatIds.size > 0) return;
     const t = setTimeout(() => {
       // Nur-lesbare Verläufe (WhatsApp/Terminal) NICHT lokal speichern: sie werden bei
       // jedem Sync frisch vom Server geholt und können sehr groß sein (bis ~7 MB).
@@ -1610,9 +1615,9 @@ export default function App() {
       secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
         .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
         .catch(() => warnWriteFailure(CHATS_ENC_KEY));
-    }, 800);
+    }, 2500);
     return () => clearTimeout(t);
-  }, [chats]);
+  }, [chats, busyChatIds]);
 
   // Aufgaben automatisch aktualisieren (Plugins → Tasks)
   useEffect(() => {

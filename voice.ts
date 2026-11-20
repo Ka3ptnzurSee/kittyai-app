@@ -10,6 +10,8 @@
 export const voiceHooks: {
   delta?: (text: string) => void;
   done?: (full: string) => void;
+  /** Turn fehlgeschlagen / kein Text -> Sprachmodus darf nicht stumm bleiben. */
+  error?: (msg: string) => void;
 } = {};
 
 /** Markdown/Rauschen entfernen - vorgelesen wird nur sprechbarer Text. */

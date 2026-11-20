@@ -32,13 +32,13 @@ export type VoiceModeProps = {
     border: string;
     background?: string;
   };
-  onSend: (text: string) => void;
+  onSend: (text: string, voice?: boolean) => void;
   onInterrupt: () => void;
   onClose: () => void;
   language?: string;
 };
 
-const SILENCE_MS = 1200;   // so lange muss es still sein, damit der Satz als fertig gilt
+const SILENCE_MS = 1800;   // so lange muss es still sein, damit der Satz als fertig gilt
 const RESTART_MS = 350;    // kleine Pause, bevor das Mikro wieder aufgeht
 
 export default function VoiceMode(props: VoiceModeProps) {
@@ -63,9 +63,12 @@ export default function VoiceMode(props: VoiceModeProps) {
   const bufferRef = useRef("");
   const answerRef = useRef("");
   const transcriptRef = useRef("");
+  const finalSegmentsRef = useRef(""); // finale Segmente werden angehängt (iOS liefert segmentweise)
+  const interimRef = useRef("");       // laufendes Teil-Ergebnis, nur für die Anzeige
   const sentRef = useRef(false);
   const playingRef = useRef(false);
   const wasPlayingRef = useRef(false);
+  const handsfreeRef = useRef(true);
   const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const turnStartRef = useRef(0);
@@ -74,6 +77,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { visibleRef.current = visible; }, [visible]);
   useEffect(() => { busyRef.current = busy; }, [busy]);
+  useEffect(() => { handsfreeRef.current = handsfree; }, [handsfree]);
 
   const clearTimers = () => {
     if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
@@ -143,6 +147,8 @@ export default function VoiceMode(props: VoiceModeProps) {
       }
       sentRef.current = false;
       transcriptRef.current = "";
+      finalSegmentsRef.current = "";
+      interimRef.current = "";
       setTranscript("");
       setPhase("hoeren");
       ExpoSpeechRecognitionModule.start({
@@ -157,10 +163,20 @@ export default function VoiceMode(props: VoiceModeProps) {
     }
   }, [language]);
 
+  /** Mikro wieder aufmachen, damit man ohne Tap weiterreden kann (Freihändig). */
+  const reopenMic = useCallback((delay: number = RESTART_MS) => {
+    if (!handsfreeRef.current || !visibleRef.current) return;
+    if (restartRef.current) clearTimeout(restartRef.current);
+    restartRef.current = setTimeout(() => { startListening(); }, delay);
+  }, [startListening]);
+
   /** Stille erkannt -> Satz abschicken (ueber den normalen Chat). */
   const finishUtterance = useCallback(() => {
     if (sentRef.current) return;
-    const text = transcriptRef.current.trim();
+    // Gesammeltes Final + letztes Interim (wie im Diktat-Pfad in App.tsx).
+    const text = [finalSegmentsRef.current, interimRef.current].filter(Boolean).join(" ").trim();
+    finalSegmentsRef.current = "";
+    interimRef.current = "";
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
     if (!text) {
       if (restartRef.current) clearTimeout(restartRef.current);
@@ -177,7 +193,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     setError("");
     setMetrics("");
     setPhase("denkt");
-    onSend(text);
+    onSend(text, true);
   }, [onSend, startListening]);
 
   const armSilence = useCallback(() => {
@@ -187,10 +203,22 @@ export default function VoiceMode(props: VoiceModeProps) {
 
   // --- Spracherkennung -----------------------------------------------------
   useSpeechRecognitionEvent("result", (event) => {
+    // event.results sind Alternativen (results[0] = beste). iOS liefert Finals
+    // segmentweise und prependet ab dem 2. Segment ein Leerzeichen -> anhängen
+    // statt überschreiben, sonst bleibt nur das letzte Fragment übrig.
     const t = (event.results?.[0]?.transcript ?? "").trim();
     if (!t) return;
-    transcriptRef.current = t;
-    setTranscript(t);
+    if (event.isFinal) {
+      finalSegmentsRef.current = finalSegmentsRef.current
+        ? `${finalSegmentsRef.current} ${t}`
+        : t;
+      interimRef.current = "";
+    } else {
+      interimRef.current = t; // nur Anzeige, wird beim Senden mitgeschickt
+    }
+    const shown = [finalSegmentsRef.current, interimRef.current].filter(Boolean).join(" ");
+    transcriptRef.current = shown;
+    setTranscript(shown);
     armSilence();
   });
   useSpeechRecognitionEvent("end", () => {
@@ -225,9 +253,36 @@ export default function VoiceMode(props: VoiceModeProps) {
         (full ? full.length + " Zeichen · " : "") + (took / 1000).toFixed(1) + " s Antwort" +
         (firstAudio ? " · " + (firstAudio / 1000).toFixed(1) + " s bis Stimme" : ""),
       );
+      // Nichts vorzulesen (leere Antwort) -> sonst bliebe der Modus stumm in
+      // "denkt" stehen. Mikro wieder aufmachen, damit man weiterreden kann.
+      if (!sentences.length && !queueRef.current.length && !playingRef.current) {
+        sentRef.current = false;
+        setPhase(handsfreeRef.current ? "hoeren" : "pause");
+        reopenMic(600);
+      }
     };
-    return () => { voiceHooks.delta = undefined; voiceHooks.done = undefined; };
-  }, [enqueue]);
+    // Turn fehlgeschlagen: Hinweis sichtbar machen (vorhandenes Fehlerfeld) und
+    // wieder zuhören, statt stumm in der Denk-Phase zu bleiben.
+    voiceHooks.error = (msg: string) => {
+      if (!visibleRef.current) return;
+      // Laufende Sprachausgabe stoppen und Puffer verwerfen: sonst hoert das gleich
+      // wieder geoeffnete Mikro die eigene TTS, und Resttext der alten Antwort
+      // wuerde in den naechsten Turn rutschen.
+      queueRef.current = [];
+      bufferRef.current = "";
+      playingRef.current = false;
+      try { player.pause(); } catch { /* aus */ }
+      setError(msg || "Keine Antwort vom Server - bitte nochmal.");
+      sentRef.current = false;
+      setPhase(handsfreeRef.current ? "hoeren" : "pause");
+      reopenMic(600);
+    };
+    return () => {
+      voiceHooks.delta = undefined;
+      voiceHooks.done = undefined;
+      voiceHooks.error = undefined;
+    };
+  }, [enqueue, reopenMic, player]);
 
   // --- Wiedergabe-Ende -> naechster Satz ----------------------------------
   useEffect(() => {

@@ -511,14 +511,19 @@ export function isRetryable(raw: string): boolean {
  *  Ohne Deckel kann `messages` (5.000 je Chat × 50 Chats) den AsyncStorage-Write
  *  sprengen — dann schlägt das Speichern fehl und der Verlauf ist nach einem
  *  Neustart weg. */
-export const MAX_STORAGE_CHARS = 8 * 1024 * 1024;
+// Speicher-Deckel fuer die lokale Chat-Kopie. Gemessen (Benchmark mit dem echten
+// Code): 2,2 MB brauchen 331 ms, 4,3 MB 664 ms AES-GCM im JS-Thread (noble, hex
+// verdoppelt die Schreibmenge) — bei jedem Speichern, also bei jedem Turn-Ende.
+// Der volle Verlauf liegt ohnehin in der Server-Session; lokal reicht ein Cache.
+export const MAX_STORAGE_CHARS = 700_000;
+export const MAX_STORED_MESSAGES = 200;
 
 /** Kürzt Chats so, dass der lokale Store nicht überläuft. Reihenfolge bleibt erhalten.
  *  Stufen: (1) je Chat die letzten `maxMessages`, (2) Nachrichten je Chat halbieren
  *  (nie unter 20), (3) älteste Chats opfern (nie den letzten). */
 export function trimChatsForStorage<T extends { messages: unknown[]; updatedAt?: number }>(
   chats: T[],
-  maxMessages = 5000,
+  maxMessages = MAX_STORED_MESSAGES,
   maxChars = MAX_STORAGE_CHARS,
 ): T[] {
   let list = chats.map((c) => ({ ...c, messages: c.messages.slice(-maxMessages) }));

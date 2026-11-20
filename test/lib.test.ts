@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -463,4 +463,20 @@ test("rehaTagName ist null-sicher", () => {
   assert.strictEqual(rehaTagName({}), "");
   assert.strictEqual(rehaTagName({ today: "18.11.2026" }), "");
   assert.strictEqual(rehaTagName({ today: "2026-11-18", weekday: Number.NaN }), "Mittwoch");
+});
+
+test("Speicher-Deckel bleibt klein (Performance: AES-GCM im JS-Thread)", () => {
+  // Regression: 8 MB Bestand kostete 331-664 ms AES-GCM pro Speichern (gemessen) und
+  // blockierte die UI. Der Deckel muss deutlich darunter bleiben.
+  assert.ok(MAX_STORAGE_CHARS <= 1_000_000, "MAX_STORAGE_CHARS zu gross: " + MAX_STORAGE_CHARS);
+  assert.ok(MAX_STORED_MESSAGES <= 250, "MAX_STORED_MESSAGES zu gross: " + MAX_STORED_MESSAGES);
+  const big = Array.from({ length: 40 }, (_, c) => ({
+    id: "c" + c,
+    updatedAt: c,
+    messages: Array.from({ length: 400 }, (_, i) => ({ id: "m" + i, role: "user", text: "y".repeat(900) })),
+  }));
+  const out = trimChatsForStorage(big);
+  const chars = JSON.stringify(out).length;
+  assert.ok(chars <= MAX_STORAGE_CHARS * 1.2, "gespeicherter Bestand zu gross: " + chars);
+  for (const c of out) assert.ok(c.messages.length <= MAX_STORED_MESSAGES, "Chat " + c.id + " hat " + c.messages.length + " Nachrichten");
 });
