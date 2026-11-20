@@ -47,7 +47,7 @@ import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; attachments?: { kind: string; name: string; sizeKB?: number }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
 type ChatSource = "app" | "whatsapp" | "terminal";
 type Chat = {
   id: string;
@@ -521,6 +521,23 @@ function MessageBubble({
           ) : null}
         </>
       )}
+      {item.attachments && item.attachments.length > 0 ? (
+        <View style={styles.attRow}>
+          {item.attachments.map((at, i) => (
+            <View key={i} style={styles.attChip}>
+              <Ionicons
+                name={at.kind === "audio" ? "mic-outline" : at.kind === "image" ? "image-outline" : "document-text-outline"}
+                size={12}
+                color={colors.muted}
+              />
+              <Text numberOfLines={1} style={styles.attChipText}>
+                {at.name}
+                {at.sizeKB ? " · " + (at.sizeKB >= 1024 ? Math.round(at.sizeKB / 1024) + " MB" : at.sizeKB + " KB") : ""}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
       {item.images && item.images.length > 0 ? (
         item.images.map((img, i) => <MessageImage key={i} uri={img.uri} />)
       ) : null}
@@ -2104,47 +2121,73 @@ export default function App() {
 
   async function pickFile() {
     try {
-      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true });
+      // Mehrfachauswahl: bis zu 5 Dateien in einem Zug (Server-Limit: 5 Dokumente).
+      const res = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: true });
       if (res.canceled || !res.assets?.length) return;
-      const a = res.assets[0];
-      const lower = (a.name || "").toLowerCase();
-      const isPdf = a.mimeType === "application/pdf" || lower.endsWith(".pdf");
-      // Word/PowerPoint/Excel sind ZIP-Container: als Text gelesen käme Binärmüll
-      // beim Modell an. Sie gehen wie PDFs als Base64 an den Server, der den Text
-      // mit scripts/office_extract.py herausholt.
-      const officeMime = lower.endsWith(".docx")
-        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        : lower.endsWith(".pptx")
-          ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-          : lower.endsWith(".xlsx")
-            ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            : "";
-      if (/(?:^|\.)(?:doc|xls|ppt)$/i.test(lower)) {
-        Alert.alert("Format nicht unterstützt", "Bitte als .docx, .xlsx oder .pptx exportieren — das alte .doc/.xls/.ppt-Format kann nicht gelesen werden.");
-        return;
-      }
-      const isDocument = isPdf || !!officeMime;
-      const maxBytes = isDocument ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
-      if (a.size && a.size > maxBytes) {
-        Alert.alert("Datei zu groß", isDocument ? "Maximal 8 MB für PDF, Word, PowerPoint und Excel" : "Maximal 2 MB");
-        return;
-      }
-      const f = new File(a.uri);
-      if (isDocument) {
-        const b64 = await f.base64();
-        if (b64.length * 0.75 > maxBytes) {
-          Alert.alert("Datei zu groß", "Maximal 8 MB für PDF, Word, PowerPoint und Excel");
-          return;
+      const docs: { name: string; data: string; mimeType: string }[] = [];
+      const files: { name: string; content: string }[] = [];
+      let skippedFormat = 0;
+      let skippedSize = 0;
+      for (const a of res.assets) {
+        const lower = (a.name || "").toLowerCase();
+        const isPdf = a.mimeType === "application/pdf" || lower.endsWith(".pdf");
+        // Word/PowerPoint/Excel sind ZIP-Container: als Text gelesen käme Binärmüll
+        // beim Modell an. Sie gehen wie PDFs als Base64 an den Server, der den Text
+        // mit scripts/office_extract.py herausholt.
+        const officeMime = lower.endsWith(".docx")
+          ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          : lower.endsWith(".pptx")
+            ? "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            : lower.endsWith(".xlsx")
+              ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              : "";
+        if (/(?:^|\.)(?:doc|xls|ppt)$/i.test(lower)) {
+          skippedFormat += 1;
+          continue;
         }
-        if (pendingDocuments.length >= 5) {
-          Alert.alert("Maximal 5 Dokumente", "Bitte erst eines der angehängten Dokumente entfernen.");
-          return;
+        // Audio (Sprachnotiz, Interview): der Server transkribiert per Gemini.
+        const audioMime = /^audio\//.test(a.mimeType || "") ? String(a.mimeType) : "";
+        const isDocument = isPdf || !!officeMime || !!audioMime;
+        const maxBytes = isDocument ? 8 * 1024 * 1024 : 2 * 1024 * 1024;
+        if (a.size && a.size > maxBytes) {
+          skippedSize += 1;
+          continue;
         }
-        setPendingDocuments((p) => [...p, { name: a.name || "dokument.pdf", data: b64, mimeType: isPdf ? "application/pdf" : officeMime }]);
-      } else {
-        const content = await f.text();
-        setPendingFiles((p) => [...p, { name: a.name || "datei", content: content.slice(0, 20000) }]);
+        const f = new File(a.uri);
+        if (isDocument) {
+          const b64 = await f.base64();
+          if (b64.length * 0.75 > maxBytes) {
+            skippedSize += 1;
+            continue;
+          }
+          docs.push({
+            name: a.name || "dokument.pdf",
+            data: b64,
+            mimeType: isPdf ? "application/pdf" : officeMime || audioMime,
+          });
+        } else {
+          const content = await f.text();
+          files.push({ name: a.name || "datei", content: content.slice(0, 20000) });
+        }
       }
+      if (skippedFormat) {
+        Alert.alert(
+          "Format nicht unterstützt",
+          `${skippedFormat} Datei(en) im alten .doc/.xls/.ppt-Format wurden übersprungen — bitte als .docx/.xlsx/.pptx exportieren.`,
+        );
+      }
+      if (skippedSize) {
+        Alert.alert(
+          "Datei zu groß",
+          `${skippedSize} Datei(en) übersprungen — maximal 8 MB pro Dokument/Audio, 2 MB für Textdateien.`,
+        );
+      }
+      if (docs.length) {
+        const overflow = docs.length + pendingDocuments.length - 5;
+        if (overflow > 0) Alert.alert("Maximal 5 Dokumente", `${overflow} Datei(en) wurden nicht übernommen.`);
+        if (docs.length + pendingDocuments.length > 0) setPendingDocuments((p) => [...p, ...docs].slice(0, 5));
+      }
+      if (files.length) setPendingFiles((p) => [...p, ...files].slice(0, 8));
     } catch (e) {
       Alert.alert("Datei anhängen fehlgeschlagen", e instanceof Error ? e.message : String(e));
     }
@@ -2249,7 +2292,7 @@ export default function App() {
     await regenerateImage(chatId, aiId, prompt);
   }
 
-  async function send(text?: string) {
+  async function send(text?: string, voice?: boolean) {
     const message = (text ?? input).trim();
     // Nur-lesbare Verläufe (WhatsApp, Terminal) nie anschreiben — der Verlauf gehört
     // einem anderen Prozess/Kanal. Stattdessen den Übernehmen-Weg anbieten.
@@ -2299,7 +2342,17 @@ export default function App() {
     setInput("");
     setChatThinking(chatId, "");
     setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "Bild" : documents.length ? "PDF" : "Datei"), images: imageUris, replyTo };
+    // Anhänge mit Namen/Größe an der Blase festhalten (Bilder zeigen schon die
+    // Thumbnails): so ist nach Chatwechsel/Reload sichtbar, was mitgeschickt wurde.
+    const attList: { kind: string; name: string; sizeKB?: number }[] = [
+      ...pendingDocuments.map((d) => ({
+        kind: /^audio\//.test(d.mimeType || "") ? "audio" : "document",
+        name: d.name,
+        sizeKB: Math.round(((d.data || "").length * 0.75) / 1024),
+      })),
+      ...pendingFiles.map((f) => ({ kind: "file", name: f.name })),
+    ];
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "Bild" : documents.length ? "Dokument" : "Datei"), images: imageUris, attachments: attList.length ? attList : undefined, replyTo };
     const aiId = uid("a");
     setPendingImages([]);
     setPendingFiles([]);
@@ -2329,7 +2382,7 @@ export default function App() {
     }, 60);
 
     try {
-      await streamChat(finalMessage, chatId, aiId, images, documents, undefined, clientMessageId);
+      await streamChat(finalMessage, chatId, aiId, images, documents, undefined, clientMessageId, voice);
     } catch (e) {
       if (abortedRef.current.has(chatId)) {
         abortedRef.current.delete(chatId);
@@ -2360,7 +2413,7 @@ export default function App() {
             // lastSeq aus dem REF (nicht aus `e.lastSeq`): ein teilweise erfolgreicher
             // Resume-Versuch hat den Ref bereits weitergezählt — der feste Wert aus dem
             // ersten StreamInterrupted würde Deltas doppelt anhängen (Text-Duplikation).
-            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId);
+            await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId, voice);
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
           } catch {
@@ -2376,6 +2429,7 @@ export default function App() {
           return;
         }
         setErrorCard(chatId, aiId, "Verbindung unterbrochen – Antwort wird nachgeliefert.", true, "stream_interrupted");
+        voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
         return;
       }
       // Auto-Wiederherstellung: bei Stream-Abbruch (Server-Neustart/Netz) mehrfach
@@ -2402,11 +2456,11 @@ export default function App() {
             if (!st || !st.lastSeq) setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
             if (st && st.turnId) {
               // Resumable: an der Abbruchstelle fortsetzen statt von vorn zu streamen.
-              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0, canReset: true }, clientMessageId);
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st.turnId, lastSeq: st.lastSeq || 0, canReset: true }, clientMessageId, voice);
             } else {
               // Kein turnId bekannt (App evtl. vor turn_start getötet) → Server sucht
               // den letzten Turn dieses Chats selbst (vermeidet doppeltes Senden).
-              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: "", lastSeq: 0, canReset: true }, clientMessageId);
+              await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: "", lastSeq: 0, canReset: true }, clientMessageId, voice);
             }
             setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
             return;
@@ -2424,7 +2478,7 @@ export default function App() {
       if (abortedRef.current.has(chatId)) return;
       const st = streamStateRef.current[chatId];
       try {
-        await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId);
+        await streamChat(finalMessage, chatId, aiId, images, documents, { turnId: st?.turnId || "", lastSeq: st?.lastSeq || 0, canReset: true }, clientMessageId, voice);
         setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
       } catch (e2) {
         // Letzter Ausweg: Antwort aus der Server-Session-Datei holen (falls der Turn
@@ -2450,6 +2504,7 @@ export default function App() {
           // ewig pollen wäre falsch. Retry-Karte statt Reconnect.
           if (!(await messageReachedServer(chatId))) {
             setErrorCard(chatId, aiId, "Nicht gesendet — Netzwerk unterbrochen. Bitte erneut senden.", true, "send_offline");
+            voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
             return;
           }
           turnStillRunning = true;
@@ -2458,6 +2513,12 @@ export default function App() {
         }
         // Echter Server-Fehler (kein Netzproblem) → Fehler-Karte statt Text-Suffix.
         setErrorCard(chatId, aiId, classifyError(rawMsg), isRetryable(rawMsg), "send_failed", rawMsg);
+        // Anhänge zurück in die Eingabezeile: nach einem echten Fehler muss der
+        // Nutzer Bild/PDF/Audio nicht neu auswählen — ein Tippen auf Senden reicht.
+        if (pendingImages.length) setPendingImages(pendingImages);
+        if (pendingDocuments.length) setPendingDocuments(pendingDocuments);
+        if (pendingFiles.length) setPendingFiles(pendingFiles);
+        voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
       }
     } finally {
       setChatThinking(chatId, "");
@@ -2480,7 +2541,7 @@ export default function App() {
     }
   }
 
-  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number; canReset?: boolean }, clientMessageId?: string) {
+  async function streamChat(message: string, chatId: string, aiId: string, images: { data: string; mediaType: string }[] = [], documents: { name: string; data: string; mimeType: string }[] = [], resume?: { turnId: string; lastSeq: number; canReset?: boolean }, clientMessageId?: string, voice?: boolean) {
     const controller = new AbortController();
     abortControllersRef.current.set(chatId, controller);
     const timer = setTimeout(() => controller.abort(), STREAM_TIMEOUT_MS);
@@ -2499,7 +2560,7 @@ export default function App() {
     const res = await fetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/stream`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model }),
+      body: JSON.stringify(resume ? { chatId, resume, clientMessageId } : { message, chatId, images, documents, clientMessageId, model, ...(voice ? { voice: true } : {}) }),
       signal: controller.signal,
     });
 
@@ -2647,6 +2708,7 @@ export default function App() {
         };
         const label = KIND_LABEL[kind] || classifyError(raw);
         setErrorCard(chatId, aiId, label, isRetryable(raw), "sse_error", raw);
+        voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
       }
     };
 
@@ -2715,6 +2777,10 @@ export default function App() {
       error: undefined,
     }));
     voiceHooks.done?.(finalReply.trim());
+    // Leerer Turn: der Sprachmodus wuerde sonst stumm bleiben -> Fehlerkanal.
+    // Nur wenn der Server selbst mit done abgeschlossen hat; nach einem error-Event
+    // hat der Handler oben schon gemeldet (kein Doppel-Feuern).
+    if (doneReceived && !finalReply.trim()) voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
     // Im Sprachmodus liest VoiceMode selbst vor - speakReply wuerde doppelt sprechen
     if (speak && !voiceOpenRef.current && finalReply.trim()) speakReply(finalReply.trim());
     } catch (e) {
@@ -2746,6 +2812,7 @@ export default function App() {
         // Bewusst getrennt (App ging in den Hintergrund) → KEIN Fehler.
         if (wentBackgroundRef.current) throw new BackgroundDetached();
         patchMsg(chatId, aiId, (m) => ({ ...m, error: { type: "Zeitüberschreitung", retryable: true } }));
+        voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
         return;
       }
       // Netzwerk-/HTTP-Fehler: nicht verschlucken → sendChat-Retry + /chat-Fallback greifen.
@@ -3399,7 +3466,7 @@ export default function App() {
         authHeaders={authHeaders}
         busy={activeChatId ? busyChatIds.has(activeChatId) : false}
         colors={colors}
-        onSend={(text: string) => { void send(text); }}
+        onSend={(text: string, voice?: boolean) => { void send(text, voice); }}
         onInterrupt={() => { if (activeChatId) void abort(activeChatId); }}
         onClose={() => setVoiceOpen(false)}
       />
@@ -3976,6 +4043,19 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  attRow: { flexDirection: "row", flexWrap: "wrap", marginTop: 6, gap: 6 },
+  attChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    maxWidth: "100%",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 10,
+    backgroundColor: "rgba(127,127,127,0.16)",
+  },
+  attChipText: { fontSize: 11, color: colors.muted, maxWidth: 200 },
+
   safe: { flex: 1, backgroundColor: colors.bg },
   header: {
     flexDirection: "row",
