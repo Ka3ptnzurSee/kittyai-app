@@ -6,6 +6,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  InteractionManager,
   Image,
   Keyboard,
   KeyboardAvoidingView,
@@ -38,6 +39,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
+import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
@@ -981,6 +983,49 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, serverUrl, apiToken, activeChatId]);
 
+  // Feldmessung: Dauer vom Oeffnen eines Chats bis der JS-Thread wieder frei ist
+  // (Liste gerendert). Plus Minutentakt-Flush der Messwerte an /api/diag.
+  useEffect(() => {
+    if (!activeChatId) return;
+    perfStart("chat.open");
+    const task = InteractionManager.runAfterInteractions(() => perfEnd("chat.open"));
+    return () => task.cancel();
+  }, [activeChatId]);
+
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const flush = () => {
+      const samples = takePerfSamples();
+      if (!samples.length) return;
+      fetch(serverUrl.replace(/\/+$/, "") + "/api/diag", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ kind: "perf", samples, appVersion: APP_VERSION }),
+      }).catch(() => { /* Messung darf nie stoeren */ });
+    };
+    const t = setInterval(flush, 60000);
+    return () => { clearInterval(t); flush(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverUrl, apiToken]);
+
+  // Kaltstart vorwaermen: beim Oeffnen eines Chats den pi-Prozess serverseitig starten.
+  // Gemessen: ein frischer pi-Prozess braucht ~3 s bis zum ersten Text; laeuft er schon,
+  // beginnt die Antwort nach ~1,2-1,7 s. Der Aufruf schickt KEINE Nachricht (kein Turn).
+  useEffect(() => {
+    const id = activeChatId;
+    if (!id || !loadedRef.current) return;
+    const chat = chatsRef.current.find((c) => c.id === id);
+    if (!chat || chat.readOnly) return;
+    const t = setTimeout(() => {
+      fetch(`${serverUrl.replace(/\/+$/, "")}/api/chat/warm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ chatId: id }),
+      }).catch(() => { /* Vorwaermen ist optional */ });
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId, serverUrl, apiToken]);
   // Live-Sync/Reload: finale Antwort aus der Server-Session-Datei holen (überlebt die
   // turnRegistry-TTL) und eine leere/fehlerhafte KI-Bubble damit auffüllen.
   async function reloadFromServer(chatId: string): Promise<boolean> {
@@ -1495,6 +1540,7 @@ export default function App() {
       loadMeta();
       loadConnectorsList();
       loadedRef.current = true;
+      perfAdd("app.init", Date.now() - moduleStartedAt);
       registerPush(url, savedToken);
     })();
   }, []);
@@ -1612,8 +1658,14 @@ export default function App() {
           .slice(0, 50)
           .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: stripErrorFlags(c.messages || []) })),
       );
-      secureSet(CHATS_ENC_KEY, JSON.stringify(trimmed))
-        .then(() => { writeWarnedRef.current.delete(CHATS_ENC_KEY); })
+      const tSave = Date.now();
+      const payload = JSON.stringify(trimmed);
+      secureSet(CHATS_ENC_KEY, payload)
+        .then(() => {
+          writeWarnedRef.current.delete(CHATS_ENC_KEY);
+          // Speicherkosten im Feld messen (Verschluesseln + Schreiben blockiert den JS-Thread).
+          perfAdd("store.save", Date.now() - tSave, Math.round(payload.length / 1024) + "KB");
+        })
         .catch(() => warnWriteFailure(CHATS_ENC_KEY));
     }, 2500);
     return () => clearTimeout(t);
@@ -2318,6 +2370,7 @@ export default function App() {
     if (!message && pendingImages.length === 0 && pendingFiles.length === 0 && pendingDocuments.length === 0) return;
     let chatId = activeChatId;
     if (!chatId) chatId = newChat();
+    perfStart("send.firstText"); // Tap -> erster sichtbarer Antwort-Text
     if (busyChatIds.has(chatId)) return; // nur dieser Chat ist gerade beschäftigt
     haptic("light"); // Senden quittiert wie ChatGPT (UIImpactFeedbackGenerator.light)
     wentBackgroundRef.current = false; // neuer Turn → Hintergrund-Flag zurücksetzen
@@ -2592,6 +2645,7 @@ export default function App() {
       const t = e?.type;
       if (t === "text") {
         const delta = typeof e.data === "string" ? e.data : "";
+        perfEnd("send.firstText"); // nur der ERSTE Delta schliesst die Messung ab
         patchMsg(chatId, aiId, (m) => ({ ...m, text: (m.text + delta).slice(0, MAX_REPLY_CHARS) }));
         // Sprachmodus liest mit (satzweise Sprachausgabe schon waehrend des Streams)
         if (delta) voiceHooks.delta?.(delta);
