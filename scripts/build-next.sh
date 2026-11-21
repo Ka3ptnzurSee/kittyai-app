@@ -28,6 +28,25 @@ fi
 DIR_UID=$(stat -c '%u' .)
 [ "$DIR_UID" -ne 0 ] && echo "HINWEIS: $APP_DIR gehört uid $DIR_UID (nicht root), Rechte $DIR_MODE — nur Schreibrechte zählen hier."
 
+# Die Prüfung oben deckt nur das Verzeichnis selbst ab. Ausgeführt/gelesen wird aber
+# mehr: scripts/*.{sh,mjs} laufen als root, app.json entscheidet über die Build-Nummer,
+# credentials/ hält die Apple-Schlüssel. Ist davon etwas gruppen-/welt-schreibbar,
+# reicht ein fremder Schreiber für Code-Ausführung bzw. Key-Diebstahl.
+# Symlinks in scripts/ würden die Prüfung umgehen (geprüft würde das Ziel, ausgeführt
+# die verlinkte Datei) — hier gibt es keinen legitimen Symlink, also hart abbrechen.
+# ZUERST prüfen: ein Symlink hat selbst immer lrwxrwxrwx, sonst meldet die Rechte-
+# prüfung darunter nur irreführend "gruppen-/welt-schreibbar".
+LINK=$(find scripts -maxdepth 2 -type l -print -quit 2>/dev/null)
+if [ -n "$LINK" ]; then
+  echo "FEHLER: Symlink '$LINK' in scripts/ — Abbruch (Rechteprüfung wäre umgehbar)."
+  exit 1
+fi
+BAD=$(find scripts app.json package.json credentials -maxdepth 3 -perm /022 -print -quit 2>/dev/null)
+if [ -n "$BAD" ]; then
+  echo "FEHLER: '$BAD' ist gruppen-/welt-schreibbar — fremder Code würde als root laufen. Abbruch."
+  exit 1
+fi
+
 # Kein Doppellauf: zwei Prozesse würden zweimal bumpen und zwei Builds starten.
 # Lock in /run (root-eigen, nicht welt-schreibbar) statt /tmp — sonst Symlink-Angriff.
 LOCK_DIR=/run/build-next
@@ -59,7 +78,16 @@ cleanup() { rm -rf "$TMPDIR_BN" 2>/dev/null; }
 trap cleanup EXIT
 
 # Fremdausgabe entschärfen: Steuerzeichen (ANSI/CR-Injection) raus, Token-Muster redigieren.
-san() { tr -d '\000-\010\013-\037\177' 2>/dev/null | sed -E 's/(EXPO_TOKEN|token|password|secret|passcode)[=:][^[:space:]]*/\1=<redacted>/Ig'; }
+# Abgedeckt: keyword=wert, keyword: wert, "Bearer <jwt>", rohe JWTs (eyJ…) und
+# presigned-URL-Parameter (X-Amz-Signature, sig, policy) aus Upload-Ausgaben.
+san() {
+  tr -d '\000-\010\013-\037\177' 2>/dev/null \
+    | sed -E \
+        -e 's/(EXPO_TOKEN|token|password|passwd|secret|passcode|access[_-]?token|api[_-]?key)([[:space:]]*[=:][[:space:]]*)[^[:space:],"]*/\1\2<redacted>/Ig' \
+        -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+\/-]+/\1 <redacted>/Ig' \
+        -e 's/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/<jwt-redacted>/g' \
+        -e 's/([?&](X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|sig|policy|key-pair-id)=)[^&[:space:]]*/\1<redacted>/Ig'
+}
 
 echo "=== [1/2] EAS-Build starten ($(date '+%F %T')) ==="
 
@@ -68,14 +96,18 @@ VER=$(node scripts/next-build-number.mjs 2>"$TMPDIR_BN/err.ver" | tail -1)
 VER_ERR=$(cat "$TMPDIR_BN/err.ver" 2>/dev/null || true)
 [ -n "$VER_ERR" ] && printf '%s\n' "$VER_ERR" | san
 case "$VER" in
-  ''|*[!0-9]*) echo "FEHLER: nächste Build-Nummer nicht ermittelbar ('$VER')."; exit 1 ;;
+  # Fremdausgabe aus dem .mjs — vor der Ausgabe entschärfen (ANSI-Injection-tauglich).
+  ''|*[!0-9]*) echo "FEHLER: nächste Build-Nummer nicht ermittelbar ('$(printf '%s' "$VER" | san | cut -c1-40)')."; exit 1 ;;
 esac
 [ "${#VER}" -le 10 ] || { echo "FEHLER: Build-Nummer unplausibel lang (${#VER} Stellen)."; exit 1; }
 # Fallback-Pfad des .mjs = committete Nummer OHNE +1 → würde bei Apple kollidieren.
-if printf '%s' "$VER_ERR" | grep -qiE 'nutze committete buildNumber|Start bei committeter buildNumber'; then
-  echo "FEHLER: ASC-Abfrage fehlgeschlagen — Nummer $VER ist unbestätigt (Kollisionsgefahr). Abbruch."
-  exit 1
-fi
+# case statt `printf | grep -q`: gleiche SIGPIPE-Falle wie unten unter pipefail.
+case "$VER_ERR" in
+  *"nutze committete buildNumber"*|*"Start bei committeter buildNumber"*)
+    echo "FEHLER: ASC-Abfrage fehlgeschlagen — Nummer $VER ist unbestätigt (Kollisionsgefahr). Abbruch."
+    exit 1
+    ;;
+esac
 echo "Build-Version: $VER (aus ASC)"
 
 # --- app.json bumpen (appVersionSource=local → sonst Duplikat bei Apple) ---
@@ -114,22 +146,28 @@ BUILD_JSON=$(eas build --platform ios --profile production --non-interactive --n
 EAS_RC=$?
 if [ "$EAS_RC" -ne 0 ]; then
   echo "FEHLER: 'eas build' fehlgeschlagen (rc=$EAS_RC)."
-  # Die eigentliche Ursache steht oft NACH dem Warnblock (Kontingent-Hinweis kam erst
-  # nach "Uploaded to EAS"). Deshalb: Schluesselzeilen zuerst, dann die ersten Zeilen.
-  KEY=$(sed -n '1,200p' "$TMPDIR_BN/err.build" 2>/dev/null \
-    | grep -iE 'error|failed|not allowed|Free plan|billing|already been used|exceeded|quota|forbidden|unauthor' \
-    | head -8)
+  # Die eigentliche Ursache steht oft NACH dem Warnblock (der Kontingent-Hinweis kam erst
+  # nach "Uploaded to EAS" und jenseits der Zeile 200). Deshalb die GANZE Datei ansehen
+  # und nur die Ausgabe auf 8 Treffer begrenzen — kein `head` in der Pipe (pipefail/SIGPIPE).
+  KEY=$(grep -aiE '(^|[^0-9])error|failed|fehlgeschlagen|not allowed|Free plan|billing|already been used|exceeded|quota|forbidden|unauthor' "$TMPDIR_BN/err.build" 2>/dev/null | sed -n '1,8p')
   if [ -n "$KEY" ]; then
     echo "--- Ursache (stderr-Schluesselzeilen) ---"
     printf '%s\n' "$KEY" | san
   fi
-  if printf '%s' "$KEY" | grep -qi 'used its iOS builds from the Free plan'; then
-    echo "HINWEIS: EAS-Cloud-Kontingent (Free-Plan, iOS) erschoepft — Reset am 1. des Monats."
-    echo "         Ausweichweg: Push auf master startet .github/workflows/ios-build.yml"
-    echo "         ('eas build --local' auf dem macOS-Runner, umgeht das Cloud-Kontingent)."
+  # case statt `printf | grep -q`: grep -q beendet die Pipe frueh → SIGPIPE auf printf →
+  # unter pipefail rc 141 und die Bedingung schluege genau im Fehlerfall fehl.
+  case "$KEY" in
+    *"used its iOS builds from the Free plan"*)
+      echo "HINWEIS: EAS-Cloud-Kontingent (Free-Plan, iOS) erschoepft — Reset am 1. des Monats."
+      echo "         Ausweichweg: Push auf master startet .github/workflows/ios-build.yml"
+      echo "         ('eas build --local' auf dem macOS-Runner, umgeht das Cloud-Kontingent)."
+      ;;
+  esac
+  # Kopf der Ausgabe nur zeigen, wenn die Trefferliste nichts hergab (keine Doppelung).
+  if [ -z "$KEY" ]; then
+    sed -n '1,10p' "$TMPDIR_BN/err.build" 2>/dev/null | san
   fi
-  sed -n '1,10p' "$TMPDIR_BN/err.build" 2>/dev/null | san
-  printf '%s\n' "$BUILD_JSON" | tail -20 | san
+  printf '%s\n' "$BUILD_JSON" | sed -n '1,20p' | san
   rollback "eas build rc=$EAS_RC"
   exit 1
 fi
@@ -150,7 +188,7 @@ process.stdin.on("end", () => {
 # Fallback: UUID aus der Ausgabe ziehen (Steuerzeichen vorher entfernen)
 if [ -z "$BUILD_ID" ]; then
   BUILD_ID=$(printf '%s\n' "$BUILD_JSON" | tr -d '\000-\010\013-\037\177' \
-    | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)
+    | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | sed -n '1p')
 fi
 
 if [ -z "$BUILD_ID" ]; then
