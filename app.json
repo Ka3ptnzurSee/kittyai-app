@@ -83,6 +83,14 @@
       }
     },
     "owner": "per_h",
-    "scheme": "kittyai"
+    "scheme": "kittyai",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "url": "https://u.expo.dev/1f2cda59-ed40-4415-9d1f-fa2f5fe5ac5b"
+    }
   }
 }
