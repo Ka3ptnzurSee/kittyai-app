@@ -114,7 +114,21 @@ BUILD_JSON=$(eas build --platform ios --profile production --non-interactive --n
 EAS_RC=$?
 if [ "$EAS_RC" -ne 0 ]; then
   echo "FEHLER: 'eas build' fehlgeschlagen (rc=$EAS_RC)."
-  sed -n '1,20p' "$TMPDIR_BN/err.build" 2>/dev/null | san
+  # Die eigentliche Ursache steht oft NACH dem Warnblock (Kontingent-Hinweis kam erst
+  # nach "Uploaded to EAS"). Deshalb: Schluesselzeilen zuerst, dann die ersten Zeilen.
+  KEY=$(sed -n '1,200p' "$TMPDIR_BN/err.build" 2>/dev/null \
+    | grep -iE 'error|failed|not allowed|Free plan|billing|already been used|exceeded|quota|forbidden|unauthor' \
+    | head -8)
+  if [ -n "$KEY" ]; then
+    echo "--- Ursache (stderr-Schluesselzeilen) ---"
+    printf '%s\n' "$KEY" | san
+  fi
+  if printf '%s' "$KEY" | grep -qi 'used its iOS builds from the Free plan'; then
+    echo "HINWEIS: EAS-Cloud-Kontingent (Free-Plan, iOS) erschoepft — Reset am 1. des Monats."
+    echo "         Ausweichweg: Push auf master startet .github/workflows/ios-build.yml"
+    echo "         ('eas build --local' auf dem macOS-Runner, umgeht das Cloud-Kontingent)."
+  fi
+  sed -n '1,10p' "$TMPDIR_BN/err.build" 2>/dev/null | san
   printf '%s\n' "$BUILD_JSON" | tail -20 | san
   rollback "eas build rc=$EAS_RC"
   exit 1
