@@ -64,7 +64,7 @@ test("lange Saetze werden an Wortgrenzen geteilt", () => {
 });
 
 // --- Spracherkennung: 209/216 & Co. sind Session-Ende, kein Fehler ----------
-import { isSpeechSessionEnd, speechErrorText, SPEECH_RESTART_MS } from "../voice.ts";
+import { isSpeechSessionEnd, speechErrorText, SPEECH_LANG, SPEECH_RESTART_MS, SPEECH_SESSION_CAP_MS } from "../voice.ts";
 
 test("kAFAssistantErrorDomain 216 (gemeldeter Fall) = Session-Ende", () => {
   const ev = { error: "audio-capture", message: "The operation couldn’t be completed. (kAFAssistantErrorDomain error 216.)" };
@@ -119,4 +119,13 @@ test("feindliche/kaputte Events crashen nicht", () => {
 
 test("Restart-Pause deckt das iOS-Teardown ab (>= 800 ms)", () => {
   assert.ok(SPEECH_RESTART_MS >= 800, String(SPEECH_RESTART_MS));
+});
+
+test("Session-Cap liegt unter dem iOS-Limit von ~60 s", () => {
+  assert.ok(SPEECH_SESSION_CAP_MS > 10000, String(SPEECH_SESSION_CAP_MS));
+  assert.ok(SPEECH_SESSION_CAP_MS < 60000, String(SPEECH_SESSION_CAP_MS));
+});
+
+test("Diktat-Sprache ist gesetzt", () => {
+  assert.match(SPEECH_LANG, /^[a-z]{2}-[A-Z]{2}$/);
 });

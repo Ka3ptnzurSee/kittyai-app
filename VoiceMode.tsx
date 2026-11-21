@@ -441,6 +441,9 @@ export default function VoiceMode(props: VoiceModeProps) {
       if (stoppingRef.current || sentRef.current || !visibleRef.current) return;
       if (phaseRef.current !== "hoeren") return;
       if (lifeEndsRef.current >= 5) {
+        // Deckel erreicht: nicht stumm in "hoeren" haengen bleiben, sondern
+        // sichtbar in den Pausen-Zustand und den Nutzer neu starten lassen.
+        setPhase("pause");
         setError("Spracherkennung startet nicht — bitte Modus neu öffnen.");
         return;
       }

@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
+import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import * as Notifications from "expo-notifications";
@@ -757,6 +757,9 @@ export default function App() {
   // (Deckel gegen Neustart-Karussell bei 209/216).
   const dictationActiveRef = useRef(false);
   const dictationRestartsRef = useRef(0);
+  // Timer des automatischen Diktat-Neustarts: ohne Ref wuerde Stop+Start
+  // innerhalb der 900 ms einen zweiten start() ausloesen (1100-Kaskade).
+  const dictationRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
   useEffect(() => {
@@ -3065,11 +3068,13 @@ export default function App() {
       // damit lange Saetze nicht am 60-s-Limit abreissen.
       if (dictationActiveRef.current && dictationRestartsRef.current < 3) {
         dictationRestartsRef.current += 1;
-        setTimeout(() => {
+        if (dictationRestartTimerRef.current) clearTimeout(dictationRestartTimerRef.current);
+        dictationRestartTimerRef.current = setTimeout(() => {
+          dictationRestartTimerRef.current = null;
           if (!dictationActiveRef.current) return;
           try {
             ExpoSpeechRecognitionModule.start({
-              lang: "de-DE",
+              lang: SPEECH_LANG,
               interimResults: true,
               continuous: true,
               addsPunctuation: true,
@@ -3096,6 +3101,8 @@ export default function App() {
   });
 
   async function startDictation() {
+    // Laufenden Neustart-Timer abraeumen, sonst startet er in diese Session hinein.
+    if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
     const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
     if (!perm.granted) {
       const base = inputRef.current.trim();
@@ -3105,7 +3112,7 @@ export default function App() {
     dictationActiveRef.current = true;
     dictationRestartsRef.current = 0;
     ExpoSpeechRecognitionModule.start({
-      lang: "de-DE",
+      lang: SPEECH_LANG,
       interimResults: true,
       continuous: true,
       addsPunctuation: true,
@@ -3116,6 +3123,7 @@ export default function App() {
   async function toggleMic() {
     if (listening) {
       dictationActiveRef.current = false;
+      if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
       ExpoSpeechRecognitionModule.stop();
       return;
     }

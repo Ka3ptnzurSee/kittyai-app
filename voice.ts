@@ -63,6 +63,9 @@ export const SPEECH_RESTART_MS = 900;
 /** iOS beendet Dauer-Sessions nach ~60 s — vorher selbst abschliessen. */
 export const SPEECH_SESSION_CAP_MS = 50000;
 
+/** Erkennungssprache des Diktats (KittyAI-Oberflaeche ist deutsch). */
+export const SPEECH_LANG = "de-DE";
+
 /** Wird von App.tsx gefuettert, vom Sprachmodus gelesen. */
 export const voiceHooks: {
   delta?: (text: string) => void;
