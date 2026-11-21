@@ -88,6 +88,12 @@ export default function VoiceMode(props: VoiceModeProps) {
   // Latch gegen parallele start()-Aufrufe zweier Timer (await der Permission).
   const startingRef = useRef(false);
   const startingAtRef = useRef(0);
+  // true = eine Session ist gerade offen (zwischen start() und end/stop). Schuetzt
+  // vor einem zweiten start() in eine laufende Session (doppelte Erkennung).
+  const listeningRef = useRef(false);
+  // true = wir haben ein stop() angefordert und warten auf dessen end-Event.
+  // Jedes stop() erzeugt genau ein end — damit lassen sich Nachzuegler zuordnen.
+  const stopPendingRef = useRef(false);
   // true = Events der gerade gestoppten Session verwerfen (Abbruch/Schliessen).
   // Ohne das fuellt das von stop() ausgeloeste Final-`result` die Refs wieder und
   // der end-Handler schickt das abgebrochene Fragment doch noch ab.
@@ -161,6 +167,9 @@ export default function VoiceMode(props: VoiceModeProps) {
   /** Mikrofon oeffnen. */
   const startListening = useCallback(async () => {
     if (!visibleRef.current) return;
+    // Es laeuft schon eine Session (Timer-Rennen): nicht ein zweites start()
+    // in dieselbe Session schicken — das erzeugt doppelte Erkennung.
+    if (listeningRef.current && !stopPendingRef.current) return;
     // Zwei Timer (Stille-Neustart, Nachzuegler-end) koennen hier gleichzeitig
     // landen; das await der Permission oeffnet ein Wettfenster -> Latch.
     if (startingRef.current && Date.now() - startingAtRef.current < 5000) return;
@@ -197,6 +206,8 @@ export default function VoiceMode(props: VoiceModeProps) {
       // Erst NACH erfolgreichem start() zuruecksetzen — sonst wuerde der Retry-Deckel
       // bei jedem Fehlversuch wieder auf 0 springen (Endlosschleife).
       startFailsRef.current = 0;
+      listeningRef.current = true;
+      stopPendingRef.current = false;
     } catch (e) {
       setError("Spracherkennung: " + (e instanceof Error ? e.message : String(e)));
       // Nicht stumm bleiben: start() scheitert z. B. am noch laufenden Shutdown
@@ -235,6 +246,8 @@ export default function VoiceMode(props: VoiceModeProps) {
     const text = finalText || interimText;
     finalSegmentsRef.current = "";
     interimRef.current = "";
+    stopPendingRef.current = true;
+    listeningRef.current = false;
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
     // Zu kurz oder nur Satzzeichen ("...", "?"): nichts senden, sondern wieder
     // aufnehmen — sonst entstehen leere Runden im Chat.
@@ -273,6 +286,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     silenceRef.current = setTimeout(() => {
       silenceRef.current = null;
       stoppingRef.current = true;
+      stopPendingRef.current = true;
       try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
       if (watchdogRef.current) clearTimeout(watchdogRef.current);
       watchdogRef.current = setTimeout(() => {
@@ -309,10 +323,14 @@ export default function VoiceMode(props: VoiceModeProps) {
   });
   useSpeechRecognitionEvent("end", () => {
     if (suppressRef.current) return;
-    // Frisch gestartete Session (< 600 ms)? Das kann der Nachzügler der vorherigen
-    // Session sein (iOS liefert keine Session-ID). Nicht senden, aber auf jeden
-    // Fall dafuer sorgen, dass wieder zugehoert wird — nie stumm bleiben.
-    if (Date.now() - startedAtRef.current < 600) {
+    // Buchhaltung: Session ist zu; gehoert dieses end zu unserem stop()?
+    const fromOwnStop = stopPendingRef.current;
+    stopPendingRef.current = false;
+    listeningRef.current = false;
+    // Unerwartetes end direkt nach einem start() (kein eigenes stop()) => Nachzuegler
+    // der vorherigen Session (iOS liefert keine Session-ID). Nicht senden, aber auf
+    // jeden Fall dafuer sorgen, dass wieder zugehoert wird — nie stumm bleiben.
+    if (!fromOwnStop && Date.now() - startedAtRef.current < 600) {
       if (!restartRef.current && !sentRef.current && visibleRef.current) {
         if (earlyEndsRef.current < 5) {
           earlyEndsRef.current += 1;
@@ -402,6 +420,8 @@ export default function VoiceMode(props: VoiceModeProps) {
       bufferRef.current = "";
       playingRef.current = false;
       suppressRef.current = true; // Events der schliessenden Session verwerfen
+      listeningRef.current = false;
+      stopPendingRef.current = false;
       try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
       try { player.pause(); } catch { /* aus */ }
       return;
@@ -429,6 +449,8 @@ export default function VoiceMode(props: VoiceModeProps) {
     transcriptRef.current = "";
     setTranscript("");
     suppressRef.current = true; // von stop() ausgeloestes Final-`result` verwerfen
+    listeningRef.current = false;
+    stopPendingRef.current = false;
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
     onInterrupt();
     sentRef.current = false;
