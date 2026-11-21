@@ -1007,7 +1007,12 @@ export default function App() {
       }).catch(() => { /* Messung darf nie stoeren */ });
     };
     const t = setInterval(flush, 60000);
-    return () => { clearInterval(t); flush(); };
+    // Beim Wechsel in den Hintergrund sofort senden: iOS pausiert Timer im Hintergrund,
+    // sonst bleiben die Messwerte bis zum naechsten Vordergrund liegen.
+    const sub = AppState.addEventListener("change", (st) => {
+      if (st === "background" || st === "inactive") flush();
+    });
+    return () => { sub.remove(); clearInterval(t); flush(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverUrl, apiToken]);
 
