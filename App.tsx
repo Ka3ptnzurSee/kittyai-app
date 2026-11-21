@@ -760,6 +760,10 @@ export default function App() {
   // Timer des automatischen Diktat-Neustarts: ohne Ref wuerde Stop+Start
   // innerhalb der 900 ms einen zweiten start() ausloesen (1100-Kaskade).
   const dictationRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Zeitpunkt des letzten start(): iOS liefert keine Session-ID, ein nachzügler-
+  // `end` der ALTEN Session (<800 ms nach dem neuen start) darf das frische
+  // Diktat nicht abwuergen.
+  const dictationStartedAtRef = useRef(0);
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
   useEffect(() => {
@@ -772,6 +776,8 @@ export default function App() {
       dictationRestartTimerRef.current = null;
     }
     dictationActiveRef.current = false;
+    dictationStartedAtRef.current = 0;
+    try { ExpoSpeechRecognitionModule.stop(); } catch { /* war nicht offen */ }
   }, []);
   const player = useAudioPlayer();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -3035,6 +3041,8 @@ export default function App() {
     dictationBaseRef.current = inputRef.current.trim(); // schon Getipptes behalten
   });
   useSpeechRecognitionEvent("result", (event) => {
+    // Laeuft kein Diktat (z. B. Events des Sprachmodus), nichts ins Feld schreiben.
+    if (!dictationActiveRef.current) return;
     // event.results sind Alternativen (maxAlternatives) — results[0] ist die beste.
     const transcript = (event.results[0]?.transcript ?? "").trim();
     const base = dictationBaseRef.current;
@@ -3052,17 +3060,26 @@ export default function App() {
     }
   });
   useSpeechRecognitionEvent("end", () => {
+    // Nachzuegler-`end` der vorherigen Session (kein eigenes stop(), < 800 ms
+    // nach dem neuen start): nicht als Ende des laufenden Diktats werten.
+    if (Date.now() - dictationStartedAtRef.current < 800 && dictationActiveRef.current) return;
     setListening(false);
-    // Session zu Ende: ohne offenen Neustart-Timer will der Nutzer nicht mehr
-    // diktieren. Ohne diesen Reset wuerde ein spaeteres 209/216 aus einer
-    // FREMDEN Session (Sprachmodus) ein Diktat-Start ausloesen -> zwei Mikros.
-    if (!dictationRestartTimerRef.current) dictationActiveRef.current = false;
     const base = dictationBaseRef.current;
     const text = [base, finalSegmentsRef.current].filter(Boolean).join(" ").trim();
     // Text bleibt im Eingabefeld – Nutzer kann korrigieren und dann ➤ drücken
     if (text) setInput(text);
     finalSegmentsRef.current = "";
     dictationBaseRef.current = "";
+    // iOS beendet Dauer-Erkennung nach ~60 s auch OHNE error (nur `end`).
+    // Laeuft das Diktat noch: weiterhoeren statt still zu bleiben.
+    if (dictationActiveRef.current) {
+      scheduleDictationRestart();
+      return;
+    }
+    // Session zu Ende, Nutzer will nicht mehr diktieren: Flag loeschen, damit ein
+    // spaeteres 209/216 aus einer FREMDEN Session (Sprachmodus) kein Diktat
+    // startet -> zwei Mikros.
+    dictationActiveRef.current = false;
   });
   useSpeechRecognitionEvent("error", (event) => {
     const base = dictationBaseRef.current;
@@ -3079,24 +3096,7 @@ export default function App() {
       // Laeuft das Diktat noch: nach dem Teardown automatisch weiterhoeren,
       // damit lange Saetze nicht am 60-s-Limit abreissen.
       if (dictationActiveRef.current && dictationRestartsRef.current < 3) {
-        dictationRestartsRef.current += 1;
-        if (dictationRestartTimerRef.current) clearTimeout(dictationRestartTimerRef.current);
-        dictationRestartTimerRef.current = setTimeout(() => {
-          dictationRestartTimerRef.current = null;
-          if (!dictationActiveRef.current) return;
-          try {
-            ExpoSpeechRecognitionModule.start({
-              lang: SPEECH_LANG,
-              interimResults: true,
-              continuous: true,
-              addsPunctuation: true,
-              iosTaskHint: "dictation",
-            });
-          } catch {
-            setListening(false);
-            dictationActiveRef.current = false;
-          }
-        }, SPEECH_RESTART_MS);
+        scheduleDictationRestart();
         return;
       }
       setListening(false);
@@ -3112,6 +3112,36 @@ export default function App() {
     dictationBaseRef.current = "";
   });
 
+  /** Session starten (ohne Permission-Abfrage) — auch fuer Auto-Neustarts. */
+  function startDictationSession() {
+    if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
+    dictationStartedAtRef.current = Date.now();
+    ExpoSpeechRecognitionModule.start({
+      lang: SPEECH_LANG,
+      interimResults: true,
+      continuous: true,
+      addsPunctuation: true,
+      iosTaskHint: "dictation",
+    });
+  }
+
+  /** Auto-Neustart mit Deckel (max. 3 pro Diktat), verzoegert um das iOS-Teardown. */
+  function scheduleDictationRestart() {
+    if (!dictationActiveRef.current || dictationRestartsRef.current >= 3) return;
+    dictationRestartsRef.current += 1;
+    if (dictationRestartTimerRef.current) clearTimeout(dictationRestartTimerRef.current);
+    dictationRestartTimerRef.current = setTimeout(() => {
+      dictationRestartTimerRef.current = null;
+      if (!dictationActiveRef.current) return;
+      try {
+        startDictationSession();
+      } catch {
+        setListening(false);
+        dictationActiveRef.current = false;
+      }
+    }, SPEECH_RESTART_MS);
+  }
+
   async function startDictation() {
     // Laufenden Neustart-Timer abraeumen, sonst startet er in diese Session hinein.
     if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
@@ -3123,13 +3153,7 @@ export default function App() {
     }
     dictationActiveRef.current = true;
     dictationRestartsRef.current = 0;
-    ExpoSpeechRecognitionModule.start({
-      lang: SPEECH_LANG,
-      interimResults: true,
-      continuous: true,
-      addsPunctuation: true,
-      iosTaskHint: "dictation",
-    });
+    startDictationSession();
   }
 
   async function toggleMic() {
