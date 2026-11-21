@@ -82,6 +82,11 @@ export default function VoiceMode(props: VoiceModeProps) {
   const startedAtRef = useRef(0);
   // Zaehler fuer fehlgeschlagene start()-Versuche (Deckel gegen Endlosschleife).
   const startFailsRef = useRef(0);
+  // Zaehler fuer Sessions, die sofort (< 600 ms) wieder enden. Ohne Deckel
+  // entstuende ein start->end->start-Karussell (Dauer-Mikro, Akku).
+  const earlyEndsRef = useRef(0);
+  // Latch gegen parallele start()-Aufrufe zweier Timer (await der Permission).
+  const startingRef = useRef(false);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
 
@@ -123,7 +128,7 @@ export default function VoiceMode(props: VoiceModeProps) {
         setPhase("pause");
         if (handsfree) {
           if (restartRef.current) clearTimeout(restartRef.current);
-          restartRef.current = setTimeout(() => { startListening(); }, RESTART_MS);
+          restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, RESTART_MS);
         }
       }
       return;
@@ -151,6 +156,10 @@ export default function VoiceMode(props: VoiceModeProps) {
   /** Mikrofon oeffnen. */
   const startListening = useCallback(async () => {
     if (!visibleRef.current) return;
+    // Zwei Timer (Stille-Neustart, Nachzuegler-end) koennen hier gleichzeitig
+    // landen; das await der Permission oeffnet ein Wettfenster -> Latch.
+    if (startingRef.current) return;
+    startingRef.current = true;
     try {
       const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!perm.granted) {
@@ -168,7 +177,6 @@ export default function VoiceMode(props: VoiceModeProps) {
       setTranscript("");
       setPhase("hoeren");
       startedAtRef.current = Date.now();
-      startFailsRef.current = 0;
       ExpoSpeechRecognitionModule.start({
         lang: language,
         interimResults: true,
@@ -176,6 +184,9 @@ export default function VoiceMode(props: VoiceModeProps) {
         addsPunctuation: true,
         iosTaskHint: "dictation",
       });
+      // Erst NACH erfolgreichem start() zuruecksetzen — sonst wuerde der Retry-Deckel
+      // bei jedem Fehlversuch wieder auf 0 springen (Endlosschleife).
+      startFailsRef.current = 0;
     } catch (e) {
       setError("Spracherkennung: " + (e instanceof Error ? e.message : String(e)));
       // Nicht stumm bleiben: start() scheitert z. B. am noch laufenden Shutdown
@@ -183,8 +194,10 @@ export default function VoiceMode(props: VoiceModeProps) {
       if (startFailsRef.current < 5 && visibleRef.current) {
         startFailsRef.current += 1;
         if (restartRef.current) clearTimeout(restartRef.current);
-        restartRef.current = setTimeout(() => startListening(), 800);
+        restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 800);
       }
+    } finally {
+      startingRef.current = false;
     }
   }, [language]);
 
@@ -192,7 +205,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   const reopenMic = useCallback((delay: number = RESTART_MS) => {
     if (!handsfreeRef.current || !visibleRef.current) return;
     if (restartRef.current) clearTimeout(restartRef.current);
-    restartRef.current = setTimeout(() => { startListening(); }, delay);
+    restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, delay);
   }, [startListening]);
 
   /**
@@ -224,7 +237,7 @@ export default function VoiceMode(props: VoiceModeProps) {
       if (restartRef.current) clearTimeout(restartRef.current);
       // 800 ms: erst wenn das Shutdown der Erkennung durch ist, sonst scheitert
       // start() am noch laufenden Modul und der Modus bliebe stumm.
-      restartRef.current = setTimeout(() => startListening(), 800);
+      restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 800);
       return;
     }
     sentRef.current = true;
@@ -268,6 +281,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     // statt überschreiben, sonst bleibt nur das letzte Fragment übrig.
     const t = (event.results?.[0]?.transcript ?? "").trim();
     if (!t) return;
+    earlyEndsRef.current = 0; // Session liefert Sprache -> Karussell-Zaehler zuruecksetzen
     if (event.isFinal) {
       finalSegmentsRef.current = finalSegmentsRef.current
         ? `${finalSegmentsRef.current} ${t}`
@@ -287,7 +301,12 @@ export default function VoiceMode(props: VoiceModeProps) {
     // Fall dafuer sorgen, dass wieder zugehoert wird — nie stumm bleiben.
     if (Date.now() - startedAtRef.current < 600) {
       if (!restartRef.current && !sentRef.current && visibleRef.current) {
-        restartRef.current = setTimeout(() => startListening(), 800);
+        if (earlyEndsRef.current < 5) {
+          earlyEndsRef.current += 1;
+          restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 800);
+        } else {
+          setError("Spracherkennung startet nicht — bitte Modus neu öffnen.");
+        }
       }
       return;
     }
@@ -397,7 +416,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (restartRef.current) clearTimeout(restartRef.current);
     // 800 ms wie im uebrigen Code: start() direkt nach stop() scheitert am noch
     // laufenden Shutdown des Moduls (siehe Kommentar bei der Kurz-Text-Verwerfung).
-    restartRef.current = setTimeout(() => startListening(), 800);
+    restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 800);
   }, [player, onInterrupt, startListening]);
 
   const orbPress = () => {
