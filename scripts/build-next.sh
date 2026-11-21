@@ -26,22 +26,48 @@ if [ $(( 0$DIR_MODE & 022 )) -ne 0 ]; then
   exit 1
 fi
 DIR_UID=$(stat -c '%u' .)
-[ "$DIR_UID" -ne 0 ] && echo "HINWEIS: $APP_DIR gehört uid $DIR_UID (nicht root), Rechte $DIR_MODE — nur Schreibrechte zählen hier."
-
-# Die Prüfung oben deckt nur das Verzeichnis selbst ab. Ausgeführt/gelesen wird aber
-# mehr: scripts/*.{sh,mjs} laufen als root, app.json entscheidet über die Build-Nummer,
-# credentials/ hält die Apple-Schlüssel. Ist davon etwas gruppen-/welt-schreibbar,
-# reicht ein fremder Schreiber für Code-Ausführung bzw. Key-Diebstahl.
-# Symlinks in scripts/ würden die Prüfung umgehen (geprüft würde das Ziel, ausgeführt
-# die verlinkte Datei) — hier gibt es keinen legitimen Symlink, also hart abbrechen.
-# ZUERST prüfen: ein Symlink hat selbst immer lrwxrwxrwx, sonst meldet die Rechte-
-# prüfung darunter nur irreführend "gruppen-/welt-schreibbar".
-LINK=$(find scripts -maxdepth 2 -type l -print -quit 2>/dev/null)
-if [ -n "$LINK" ]; then
-  echo "FEHLER: Symlink '$LINK' in scripts/ — Abbruch (Rechteprüfung wäre umgehbar)."
+# Eigentümer zählt, nicht nur das Schreibbit: wem das Verzeichnis gehört, der darf
+# scripts/ löschen und durch eigenen Code ersetzen (der darf dann als root laufen).
+if [ "$DIR_UID" -ne 0 ]; then
+  echo "FEHLER: $APP_DIR gehört uid $DIR_UID (nicht root) — der Eigentümer könnte scripts/ austauschen (Code als root)."
+  echo "         Einmalig reparieren: chown -R root:root '$APP_DIR'"
   exit 1
 fi
-BAD=$(find scripts app.json package.json credentials -maxdepth 3 -perm /022 -print -quit 2>/dev/null)
+
+# --- Fremdcode-Gate ---------------------------------------------------------
+# Ausgeführt/gelesen wird mehr als das Verzeichnis selbst: scripts/*.{sh,mjs} laufen
+# als root, app.json entscheidet über die Build-Nummer, credentials/ hält die
+# Apple-Schlüssel. Gecheckt werden: Symlinks (umgehen jede Rechteprüfung), fremder
+# Eigentümer (darf trotz 644/600 ersetzen) und Schreibbits für Gruppe/Andere.
+GUARD_PATHS="scripts app.json package.json credentials"
+# shellcheck disable=SC2086  # Wortliste, kein Pfad mit Leerzeichen
+for p in $GUARD_PATHS; do
+  if [ ! -e "$p" ]; then
+    echo "FEHLER: '$p' fehlt — Preflight kann die Rechte nicht prüfen (eas build bräuchte es ohnehin)."
+    exit 1
+  fi
+done
+# 1) Symlinks: geprüft würde sonst das Ziel, ausgeführt die verlinkte Datei.
+LINK=$(find $GUARD_PATHS -type l -print -quit 2>/dev/null)
+LINK_RC=$?
+[ "$LINK_RC" -gt 1 ] && { echo "FEHLER: Symlink-Prüfung fehlgeschlagen (find rc=$LINK_RC)"; exit 1; }
+if [ -n "$LINK" ]; then
+  echo "FEHLER: Symlink '$LINK' unter den Code-/Key-Pfaden — Abbruch (Rechteprüfung wäre umgehbar)."
+  exit 1
+fi
+# 2) Eigentümer muss root sein (uid 0).
+FOREIGN=$(find $GUARD_PATHS ! -uid 0 -print -quit 2>/dev/null)
+FOREIGN_RC=$?
+[ "$FOREIGN_RC" -gt 1 ] && { echo "FEHLER: Eigentümer-Prüfung fehlgeschlagen (find rc=$FOREIGN_RC)"; exit 1; }
+if [ -n "$FOREIGN" ]; then
+  echo "FEHLER: '$FOREIGN' gehört nicht root — der Eigentümer könnte den Code ersetzen (läuft als root)."
+  echo "         Einmalig reparieren: chown -R root:root '$APP_DIR/$FOREIGN'"
+  exit 1
+fi
+# 3) Gruppen-/Welt-Schreibbits.
+BAD=$(find $GUARD_PATHS -perm /022 -print -quit 2>/dev/null)
+BAD_RC=$?
+[ "$BAD_RC" -gt 1 ] && { echo "FEHLER: Rechte-Prüfung fehlgeschlagen (find rc=$BAD_RC)"; exit 1; }
 if [ -n "$BAD" ]; then
   echo "FEHLER: '$BAD' ist gruppen-/welt-schreibbar — fremder Code würde als root laufen. Abbruch."
   exit 1
@@ -54,15 +80,34 @@ if [ -L "$LOCK_DIR" ] || { [ -e "$LOCK_DIR" ] && [ ! -d "$LOCK_DIR" ]; }; then
   echo "FEHLER: $LOCK_DIR ist ein Symlink/Fremdtyp — Abbruch."; exit 1
 fi
 install -d -m 700 -o root -g root "$LOCK_DIR" 2>/dev/null || { echo "FEHLER: $LOCK_DIR nicht anlegbar"; exit 1; }
-if [ -L "$LOCK_DIR/lock" ]; then echo "FEHLER: $LOCK_DIR/lock ist ein Symlink — Abbruch."; exit 1; fi
-exec 9>>"$LOCK_DIR/lock" || { echo "FEHLER: Lock nicht öffenbar"; exit 1; }
-if ! flock -n 9; then
-  echo "FEHLER: build-next.sh läuft bereits (Lock $LOCK_DIR/lock belegt)."
-  exit 1
+# mkdir statt Datei-Lock: atomar und folgt keinem Symlink. `exec 9>>lock` wäre
+# zwischen -L-Prüfung und open austauschbar (TOCTOU) und hätte einen Stale-Lock.
+LOCK_HOLD="$LOCK_DIR/lock.d"
+if ! mkdir -m 700 "$LOCK_HOLD" 2>/dev/null; then
+  OLD_PID=$(sed -n '1p' "$LOCK_HOLD/pid" 2>/dev/null | tr -cd '0-9')
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "FEHLER: build-next.sh läuft bereits (PID $OLD_PID, Lock $LOCK_HOLD)."
+    exit 1
+  fi
+  if [ -z "$OLD_PID" ]; then
+    echo "FEHLER: Lock $LOCK_HOLD belegt und ohne PID — bitte manuell räumen (rmdir)."
+    exit 1
+  fi
+  echo "HINWEIS: Lock von PID $OLD_PID ist verwaist (Prozess lebt nicht mehr) — wird geräumt."
+  # rmdir allein scheitert, weil die PID-Datei im Verzeichnis liegt (nicht leer).
+  rm -f "$LOCK_HOLD/pid" 2>/dev/null
+  rmdir "$LOCK_HOLD" 2>/dev/null \
+    && mkdir -m 700 "$LOCK_HOLD" 2>/dev/null \
+    || { echo "FEHLER: Lock $LOCK_HOLD nicht räumbar/erneuerbar."; exit 1; }
 fi
+printf '%s\n' "$$" > "$LOCK_HOLD/pid" 2>/dev/null || { echo "FEHLER: Lock-PID nicht schreibbar"; exit 1; }
+release_lock() { rm -f "$LOCK_HOLD/pid" 2>/dev/null; rmdir "$LOCK_HOLD" 2>/dev/null; }
+# Ab hier muss der Lock bei JEDEM exit fallen (auch bei Preflight-Fehlern) — sonst
+# bleibt ein verwaister Lock liegen und der naechste Lauf blockiert faelschlich.
+trap release_lock EXIT
 
 # Preflight — fehlendes Werkzeug soll als solches gemeldet werden, nicht als "keine Build-ID".
-for bin in eas node flock stat realpath; do
+for bin in eas node stat realpath find mkdir; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "FEHLER: '$bin' nicht gefunden (rc=127) — PATH prüfen."
     exit 1
@@ -74,7 +119,7 @@ if [ ! -f scripts/next-build-number.mjs ] || [ ! -f scripts/build-and-distribute
 fi
 
 TMPDIR_BN=$(mktemp -d) || { echo "FEHLER: mktemp fehlgeschlagen"; exit 1; }
-cleanup() { rm -rf "$TMPDIR_BN" 2>/dev/null; }
+cleanup() { rm -rf "$TMPDIR_BN" 2>/dev/null; release_lock; }
 trap cleanup EXIT
 
 # Fremdausgabe entschärfen: Steuerzeichen (ANSI/CR-Injection) raus, Token-Muster redigieren.
@@ -85,6 +130,8 @@ san() {
     | sed -E \
         -e 's/(EXPO_TOKEN|token|password|passwd|secret|passcode|access[_-]?token|api[_-]?key)([[:space:]]*[=:][[:space:]]*)[^[:space:],"]*/\1\2<redacted>/Ig' \
         -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+\/-]+/\1 <redacted>/Ig' \
+        -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/-----BEGIN PRIVATE KEY-----<redacted>/g' \
+        -e 's/^([[:space:]]*(Set-)?Cookie:).*/\1 <redacted>/Ig' \
         -e 's/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/<jwt-redacted>/g' \
         -e 's/([?&](X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|sig|policy|key-pair-id)=)[^&[:space:]]*/\1<redacted>/Ig'
 }
@@ -112,7 +159,20 @@ echo "Build-Version: $VER (aus ASC)"
 
 # --- app.json bumpen (appVersionSource=local → sonst Duplikat bei Apple) ---
 cp app.json "$TMPDIR_BN/app.json.prev" || { echo "FEHLER: app.json nicht sicherbar"; exit 1; }
-rollback() { cp "$TMPDIR_BN/app.json.prev" app.json 2>/dev/null && echo "app.json zurückgesetzt ($*)"; }
+# Rollback darf nicht still scheitern: der EXIT-Trap löscht TMPDIR, danach gäbe es
+# keine Kopie mehr. Scheitert cp, wird die Sicherung nach /opt/backups gerettet.
+rollback() {
+  if cp "$TMPDIR_BN/app.json.prev" app.json; then
+    echo "app.json zurückgesetzt ($*)"
+    return 0
+  fi
+  KEEP_DIR=/opt/backups
+  install -d -m 700 "$KEEP_DIR" 2>/dev/null || KEEP_DIR=$TMPDIR_BN
+  KEEP="$KEEP_DIR/app.json.rollback-$(date +%Y%m%d-%H%M%S)"
+  cp "$TMPDIR_BN/app.json.prev" "$KEEP" 2>/dev/null
+  echo "FEHLER: Rollback von app.json fehlgeschlagen — Sicherung: $KEEP"
+  return 1
+}
 # Einziger Rollback-Fall ist ein FEHLGESCHLAGENER Build-Start: nur dann ist die
 # Nummer unverbraucht. Nach erfolgreichem `eas build` bleibt sie stehen (sie ist
 # real vergeben) — Zurückdrehen würde eine Kollision erzeugen.
