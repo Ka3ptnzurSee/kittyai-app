@@ -203,7 +203,9 @@ export default function VoiceMode(props: VoiceModeProps) {
       setTranscript("");
       setPhase("hoeren");
       if (restartRef.current) clearTimeout(restartRef.current);
-      restartRef.current = setTimeout(() => startListening(), 400);
+      // 800 ms: erst wenn das Shutdown der Erkennung durch ist, sonst scheitert
+      // start() am noch laufenden Modul und der Modus bliebe stumm.
+      restartRef.current = setTimeout(() => startListening(), 800);
       return;
     }
     sentRef.current = true;
@@ -250,7 +252,7 @@ export default function VoiceMode(props: VoiceModeProps) {
         ? `${finalSegmentsRef.current} ${t}`
         : t;
       interimRef.current = "";
-    } else {
+    } else if (!stoppingRef.current) {
       interimRef.current = t; // nur Anzeige, nie alleiniger Nachrichtentext
     }
     const shown = [finalSegmentsRef.current, interimRef.current].filter(Boolean).join(" ");
