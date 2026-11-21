@@ -40,6 +40,7 @@ export type VoiceModeProps = {
 
 const SILENCE_MS = 1800;   // so lange muss es still sein, damit der Satz als fertig gilt
 const RESTART_MS = 350;    // kleine Pause, bevor das Mikro wieder aufgeht
+const FINAL_GRACE_MS = 1200; // nach stop() so lange auf das FINALE Ergebnis warten
 
 export default function VoiceMode(props: VoiceModeProps) {
   const { visible, serverUrl, authHeaders, busy, colors, onSend, onInterrupt, onClose } = props;
@@ -71,6 +72,10 @@ export default function VoiceMode(props: VoiceModeProps) {
   const handsfreeRef = useRef(true);
   const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // true, sobald stop() angefordert wurde: dann kein neues Stille-Fenster mehr
+  // aufziehen, sondern auf das finale Ergebnis (end-Event) warten.
+  const stoppingRef = useRef(false);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
 
@@ -82,6 +87,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   const clearTimers = () => {
     if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
     if (restartRef.current) { clearTimeout(restartRef.current); restartRef.current = null; }
+    if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
   };
 
   /** MP3 fuer einen Satz holen (Server waehlt Klon- oder Edge-Stimme). */

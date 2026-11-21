@@ -199,7 +199,8 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[
   { key: "pro", label: "PRO" },
   { key: "flash", label: "FLASH" },
   // --goeran-options:start--
-  { key: "muse", label: "MUSE" },
+  { key: "inkling", label: "INKLING" },
+  { key: "qwen38", label: "QWEN38" },
   // --goeran-options:end--
   // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
   // deactivated: hängen am Laptop-Tunnel → im UI als INAKTIV markiert, nicht wählbar.
@@ -741,6 +742,9 @@ export default function App() {
   const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number; clientMessageId?: string }>>({});
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
+  // Drossel fuer den Server-Session-Sync: ohne sie loeste jede busyChatIds-Aenderung
+  // einen 21-26-KB-GET aus (gemessen: bis 53 Requests pro Minute von einem Geraet).
+  const lastSessionFetchRef = useRef<Map<string, number>>(new Map());
   // true, solange ein programmatischer scrollToEnd (animated) läuft: onScroll darf
   // währenddessen nearBottom nicht auf false setzen (Animations-Zwischenwerte).
   const isAutoScrollingRef = useRef(false);
@@ -993,7 +997,6 @@ export default function App() {
   }, [activeChatId]);
 
   useEffect(() => {
-    if (!loadedRef.current) return;
     const flush = () => {
       const samples = takePerfSamples();
       if (!samples.length) return;
@@ -1028,6 +1031,20 @@ export default function App() {
   }, [activeChatId, serverUrl, apiToken]);
   // Live-Sync/Reload: finale Antwort aus der Server-Session-Datei holen (überlebt die
   // turnRegistry-TTL) und eine leere/fehlerhafte KI-Bubble damit auffüllen.
+  /** Billiger Turn-Status (~100 B) statt voller Session (21-26 KB) beim Busy-Polling. */
+  async function fetchTurnState(chatId: string): Promise<{ running: boolean; idleMs?: number } | null> {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(base + "/api/turn-state?chatId=" + encodeURIComponent(chatId), { headers: authHeaders() });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const chats = (data && data.chats) || {};
+      return chats[chatId] || (Object.values(chats)[0] as { running: boolean; idleMs?: number }) || null;
+    } catch {
+      return null;
+    }
+  }
+
   async function reloadFromServer(chatId: string): Promise<boolean> {
     try {
       const base = serverUrl.replace(/\/+$/, "");
@@ -1550,6 +1567,9 @@ export default function App() {
   useEffect(() => {
     if (!activeChatId || !loadedRef.current) return;
     if (busyChatIds.has(activeChatId)) return; // busy → Antwort noch nicht final im Server
+    const lastFetch = lastSessionFetchRef.current.get(activeChatId) || 0;
+    if (Date.now() - lastFetch < 4000) return; // hoechstens alle 4 s pro Chat
+    lastSessionFetchRef.current.set(activeChatId, Date.now());
     let cancelled = false;
     (async () => {
       try {
@@ -1614,6 +1634,14 @@ export default function App() {
       for (const id of ids) {
         if (cancelled) return;
         if (!busyChatIds.has(id)) continue; // inzwischen fertig
+        // ERST der billige Status (~100 B): die volle Session (21-26 KB) nur holen, wenn
+        // der Turn wirklich fertig ist. Vorher: 3 s x 24 KB pro Chat (Poll-Sturm).
+        const state = await fetchTurnState(id);
+        if (cancelled) return;
+        if (state && state.running && (state.idleMs ?? 0) < 300000) {
+          stillBusy = true;
+          continue;
+        }
         const filled = await reloadFromServer(id);
         if (cancelled) return;
         if (filled) {
