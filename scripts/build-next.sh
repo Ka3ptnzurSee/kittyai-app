@@ -18,19 +18,41 @@ APP_DIR="${APP_DIR:-/opt/pi-app/app}"
 APP_DIR=$(realpath -e -- "$APP_DIR" 2>/dev/null) || { echo "FEHLER: APP_DIR existiert nicht."; exit 1; }
 cd "$APP_DIR" || { echo "FEHLER: $APP_DIR nicht wechselbar"; exit 1; }
 
+# Fremdausgabe entschärfen: Steuerzeichen (ANSI/CR-Injection) raus, Token-Muster redigieren.
+# Abgedeckt: keyword=wert, keyword: wert, "Bearer <jwt>", rohe JWTs (eyJ…), PEM-Header,
+# Cookie-Header und presigned-URL-Parameter (X-Amz-Signature, sig, policy).
+# Steht VOR dem Fremdcode-Gate, weil dort schon Dateinamen (fremd beeinflussbar) geloggt werden.
+san() {
+  tr -d '\000-\010\013-\037\177' 2>/dev/null \
+    | sed -E \
+        -e 's/(EXPO_TOKEN|token|password|passwd|secret|passcode|access[_-]?token|api[_-]?key)([[:space:]]*[=:][[:space:]]*)[^[:space:],"]*/\1\2<redacted>/Ig' \
+        -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+\/-]+/\1 <redacted>/Ig' \
+        -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/-----BEGIN PRIVATE KEY-----<redacted>/g' \
+        -e 's/^([[:space:]]*(Set-)?Cookie:).*/\1 <redacted>/Ig' \
+        -e 's/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/<jwt-redacted>/g' \
+        -e 's/([?&](X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|sig|policy|key-pair-id)=)[^&[:space:]]*/\1<redacted>/Ig'
+}
+
 # Repo darf nicht von nicht-root beschreibbar sein — sonst führen wir als root
 # fremden Code aus (scripts/*.mjs, scripts/*.sh).
-DIR_MODE=$(stat -c '%a' .)
+# stat-Fehler nicht als "mode 0" durchgehen lassen (Arithmetik täte das) → fail closed.
+DIR_MODE=$(stat -c '%a' . 2>/dev/null) || { echo "FEHLER: Rechte von $APP_DIR nicht lesbar (stat rc=$?)."; exit 1; }
+case "$DIR_MODE" in
+  ''|*[!0-7]*) echo "FEHLER: unplausible Verzeichnisrechte '$DIR_MODE' — Abbruch."; exit 1 ;;
+esac
 if [ $(( 0$DIR_MODE & 022 )) -ne 0 ]; then
   echo "FEHLER: $APP_DIR ist gruppen-/welt-schreibbar (mode $DIR_MODE) — fremder Code würde als root laufen. Abbruch."
   exit 1
 fi
-DIR_UID=$(stat -c '%u' .)
+DIR_UID=$(stat -c '%u' . 2>/dev/null) || { echo "FEHLER: Eigentümer von $APP_DIR nicht lesbar (stat rc=$?)."; exit 1; }
+case "$DIR_UID" in
+  ''|*[!0-9]*) echo "FEHLER: unplausible Eigentümer-uid '$DIR_UID' — Abbruch."; exit 1 ;;
+esac
 # Eigentümer zählt, nicht nur das Schreibbit: wem das Verzeichnis gehört, der darf
 # scripts/ löschen und durch eigenen Code ersetzen (der darf dann als root laufen).
 if [ "$DIR_UID" -ne 0 ]; then
   echo "FEHLER: $APP_DIR gehört uid $DIR_UID (nicht root) — der Eigentümer könnte scripts/ austauschen (Code als root)."
-  echo "         Einmalig reparieren: chown -R root:root '$APP_DIR'"
+  echo "         Einmalig reparieren: chown -R root:root '$(printf '%s' "$APP_DIR" | san)'"
   exit 1
 fi
 
@@ -52,7 +74,7 @@ LINK=$(find $GUARD_PATHS -type l -print -quit 2>/dev/null)
 LINK_RC=$?
 [ "$LINK_RC" -gt 1 ] && { echo "FEHLER: Symlink-Prüfung fehlgeschlagen (find rc=$LINK_RC)"; exit 1; }
 if [ -n "$LINK" ]; then
-  echo "FEHLER: Symlink '$LINK' unter den Code-/Key-Pfaden — Abbruch (Rechteprüfung wäre umgehbar)."
+  echo "FEHLER: Symlink '$(printf '%s' "$LINK" | san)' unter den Code-/Key-Pfaden — Abbruch (Rechteprüfung wäre umgehbar)."
   exit 1
 fi
 # 2) Eigentümer muss root sein (uid 0).
@@ -60,8 +82,8 @@ FOREIGN=$(find $GUARD_PATHS ! -uid 0 -print -quit 2>/dev/null)
 FOREIGN_RC=$?
 [ "$FOREIGN_RC" -gt 1 ] && { echo "FEHLER: Eigentümer-Prüfung fehlgeschlagen (find rc=$FOREIGN_RC)"; exit 1; }
 if [ -n "$FOREIGN" ]; then
-  echo "FEHLER: '$FOREIGN' gehört nicht root — der Eigentümer könnte den Code ersetzen (läuft als root)."
-  echo "         Einmalig reparieren: chown -R root:root '$APP_DIR/$FOREIGN'"
+  echo "FEHLER: '$(printf '%s' "$FOREIGN" | san)' gehört nicht root — der Eigentümer könnte den Code ersetzen (läuft als root)."
+  echo "         Einmalig reparieren: chown -R root:root '$(printf '%s' "$APP_DIR/$FOREIGN" | san)'"
   exit 1
 fi
 # 3) Gruppen-/Welt-Schreibbits.
@@ -69,7 +91,7 @@ BAD=$(find $GUARD_PATHS -perm /022 -print -quit 2>/dev/null)
 BAD_RC=$?
 [ "$BAD_RC" -gt 1 ] && { echo "FEHLER: Rechte-Prüfung fehlgeschlagen (find rc=$BAD_RC)"; exit 1; }
 if [ -n "$BAD" ]; then
-  echo "FEHLER: '$BAD' ist gruppen-/welt-schreibbar — fremder Code würde als root laufen. Abbruch."
+  echo "FEHLER: '$(printf '%s' "$BAD" | san)' ist gruppen-/welt-schreibbar — fremder Code würde als root laufen. Abbruch."
   exit 1
 fi
 
@@ -107,7 +129,7 @@ release_lock() { rm -f "$LOCK_HOLD/pid" 2>/dev/null; rmdir "$LOCK_HOLD" 2>/dev/n
 trap release_lock EXIT
 
 # Preflight — fehlendes Werkzeug soll als solches gemeldet werden, nicht als "keine Build-ID".
-for bin in eas node stat realpath find mkdir; do
+for bin in eas node stat realpath find mkdir timeout; do
   if ! command -v "$bin" >/dev/null 2>&1; then
     echo "FEHLER: '$bin' nicht gefunden (rc=127) — PATH prüfen."
     exit 1
@@ -122,20 +144,6 @@ TMPDIR_BN=$(mktemp -d) || { echo "FEHLER: mktemp fehlgeschlagen"; exit 1; }
 cleanup() { rm -rf "$TMPDIR_BN" 2>/dev/null; release_lock; }
 trap cleanup EXIT
 
-# Fremdausgabe entschärfen: Steuerzeichen (ANSI/CR-Injection) raus, Token-Muster redigieren.
-# Abgedeckt: keyword=wert, keyword: wert, "Bearer <jwt>", rohe JWTs (eyJ…) und
-# presigned-URL-Parameter (X-Amz-Signature, sig, policy) aus Upload-Ausgaben.
-san() {
-  tr -d '\000-\010\013-\037\177' 2>/dev/null \
-    | sed -E \
-        -e 's/(EXPO_TOKEN|token|password|passwd|secret|passcode|access[_-]?token|api[_-]?key)([[:space:]]*[=:][[:space:]]*)[^[:space:],"]*/\1\2<redacted>/Ig' \
-        -e 's/(Bearer|Basic)[[:space:]]+[A-Za-z0-9._~+\/-]+/\1 <redacted>/Ig' \
-        -e 's/-----BEGIN [A-Z ]*PRIVATE KEY-----.*/-----BEGIN PRIVATE KEY-----<redacted>/g' \
-        -e 's/^([[:space:]]*(Set-)?Cookie:).*/\1 <redacted>/Ig' \
-        -e 's/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/<jwt-redacted>/g' \
-        -e 's/([?&](X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|sig|policy|key-pair-id)=)[^&[:space:]]*/\1<redacted>/Ig'
-}
-
 echo "=== [1/2] EAS-Build starten ($(date '+%F %T')) ==="
 
 # --- Build-Nummer: ASC ist Wahrheit (höchste vorhandene + 1) ---
@@ -147,12 +155,18 @@ case "$VER" in
   ''|*[!0-9]*) echo "FEHLER: nächste Build-Nummer nicht ermittelbar ('$(printf '%s' "$VER" | san | cut -c1-40)')."; exit 1 ;;
 esac
 [ "${#VER}" -le 10 ] || { echo "FEHLER: Build-Nummer unplausibel lang (${#VER} Stellen)."; exit 1; }
-# Fallback-Pfad des .mjs = committete Nummer OHNE +1 → würde bei Apple kollidieren.
+# Fallback-Pfad des .mjs: die committete Nummer geliefert, OHNE +1.
+#  (a) "ASC-Abfrage fehlgeschlagen" / Key nicht lesbar → Nummer unbestätigt → Abbruch.
+#  (b) "hat noch keine preReleaseVersion in ASC" → legitimer Erstbuild einer neuen Version,
+#      die committete Zahl ist dort korrekt (keine Kollision) → nur Warnung.
 # case statt `printf | grep -q`: gleiche SIGPIPE-Falle wie unten unter pipefail.
 case "$VER_ERR" in
-  *"nutze committete buildNumber"*|*"Start bei committeter buildNumber"*)
+  *"ASC-Abfrage fehlgeschlagen"*|*"nicht lesbar"*)
     echo "FEHLER: ASC-Abfrage fehlgeschlagen — Nummer $VER ist unbestätigt (Kollisionsgefahr). Abbruch."
     exit 1
+    ;;
+  *"Start bei committeter buildNumber"*)
+    echo "HINWEIS: neues Version-Ziel ohne Builds in ASC — $VER ist der Startwert (aus app.json, unbestätigt)."
     ;;
 esac
 echo "Build-Version: $VER (aus ASC)"
@@ -188,7 +202,7 @@ const out = src.replace(re, (_m, a, b) => a + ver + b);
 try { JSON.parse(out); } catch (e) { console.error("FEHLER: app.json würde ungültig: " + e.message); process.exit(1); }
 // O_EXCL: kein Folgen eines präparierten Symlinks auf eine Fremddatei
 const tmp = path.join(path.dirname(file), `.app.json.${process.pid}.tmp`);
-const fd = fs.openSync(tmp, "wx", 0o644);
+const fd = fs.openSync(tmp, "wx", 0o600);
 try {
   fs.writeFileSync(fd, out);
   fs.fsyncSync(fd);
@@ -202,8 +216,11 @@ fi
 echo "app.json buildNumber → $(node -p 'require("./app.json").expo.ios.buildNumber')"
 
 # --- Build starten (rc wird geprüft; --json statt fragiler URL-Regex) ---
-BUILD_JSON=$(eas build --platform ios --profile production --non-interactive --no-wait --json 2>"$TMPDIR_BN/err.build")
+BUILD_JSON=$(timeout 1800 eas build --platform ios --profile production --non-interactive --no-wait --json 2>"$TMPDIR_BN/err.build")
 EAS_RC=$?
+# timeout (124) darf wie ein Fehlstart behandelt werden — sonst hielte ein haengender
+# eas-Prozess den Lock, bis jemand manuell eingreift.
+[ "$EAS_RC" -eq 124 ] && echo "FEHLER: 'eas build' nach 30 min abgebrochen (timeout)."
 if [ "$EAS_RC" -ne 0 ]; then
   echo "FEHLER: 'eas build' fehlgeschlagen (rc=$EAS_RC)."
   # Die eigentliche Ursache steht oft NACH dem Warnblock (der Kontingent-Hinweis kam erst
