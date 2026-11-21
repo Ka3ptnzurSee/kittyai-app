@@ -24,7 +24,7 @@ import {
   View,
 } from "react-native";
 import * as Speech from "expo-speech";
-import { useAudioPlayer } from "expo-audio";
+import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
@@ -764,6 +764,11 @@ export default function App() {
   // `end` der ALTEN Session (<800 ms nach dem neuen start) darf das frische
   // Diktat nicht abwuergen.
   const dictationStartedAtRef = useRef(0);
+  // Gehoert die naechste Session-Freigabe UNSEREM Diktat? Wird nur gesetzt, wenn
+  // wir das Ende selbst eingeleitet haben (Mikro-Stop, Fehler-Ende). Der
+  // `end`-Handler empfaengt naemlich auch die `end`-Events des Sprachmodus —
+  // dort darf setAudioSessionActiveIOS(false) NICHT laufen (Mikro/TTS).
+  const dictationEndsRef = useRef(false);
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
   useEffect(() => {
@@ -777,6 +782,7 @@ export default function App() {
     }
     dictationActiveRef.current = false;
     dictationStartedAtRef.current = 0;
+    dictationEndsRef.current = false;
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* war nicht offen */ }
   }, []);
   const player = useAudioPlayer();
@@ -1414,6 +1420,10 @@ export default function App() {
     (async () => {
       preloadIcons(); // Vektor-Icons (Ionicons) beim Start laden — kein FOUC/Start-Crash
       preloadFonts(); // echte Claude-Fonts (Anthropic Serif/Sans + JetBrains Mono) laden
+      // iOS-Basis-Kategorie: ohne diesen Aufruf bleibt expo-audio auf der System-Vorgabe
+      // `.soloAmbient`, die beim Abspielen fremde Musik (Spotify/Apple Music) hart stoppt.
+      // mixWithOthers = KittyAI mischt sich dazu, statt den anderen Player zu verdrängen.
+      setAudioModeAsync({ playsInSilentMode: true, interruptionMode: "mixWithOthers", shouldPlayInBackground: false, allowsRecording: false }).catch(() => { /* nicht kritisch */ });
       // Server-URL ist fest verdrahtet (detectBase) — keine gespeicherte/manuelle URL mehr.
       const url = serverUrl;
       let savedToken = "";
@@ -3080,6 +3090,32 @@ export default function App() {
     // spaeteres 209/216 aus einer FREMDEN Session (Sprachmodus) kein Diktat
     // startet -> zwei Mikros.
     dictationActiveRef.current = false;
+    // Hier endet das Diktat zuverlaessig (egal ob stop(), Fehler oder Abbruch:
+    // iOS schickt danach immer `end`). Session freigeben, damit Musik weiterlaeuft.
+    // ABER nur fuer UNSERE Diktat-Session: dieser Handler empfaengt auch die
+    // `end`-Events des Sprachmodus (eigene Session) — dort darf die Session NICHT
+    // abgeschaltet werden, sonst reisst dem Sprachmodus Mikro/TTS ab.
+    // dictationEndsRef wird ausschliesslich beim von uns eingeleiteten Ende gesetzt
+    // (Mikro-Stop / Fehler-Ende) — ein fremdes `end` laesst es unberuehrt.
+    if (dictationEndsRef.current) {
+      dictationEndsRef.current = false;
+      // Nicht abwuergen, wenn gerade gesprochen wird — expo-audio-Player ODER der
+      // expo-speech-Fallback (siehe speakReply) — und nicht, solange der Sprachmodus
+      // offen ist: er fuehrt die Session selbst (sonst reisst ihm setActive(false)
+      // Mikro/TTS ab). setActive(false) schneidet laufende Wiedergabe ab.
+      if (!player.playing && !voiceOpenRef.current) {
+        // Nach dem await kann bereits eine NEUE Diktat-Session oder der Sprachmodus
+        // laufen -> dann nicht mehr abschalten (sonst ist das Mikro stumm bzw. der
+        // Sprachmodus verliert die Session).
+        const releaseIfStillIdle = () => {
+          if (dictationActiveRef.current || voiceOpenRef.current) return;
+          releaseDictationAudioSession();
+        };
+        Speech.isSpeakingAsync()
+          .then((speaking) => { if (!speaking) releaseIfStillIdle(); })
+          .catch(releaseIfStillIdle); // Status unklar -> Musik geht vor
+      }
+    }
   });
   useSpeechRecognitionEvent("error", (event) => {
     const base = dictationBaseRef.current;
@@ -3101,10 +3137,14 @@ export default function App() {
       }
       setListening(false);
       dictationActiveRef.current = false;
+      // Diktat endgueltig vorbei (Deckel erreicht): das folgende `end` darf die
+      // Audio-Session freigeben.
+      dictationEndsRef.current = true;
       return;
     }
     setListening(false);
     dictationActiveRef.current = false;
+    dictationEndsRef.current = true; // echtes Fehler-Ende -> `end` gibt die Session frei
     // Erkannte Finals behalten, Meldung anhängen statt Feldinhalt ersetzen
     const text = [base, recognized].filter(Boolean).join(" ");
     setInput(text ? `${text}\nSpracherkennung: ${msg}` : `Spracherkennung: ${msg}`);
@@ -3116,13 +3156,38 @@ export default function App() {
   function startDictationSession() {
     if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
     dictationStartedAtRef.current = Date.now();
+    // Neue Session = nichts freizugeben: ein evtl. haengengebliebenes Flag einer
+    // alten Session darf ein spaeteres fremdes `end` nicht als unseres ausgeben.
+    dictationEndsRef.current = false;
     ExpoSpeechRecognitionModule.start({
       lang: SPEECH_LANG,
       interimResults: true,
       continuous: true,
       addsPunctuation: true,
       iosTaskHint: "dictation",
+      // Ohne mixWithOthers setzt der Erkenner playAndRecord NICHT mischbar und
+      // aktiviert die Session -> fremde Musik (Spotify) stoppt beim Diktieren.
+      iosCategory: {
+        category: "playAndRecord",
+        categoryOptions: ["mixWithOthers", "defaultToSpeaker", "allowBluetooth"],
+        mode: "measurement",
+      },
     });
+  }
+
+  /**
+   * iOS-Audio-Session freigeben, sobald das Diktat wirklich zu Ende ist.
+   * Ohne setActive(false) bleibt die playAndRecord-Session aktiv und fremde
+   * Musik (Spotify/Apple Music) bleibt stumm/gestoppt.
+   * Hinweis: setAudioSessionActiveIOS() liefert KEIN Promise (Deklaration
+   * `: void`, Swift-Function ohne Rueckgabe) -> try/catch statt .catch().
+   */
+  function releaseDictationAudioSession() {
+    try {
+      ExpoSpeechRecognitionModule.setAudioSessionActiveIOS(false, { notifyOthersOnDeactivation: true });
+    } catch {
+      // nicht kritisch (z. B. Session war schon inaktiv)
+    }
   }
 
   /** Auto-Neustart mit Deckel (max. 3 pro Diktat), verzoegert um das iOS-Teardown. */
@@ -3159,6 +3224,7 @@ export default function App() {
   async function toggleMic() {
     if (listening) {
       dictationActiveRef.current = false;
+      dictationEndsRef.current = true; // eigenes stop() -> `end` gibt die Session frei
       if (dictationRestartTimerRef.current) { clearTimeout(dictationRestartTimerRef.current); dictationRestartTimerRef.current = null; }
       ExpoSpeechRecognitionModule.stop();
       return;
