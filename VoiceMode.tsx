@@ -87,6 +87,11 @@ export default function VoiceMode(props: VoiceModeProps) {
   const earlyEndsRef = useRef(0);
   // Latch gegen parallele start()-Aufrufe zweier Timer (await der Permission).
   const startingRef = useRef(false);
+  const startingAtRef = useRef(0);
+  // true = Events der gerade gestoppten Session verwerfen (Abbruch/Schliessen).
+  // Ohne das fuellt das von stop() ausgeloeste Final-`result` die Refs wieder und
+  // der end-Handler schickt das abgebrochene Fragment doch noch ab.
+  const suppressRef = useRef(false);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
 
@@ -158,16 +163,21 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (!visibleRef.current) return;
     // Zwei Timer (Stille-Neustart, Nachzuegler-end) koennen hier gleichzeitig
     // landen; das await der Permission oeffnet ein Wettfenster -> Latch.
-    if (startingRef.current) return;
+    if (startingRef.current && Date.now() - startingAtRef.current < 5000) return;
     startingRef.current = true;
+    startingAtRef.current = Date.now();
     try {
       const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!perm.granted) {
         setError("Mikrofon/Spracherkennung nicht erlaubt (iOS-Einstellungen → KittyAI).");
         return;
       }
+      // Waehrend des await kann das Overlay geschlossen worden sein -> sonst
+      // liefe das Mikro unsichtbar weiter.
+      if (!visibleRef.current) return;
       sentRef.current = false;
       stoppingRef.current = false;
+      suppressRef.current = false;
       if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
       // Stille-Timer der vorigen Session darf die neue Aufnahme nicht stoppen.
       if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
@@ -276,6 +286,8 @@ export default function VoiceMode(props: VoiceModeProps) {
 
   // --- Spracherkennung -----------------------------------------------------
   useSpeechRecognitionEvent("result", (event) => {
+    // Events einer bewusst gestoppten Session (Abbruch/Schliessen) verwerfen.
+    if (suppressRef.current) return;
     // event.results sind Alternativen (results[0] = beste). iOS liefert Finals
     // segmentweise und prependet ab dem 2. Segment ein Leerzeichen -> anhängen
     // statt überschreiben, sonst bleibt nur das letzte Fragment übrig.
@@ -296,6 +308,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     armSilence();
   });
   useSpeechRecognitionEvent("end", () => {
+    if (suppressRef.current) return;
     // Frisch gestartete Session (< 600 ms)? Das kann der Nachzügler der vorherigen
     // Session sein (iOS liefert keine Session-ID). Nicht senden, aber auf jeden
     // Fall dafuer sorgen, dass wieder zugehoert wird — nie stumm bleiben.
@@ -388,10 +401,16 @@ export default function VoiceMode(props: VoiceModeProps) {
       queueRef.current = [];
       bufferRef.current = "";
       playingRef.current = false;
+      suppressRef.current = true; // Events der schliessenden Session verwerfen
       try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
       try { player.pause(); } catch { /* aus */ }
       return;
     }
+    // Frisches Oeffnen: Zaehler zuruecksetzen, sonst traegt der Deckel aus einer
+    // frueheren Sitzung in diese hinein.
+    earlyEndsRef.current = 0;
+    startFailsRef.current = 0;
+    suppressRef.current = false;
     startListening();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -409,6 +428,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     interimRef.current = "";
     transcriptRef.current = "";
     setTranscript("");
+    suppressRef.current = true; // von stop() ausgeloestes Final-`result` verwerfen
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
     onInterrupt();
     sentRef.current = false;
