@@ -76,6 +76,10 @@ export default function VoiceMode(props: VoiceModeProps) {
   // true, sobald stop() angefordert wurde: dann kein neues Stille-Fenster mehr
   // aufziehen, sondern auf das finale Ergebnis (end-Event) warten.
   const stoppingRef = useRef(false);
+  // Zeitpunkt des letzten start()-Aufrufs. iOS liefert in "end"/"result" KEINE
+  // Session-ID — ein Nachzügler-`end` der alten Session würde sonst die gerade
+  // frisch gestartete Aufnahme per stop() killen.
+  const startedAtRef = useRef(0);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
 
@@ -159,6 +163,7 @@ export default function VoiceMode(props: VoiceModeProps) {
       interimRef.current = "";
       setTranscript("");
       setPhase("hoeren");
+      startedAtRef.current = Date.now();
       ExpoSpeechRecognitionModule.start({
         lang: language,
         interimResults: true,
@@ -235,7 +240,9 @@ export default function VoiceMode(props: VoiceModeProps) {
       if (watchdogRef.current) clearTimeout(watchdogRef.current);
       watchdogRef.current = setTimeout(() => {
         watchdogRef.current = null;
-        if (!sentRef.current && visibleRef.current) finishUtterance();
+        // Nur solange wir noch auf das Final warten — nach einem Neustart nicht
+        // mehr den Text der naechsten Aeusserung abschicken.
+        if (stoppingRef.current && !sentRef.current && visibleRef.current) finishUtterance();
       }, FINAL_GRACE_MS);
     }, SILENCE_MS);
   }, [finishUtterance]);
@@ -261,6 +268,10 @@ export default function VoiceMode(props: VoiceModeProps) {
     armSilence();
   });
   useSpeechRecognitionEvent("end", () => {
+    // Frisch gestartete Session (< 600 ms)? Dann ist dieses `end` der Nachzügler
+    // der vorherigen Session (kein Session-ID im Event). Nicht abbrechen/senden:
+    // sonst wird die neue Aufnahme gestoppt und das Mikro bleibt stumm.
+    if (Date.now() - startedAtRef.current < 600) return;
     // Der EINZIGE Sende-Pfad: nach stop() (Stille) oder wenn iOS die Session
     // selbst beendet. Hier liegt das finale Ergebnis vor.
     if (!sentRef.current && visibleRef.current && phaseRef.current === "hoeren") finishUtterance();
@@ -365,7 +376,9 @@ export default function VoiceMode(props: VoiceModeProps) {
     sentRef.current = false;
     setPhase("hoeren");
     if (restartRef.current) clearTimeout(restartRef.current);
-    restartRef.current = setTimeout(() => startListening(), 200);
+    // 800 ms wie im uebrigen Code: start() direkt nach stop() scheitert am noch
+    // laufenden Shutdown des Moduls (siehe Kommentar bei der Kurz-Text-Verwerfung).
+    restartRef.current = setTimeout(() => startListening(), 800);
   }, [player, onInterrupt, startListening]);
 
   const orbPress = () => {
