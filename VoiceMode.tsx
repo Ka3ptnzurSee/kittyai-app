@@ -87,6 +87,13 @@ export default function VoiceMode(props: VoiceModeProps) {
   const interimRef = useRef("");       // laufendes Teil-Ergebnis, nur für die Anzeige
   const sentRef = useRef(false);
   const playingRef = useRef(false);
+  // Generation-Token: jeder Abbruch zaehlt hoch. Ein Satz, dessen Synthese VOR
+  // dem Abbruch gestartet wurde, darf danach nicht mehr abgespielt werden —
+  // sonst lief ein bereits fertiger Satz nach "Unterbrechen" weiter.
+  const genRef = useRef(0);
+  // AbortController der letzten TTS-Anfrage: bricht die Serversynthese wirklich
+  // ab, statt sie im Hintergrund weiterlaufen zu lassen.
+  const abortRef = useRef<AbortController | null>(null);
   const wasPlayingRef = useRef(false);
   const handsfreeRef = useRef(true);
   const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -151,21 +158,38 @@ export default function VoiceMode(props: VoiceModeProps) {
   /** MP3 fuer einen Satz holen (Server waehlt Klon- oder Edge-Stimme). */
   const synth = useCallback(async (text: string): Promise<string> => {
     const base = serverUrl.replace(/\/+$/, "");
-    const res = await fetch(base + "/api/voice/tts", {
-      method: "POST",
-      headers: { ...authHeaders(), "Content-Type": "application/json" },
-      // Sprache mitschicken: ohne Feld raet der Server aus Umlauten/Woertern und
-      // schickt deutsche Saetze in die englische Klon-Stimme.
-      body: JSON.stringify({ text, language }),
-    });
-    if (!res.ok) throw new Error("TTS HTTP " + res.status);
-    const data = (await res.json()) as { audioBase64?: string; engine?: string; language?: string; error?: string };
-    if (!data.audioBase64) throw new Error(data.error || "keine Audiodaten");
-    setEngine([data.engine, data.language].filter(Boolean).join(" / "));
-    const file = new File(Paths.cache, "vm-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) + ".mp3");
-    file.create({ overwrite: true, intermediates: true });
-    await file.write(data.audioBase64, { encoding: "base64" });
-    return file.uri;
+    // Abbruch-Kanal: nur der jeweils letzte Controller zaehlt (abortRef wird in
+    // interrupt()/error/Schliessen geleert). Abgebrochene Saetze werden still
+    // verworfen — kein Fehlertext, keine Wiedergabe.
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      const res = await fetch(base + "/api/voice/tts", {
+        method: "POST",
+        headers: { ...authHeaders(), "Content-Type": "application/json" },
+        // Sprache mitschicken: ohne Feld raet der Server aus Umlauten/Woertern und
+        // schickt deutsche Saetze in die englische Klon-Stimme.
+        body: JSON.stringify({ text, language }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) throw new Error("TTS HTTP " + res.status);
+      const data = (await res.json()) as { audioBase64?: string; engine?: string; language?: string; error?: string };
+      if (!data.audioBase64) throw new Error(data.error || "keine Audiodaten");
+      if (ctrl.signal.aborted) throw new Error("aborted");
+      setEngine([data.engine, data.language].filter(Boolean).join(" / "));
+      const file = new File(Paths.cache, "vm-" + Date.now() + "-" + Math.random().toString(36).slice(2, 7) + ".mp3");
+      file.create({ overwrite: true, intermediates: true });
+      await file.write(data.audioBase64, { encoding: "base64" });
+      if (ctrl.signal.aborted) throw new Error("aborted");
+      return file.uri;
+    } catch (e) {
+      // AbortError (oder schon abgebrochene Session) -> Marker "aborted", damit
+      // pump() den Satz still verwirft statt setError() zu zeigen.
+      if (ctrl.signal.aborted || (e as { name?: string } | null)?.name === "AbortError") {
+        throw new Error("aborted");
+      }
+      throw e;
+    }
   }, [serverUrl, authHeaders, language]);
 
   /** Bis zu zwei Saetze vorholen — TTS laeuft parallel zur Wiedergabe. */
@@ -206,14 +230,20 @@ export default function VoiceMode(props: VoiceModeProps) {
     // Schon jetzt den uebernaechsten Satz anfordern, damit nach dem Ende der
     // Wiedergabe keine Netzpause hoerbar ist.
     fill();
+    // Generation VOR dem await merken: ein Abbruch waehrend der Synthese zaehlt
+    // genRef hoch -> danach wird dieser Satz nicht mehr abgespielt.
+    const gen = genRef.current;
     try {
       const uri = await job.p;
-      if (!visibleRef.current) { playingRef.current = false; return; }
+      if (gen !== genRef.current || !visibleRef.current) { playingRef.current = false; return; }
       if (!firstAudioRef.current) firstAudioRef.current = Date.now();
       player.replace({ uri });
       player.play();
     } catch (e) {
       playingRef.current = false;
+      // Abgebrochener Satz: still verwerfen (kein setError, kein Nachpumpen).
+      if ((e as { name?: string } | null)?.name === "AbortError" || String((e as Error)?.message) === "aborted") return;
+      if (gen !== genRef.current || !visibleRef.current) return;
       setError(e instanceof Error ? e.message : String(e));
       pump();
     }
@@ -527,7 +557,13 @@ export default function VoiceMode(props: VoiceModeProps) {
       bufferRef.current = "";
       playingRef.current = false;
       if (thinkRef.current) { clearTimeout(thinkRef.current); thinkRef.current = null; }
+      // Harter Abbruch: Generation hoch (laufende Saetze werden verworfen), dann
+      // die Server-Synthese wirklich abbrechen, dann pausieren.
+      genRef.current++;
+      abortRef.current?.abort();
+      abortRef.current = null;
       try { player.pause(); } catch { /* aus */ }
+      try { void player.seekTo?.(0)?.catch(() => { /* aus */ }); } catch { /* aus */ }
       setError(msg || "Keine Antwort vom Server - bitte nochmal.");
       sentRef.current = false;
       setPhase(handsfreeRef.current ? "hoeren" : "pause");
@@ -560,8 +596,14 @@ export default function VoiceMode(props: VoiceModeProps) {
       suppressRef.current = true; // Events der schliessenden Session verwerfen
       listeningRef.current = false;
       stopPendingRef.current = false;
-      try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
+      // Harter Abbruch auch beim Schliessen: Generation hoch (sonst spielt ein
+      // schon fertig synthetisierter Satz noch ab), Synthese abbrechen, pausieren.
+      genRef.current++;
+      abortRef.current?.abort();
+      abortRef.current = null;
       try { player.pause(); } catch { /* aus */ }
+      try { void player.seekTo?.(0)?.catch(() => { /* aus */ }); } catch { /* aus */ }
+      try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
       // Session freigeben, damit Musik anderer Apps nach dem Schliessen des
       // Sprachmodus wieder laeuft. setIsAudioActiveAsync(false) pausiert alle
       // expo-audio-Player (hier ohnehin schon pausiert) und ruft intern
@@ -591,7 +633,13 @@ export default function VoiceMode(props: VoiceModeProps) {
     inflightRef.current = [];
     bufferRef.current = "";
     playingRef.current = false;
+    // Harter Abbruch: erst Generation hochzaehlen (verwirft jeden laufenden
+    // Satz), dann die TTS-Anfrage abbrechen, dann die Wiedergabe pausieren.
+    genRef.current++;
+    abortRef.current?.abort();
+    abortRef.current = null;
     try { player.pause(); } catch { /* aus */ }
+    try { void player.seekTo?.(0)?.catch(() => { /* aus */ }); } catch { /* aus */ }
     // Resttext verwerfen, BEVOR stop() das end-Event auslöst: sonst würde das
     // abgebrochene Fragment doch noch abgeschickt.
     finalSegmentsRef.current = "";
