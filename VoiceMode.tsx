@@ -152,6 +152,8 @@ export default function VoiceMode(props: VoiceModeProps) {
         return;
       }
       sentRef.current = false;
+      stoppingRef.current = false;
+      if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
       transcriptRef.current = "";
       finalSegmentsRef.current = "";
       interimRef.current = "";
@@ -176,17 +178,32 @@ export default function VoiceMode(props: VoiceModeProps) {
     restartRef.current = setTimeout(() => { startListening(); }, delay);
   }, [startListening]);
 
-  /** Stille erkannt -> Satz abschicken (ueber den normalen Chat). */
+  /**
+   * Satz abschicken (ueber den normalen Chat).
+   * Gesendet wird AUSSCHLIESSLICH der finale Text (finalSegmentsRef); das laufende
+   * Interim-Fragment dient nur als Notanker, wenn iOS gar kein Final geliefert hat.
+   * Grund: ein halbes Interim-Fragment wurde bisher als Nachricht abgeschickt.
+   */
   const finishUtterance = useCallback(() => {
     if (sentRef.current) return;
-    // Gesammeltes Final + letztes Interim (wie im Diktat-Pfad in App.tsx).
-    const text = [finalSegmentsRef.current, interimRef.current].filter(Boolean).join(" ").trim();
+    if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
+    stoppingRef.current = false;
+    const finalText = finalSegmentsRef.current.trim();
+    const interimText = interimRef.current.trim();
+    const text = finalText || interimText;
     finalSegmentsRef.current = "";
     interimRef.current = "";
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
-    if (!text) {
+    // Zu kurz oder nur Satzzeichen ("...", "?"): nichts senden, sondern wieder
+    // aufnehmen — sonst entstehen leere Runden im Chat.
+    const meaningful = text.replace(/[^\p{L}\p{N}]+/gu, "");
+    if (meaningful.length < 2) {
+      sentRef.current = false;
+      transcriptRef.current = "";
+      setTranscript("");
+      setPhase("hoeren");
       if (restartRef.current) clearTimeout(restartRef.current);
-      restartRef.current = setTimeout(() => startListening(), 600);
+      restartRef.current = setTimeout(() => startListening(), 400);
       return;
     }
     sentRef.current = true;
@@ -202,9 +219,23 @@ export default function VoiceMode(props: VoiceModeProps) {
     onSend(text, true);
   }, [onSend, startListening]);
 
+  /**
+   * Stille erkannt -> NICHT direkt senden, sondern die Erkennung stoppen und dem
+   * Geraet Zeit geben, sein FINALES Ergebnis zu liefern (end-Event / Watchdog).
+   */
   const armSilence = useCallback(() => {
+    if (stoppingRef.current) return;
     if (silenceRef.current) clearTimeout(silenceRef.current);
-    silenceRef.current = setTimeout(() => finishUtterance(), SILENCE_MS);
+    silenceRef.current = setTimeout(() => {
+      silenceRef.current = null;
+      stoppingRef.current = true;
+      try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
+      if (watchdogRef.current) clearTimeout(watchdogRef.current);
+      watchdogRef.current = setTimeout(() => {
+        watchdogRef.current = null;
+        if (!sentRef.current && visibleRef.current) finishUtterance();
+      }, FINAL_GRACE_MS);
+    }, SILENCE_MS);
   }, [finishUtterance]);
 
   // --- Spracherkennung -----------------------------------------------------
@@ -220,7 +251,7 @@ export default function VoiceMode(props: VoiceModeProps) {
         : t;
       interimRef.current = "";
     } else {
-      interimRef.current = t; // nur Anzeige, wird beim Senden mitgeschickt
+      interimRef.current = t; // nur Anzeige, nie alleiniger Nachrichtentext
     }
     const shown = [finalSegmentsRef.current, interimRef.current].filter(Boolean).join(" ");
     transcriptRef.current = shown;
@@ -228,8 +259,8 @@ export default function VoiceMode(props: VoiceModeProps) {
     armSilence();
   });
   useSpeechRecognitionEvent("end", () => {
-    // iOS beendet die Session nach Stille selbst -> wenn noch nichts gesendet
-    // wurde, den erkannten Text trotzdem abschicken.
+    // Der EINZIGE Sende-Pfad: nach stop() (Stille) oder wenn iOS die Session
+    // selbst beendet. Hier liegt das finale Ergebnis vor.
     if (!sentRef.current && visibleRef.current && phaseRef.current === "hoeren") finishUtterance();
   });
   useSpeechRecognitionEvent("error", (event) => {
@@ -321,6 +352,12 @@ export default function VoiceMode(props: VoiceModeProps) {
     bufferRef.current = "";
     playingRef.current = false;
     try { player.pause(); } catch { /* aus */ }
+    // Resttext verwerfen, BEVOR stop() das end-Event auslöst: sonst würde das
+    // abgebrochene Fragment doch noch abgeschickt.
+    finalSegmentsRef.current = "";
+    interimRef.current = "";
+    transcriptRef.current = "";
+    setTranscript("");
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
     onInterrupt();
     sentRef.current = false;
