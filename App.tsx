@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { voiceHooks } from "./voice";
+import { SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import * as Notifications from "expo-notifications";
@@ -617,12 +617,34 @@ async function secureGetWithRetry(key: string): Promise<string | null> {
   throw lastErr;
 }
 
+/** Tokens kompakt: 52800 -> "52,8k", 1234567 -> "1,23M". */
+function fmtTokens(n: number | undefined | null): string {
+  const v = Number(n) || 0;
+  if (v >= 1000000) return (v / 1000000).toFixed(2).replace(".", ",") + "M";
+  if (v >= 1000) return (v / 1000).toFixed(1).replace(".", ",") + "k";
+  return String(Math.round(v));
+}
+/** Dollar-Betrag klein/mittel: 0.014 -> "0,014 $", 22.29 -> "22,29 $". */
+function fmtUsd(n: number | undefined | null): string {
+  if (n == null || !Number.isFinite(Number(n))) return "–";
+  const v = Number(n);
+  const s = Math.abs(v) < 0.1 ? v.toFixed(3) : v.toFixed(2);
+  return s.replace(".", ",") + " $";
+}
+
 export default function App() {
   const [tab, setTab] = useState<"chats" | "plugins" | "tasks" | "reha">("chats");
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busyChatIds, setBusyChatIds] = useState<Set<string>>(() => new Set());
+  // Echter Verbrauch (aus der pi-Session-Datei, vom Provider gemeldet) + DeepSeek-Guthaben
+  // (live aus api.deepseek.com/user/balance). Kein Schätzwert: siehe server/usage.js.
+  type UsageTokens = { tokens: number; cost: number; turns: number; lastAt?: number };
+  const [chatUsage, setChatUsage] = useState<(UsageTokens & { id?: string }) | null>(null);
+  const [totalUsage, setTotalUsage] = useState<(UsageTokens & { byProvider?: Record<string, { tokens: number; cost: number }> }) | null>(null);
+  const [balance, setBalance] = useState<{ ok: boolean; total: number | null; currency?: string; available?: boolean; error?: string; checkedAt?: string } | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
   const [refreshingChat, setRefreshingChat] = useState(false); // Pull-to-Refresh läuft
   const [thinkingByChat, setThinkingByChat] = useState<Record<string, string>>({});
   const [statusByChat, setStatusByChat] = useState<Record<string, string>>({}); // z. B. "kompaktiere …", "Retry 2/3"
@@ -731,6 +753,10 @@ export default function App() {
     );
   }
   const dictationBaseRef = useRef("");
+  // Diktiert der Nutzer gerade? + wie oft iOS die Session schon beendet hat
+  // (Deckel gegen Neustart-Karussell bei 209/216).
+  const dictationActiveRef = useRef(false);
+  const dictationRestartsRef = useRef(0);
   const finalSegmentsRef = useRef(""); // vollständig erkannter Text (Final-Segmente werden angehängt; iOS prependet ab dem 2. Segment ein Leerzeichen)
   const inputRef = useRef("");
   useEffect(() => {
@@ -955,6 +981,25 @@ export default function App() {
     const secure = serverUrl.startsWith("https://");
     return { "Content-Type": "application/json", ...(apiToken && secure ? { "X-API-Token": apiToken } : {}) };
   }, [serverUrl, apiToken]);
+
+  // Verbrauch + Guthaben vom Server holen. chatId null = nur Gesamt/Guthaben (Hauptmenü).
+  // fresh=true umgeht die Server-Caches (Guthaben 60 s): Tippen auf die Anzeige erneuert sie.
+  const refreshUsage = useCallback(async (chatId: string | null, fresh = false) => {
+    const base = serverUrl.replace(/\/+$/, "");
+    const q = [chatId ? `chatId=${encodeURIComponent(chatId)}` : "", fresh ? "fresh=1" : ""].filter(Boolean).join("&");
+    setUsageLoading(true);
+    try {
+      const res = await fetch(`${base}/api/usage${q ? "?" + q : ""}`, { headers: authHeaders() });
+      if (!res.ok) return;
+      const d = await res.json();
+      if (!d || d.ok !== true) return;
+      if (chatId) setChatUsage(d.chat || null);
+      if (d.global) setTotalUsage(d.global);
+      if (d.balance) setBalance(d.balance);
+    } catch { /* Netz weg → alten Stand stehen lassen */ } finally {
+      setUsageLoading(false);
+    }
+  }, [serverUrl, authHeaders]);
 
   function patchChat(chatId: string, fn: (c: Chat) => Chat) {
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)));
@@ -3005,42 +3050,80 @@ export default function App() {
     dictationBaseRef.current = "";
   });
   useSpeechRecognitionEvent("error", (event) => {
-    setListening(false);
     const base = dictationBaseRef.current;
     const recognized = finalSegmentsRef.current;
-    if (event.error === "no-speech" || event.error === "aborted") {
-      // nichts erkannt / abgebrochen – Text im Feld bleibt unverändert
-    } else {
-      const msg = `Spracherkennung: ${event.message || event.error || "unbekannt"}`;
-      // Erkannte Finals behalten, Meldung anhängen statt Feldinhalt ersetzen
-      const text = [base, recognized].filter(Boolean).join(" ");
-      setInput(text ? `${text}\n${msg}` : msg);
+    // 209/216/1100/1101/1107 & Co.: iOS hat die Session beendet (Limit ~60 s,
+    // Teardown nach stop(), alte Instanz noch aktiv). Das ist KEIN Fehler und
+    // gehoert nicht als NSError-Text ins Eingabefeld.
+    const msg = speechErrorText(event);
+    if (msg === null) {
+      const text = [base, recognized].filter(Boolean).join(" ").trim();
+      if (text) setInput(text);
+      dictationBaseRef.current = text;
+      finalSegmentsRef.current = "";
+      // Laeuft das Diktat noch: nach dem Teardown automatisch weiterhoeren,
+      // damit lange Saetze nicht am 60-s-Limit abreissen.
+      if (dictationActiveRef.current && dictationRestartsRef.current < 3) {
+        dictationRestartsRef.current += 1;
+        setTimeout(() => {
+          if (!dictationActiveRef.current) return;
+          try {
+            ExpoSpeechRecognitionModule.start({
+              lang: "de-DE",
+              interimResults: true,
+              continuous: true,
+              addsPunctuation: true,
+              iosTaskHint: "dictation",
+            });
+          } catch {
+            setListening(false);
+            dictationActiveRef.current = false;
+          }
+        }, SPEECH_RESTART_MS);
+        return;
+      }
+      setListening(false);
+      dictationActiveRef.current = false;
+      return;
     }
+    setListening(false);
+    dictationActiveRef.current = false;
+    // Erkannte Finals behalten, Meldung anhängen statt Feldinhalt ersetzen
+    const text = [base, recognized].filter(Boolean).join(" ");
+    setInput(text ? `${text}\nSpracherkennung: ${msg}` : `Spracherkennung: ${msg}`);
     finalSegmentsRef.current = "";
     dictationBaseRef.current = "";
   });
 
+  async function startDictation() {
+    const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
+    if (!perm.granted) {
+      const base = inputRef.current.trim();
+      setInput(base ? `${base}\nBitte Mikrofon & Spracherkennung in den Einstellungen erlauben.` : "Bitte Mikrofon & Spracherkennung in den Einstellungen erlauben.");
+      return;
+    }
+    dictationActiveRef.current = true;
+    dictationRestartsRef.current = 0;
+    ExpoSpeechRecognitionModule.start({
+      lang: "de-DE",
+      interimResults: true,
+      continuous: true,
+      addsPunctuation: true,
+      iosTaskHint: "dictation",
+    });
+  }
+
   async function toggleMic() {
     if (listening) {
+      dictationActiveRef.current = false;
       ExpoSpeechRecognitionModule.stop();
       return;
     }
     try {
-      const perm = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!perm.granted) {
-        const base = inputRef.current.trim();
-        setInput(base ? `${base}\nBitte Mikrofon & Spracherkennung in den Einstellungen erlauben.` : "Bitte Mikrofon & Spracherkennung in den Einstellungen erlauben.");
-        return;
-      }
-      ExpoSpeechRecognitionModule.start({
-        lang: "de-DE",
-        interimResults: true,
-        continuous: true,
-        addsPunctuation: true,
-        iosTaskHint: "dictation",
-      });
+      await startDictation();
     } catch (e) {
       setListening(false);
+      dictationActiveRef.current = false;
       const base = inputRef.current.trim();
       const msg = `Spracherkennung konnte nicht gestartet werden: ${e instanceof Error ? e.message : String(e)}`;
       setInput(base ? `${base}\n${msg}` : msg);
@@ -3574,9 +3657,31 @@ export default function App() {
           </View>
         )}
         <View style={styles.headerTitles}>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {activeChatId && tab === "chats" ? activeChat?.title || "Chat" : "KittyAI"}
-          </Text>
+          <View style={styles.headerTitleRow}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              {activeChatId && tab === "chats" ? activeChat?.title || "Chat" : "KittyAI"}
+            </Text>
+            {activeChatId && tab === "chats" && chatUsage && chatUsage.tokens > 0 ? (
+              <Pressable onPress={() => { void refreshUsage(activeChatId, true); }} style={styles.usagePill} hitSlop={6} accessibilityRole="button" accessibilityLabel="Verbrauch dieses Chats, antippen zum Aktualisieren">
+                <Text style={styles.usagePillText} numberOfLines={1}>
+                  {fmtTokens(chatUsage.tokens)} · {fmtUsd(chatUsage.cost)}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+          {activeChatId && tab === "chats" ? (
+            <Text style={styles.usageSub} numberOfLines={1}>
+              {balance && balance.ok && balance.total != null
+                ? `DeepSeek-Guthaben ${fmtUsd(balance.total)}`
+                : usageLoading ? "Verbrauch wird geladen …" : "DeepSeek-Guthaben nicht abrufbar"}
+            </Text>
+          ) : (
+            <Text style={styles.usageSub} numberOfLines={1}>
+              {balance && balance.ok && balance.total != null
+                ? `DeepSeek ${fmtUsd(balance.total)} übrig${totalUsage && totalUsage.byProvider && totalUsage.byProvider.deepseek ? ` · ${fmtUsd(totalUsage.byProvider.deepseek.cost)} verbraucht` : ""}`
+                : usageLoading ? "Guthaben wird geladen …" : "Guthaben nicht abrufbar"}
+            </Text>
+          )}
         </View>
         <View style={styles.headerActions}>
           {activeChatId && tab === "chats" ? (
@@ -4170,6 +4275,10 @@ const styles = StyleSheet.create({
   backBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
   headerTitles: { flex: 1, marginLeft: 10 },
   headerTitle: { fontSize: 17, fontWeight: "700", color: colors.text },
+  headerTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  usagePill: { flexShrink: 0, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 999, backgroundColor: colors.surface2 },
+  usagePillText: { fontSize: 11, fontWeight: "600", color: colors.muted },
+  usageSub: { fontSize: 11, color: colors.muted, marginTop: 1 },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 2 },
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: colors.success },
   headerSub: { fontSize: 12, color: colors.muted },

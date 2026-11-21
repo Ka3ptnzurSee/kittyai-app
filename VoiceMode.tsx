@@ -11,10 +11,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
-import { takeSentences, voiceHooks } from "./voice";
+import {
+  SPEECH_RESTART_MS,
+  SPEECH_SESSION_CAP_MS,
+  speechErrorText,
+  takeSentences,
+  voiceHooks,
+} from "./voice";
 
 type Phase = "hoeren" | "denkt" | "spricht" | "pause";
 
@@ -39,14 +45,22 @@ export type VoiceModeProps = {
 };
 
 const SILENCE_MS = 1800;   // so lange muss es still sein, damit der Satz als fertig gilt
-const RESTART_MS = 350;    // kleine Pause, bevor das Mikro wieder aufgeht
+// Pause vor dem naechsten start(): bei 350 ms kam vom AFAssistant-Prozess
+// regelmaessig kAFAssistantErrorDomain 216/1100 zurueck (Session noch im
+// Abbau). 900 ms deckt das Teardown ab, ohne sich traege anzufuehlen.
+const RESTART_MS = SPEECH_RESTART_MS;
 const FINAL_GRACE_MS = 1200; // nach stop() so lange auf das FINALE Ergebnis warten
+// Kommt in dieser Zeit kein einziges Zeichen der Antwort, gilt der Turn als tot.
+// Vorher blieb der Modus dann stumm in "Kitty denkt …" stehen.
+const THINK_MS = 20000;
 
 export default function VoiceMode(props: VoiceModeProps) {
   const { visible, serverUrl, authHeaders, busy, colors, onSend, onInterrupt, onClose } = props;
   const language = props.language || "de-DE";
 
-  const player = useAudioPlayer();
+  // keepAudioSessionActive: der Player darf die gemeinsame iOS-Audio-Session nach dem
+  // Satz NICHT abschalten — sonst faellt der wieder geoeffnete Erkenner aus dem Takt.
+  const player = useAudioPlayer(null, { keepAudioSessionActive: true });
   const status = useAudioPlayerStatus(player);
 
   const [phase, setPhase] = useState<Phase>("hoeren");
@@ -73,6 +87,11 @@ export default function VoiceMode(props: VoiceModeProps) {
   const silenceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // iOS beendet Dauer-Erkennung nach ~60 s selbst (dann kam 216 mitten im Satz).
+  // Dieser Timer schliesst die Sitzung vorher kontrolliert ab.
+  const capRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Zaehler fuer Sessions, die iOS selbst beendet hat (Deckel gegen Karussell).
+  const lifeEndsRef = useRef(0);
   // true, sobald stop() angefordert wurde: dann kein neues Stille-Fenster mehr
   // aufziehen, sondern auf das finale Ergebnis (end-Event) warten.
   const stoppingRef = useRef(false);
@@ -100,6 +119,12 @@ export default function VoiceMode(props: VoiceModeProps) {
   const suppressRef = useRef(false);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
+  // Satz-Vorlauf: bis zu 2 Saetze werden geholt, WAEHREND der aktuelle klingt.
+  // Vorher lief synth() erst nach dem Ende der Wiedergabe -> gemessene 1,6-3,5 s
+  // Stille zwischen zwei Saetzen.
+  const inflightRef = useRef<{ text: string; p: Promise<string> }[]>([]);
+  // Timer gegen stummes "denkt": ohne Text nach THINK_MS wieder zuhoeren.
+  const thinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { visibleRef.current = visible; }, [visible]);
@@ -110,6 +135,8 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
     if (restartRef.current) { clearTimeout(restartRef.current); restartRef.current = null; }
     if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
+    if (thinkRef.current) { clearTimeout(thinkRef.current); thinkRef.current = null; }
+    if (capRef.current) { clearTimeout(capRef.current); capRef.current = null; }
   };
 
   /** MP3 fuer einen Satz holen (Server waehlt Klon- oder Edge-Stimme). */
@@ -118,7 +145,9 @@ export default function VoiceMode(props: VoiceModeProps) {
     const res = await fetch(base + "/api/voice/tts", {
       method: "POST",
       headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
+      // Sprache mitschicken: ohne Feld raet der Server aus Umlauten/Woertern und
+      // schickt deutsche Saetze in die englische Klon-Stimme.
+      body: JSON.stringify({ text, language }),
     });
     if (!res.ok) throw new Error("TTS HTTP " + res.status);
     const data = (await res.json()) as { audioBase64?: string; engine?: string; language?: string; error?: string };
@@ -128,16 +157,28 @@ export default function VoiceMode(props: VoiceModeProps) {
     file.create({ overwrite: true, intermediates: true });
     await file.write(data.audioBase64, { encoding: "base64" });
     return file.uri;
-  }, [serverUrl, authHeaders]);
+  }, [serverUrl, authHeaders, language]);
+
+  /** Bis zu zwei Saetze vorholen — TTS laeuft parallel zur Wiedergabe. */
+  const fill = useCallback(() => {
+    while (inflightRef.current.length < 2 && queueRef.current.length) {
+      const text = queueRef.current.shift() as string;
+      const p = synth(text);
+      // Kein unhandled rejection: der Fehler wird beim Abspielen gemeldet.
+      p.catch(() => { /* siehe pump() */ });
+      inflightRef.current.push({ text, p });
+    }
+  }, [synth]);
 
   /** Naechsten Satz abspielen; Queue wird waehrend des Sprechens gefuellt. */
   const pump = useCallback(async () => {
     if (playingRef.current || !visibleRef.current) return;
-    const next = queueRef.current.shift();
-    if (!next) {
+    fill();
+    const job = inflightRef.current.shift();
+    if (!job) {
       if (!busyRef.current) {
         setPhase("pause");
-        if (handsfree) {
+        if (handsfreeRef.current) {
           if (restartRef.current) clearTimeout(restartRef.current);
           restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, RESTART_MS);
         }
@@ -146,8 +187,12 @@ export default function VoiceMode(props: VoiceModeProps) {
     }
     playingRef.current = true;
     setPhase("spricht");
+    // Schon jetzt den uebernaechsten Satz anfordern, damit nach dem Ende der
+    // Wiedergabe keine Netzpause hoerbar ist.
+    fill();
     try {
-      const uri = await synth(next);
+      const uri = await job.p;
+      if (!visibleRef.current) { playingRef.current = false; return; }
       if (!firstAudioRef.current) firstAudioRef.current = Date.now();
       player.replace({ uri });
       player.play();
@@ -156,7 +201,8 @@ export default function VoiceMode(props: VoiceModeProps) {
       setError(e instanceof Error ? e.message : String(e));
       pump();
     }
-  }, [player, synth, handsfree]);
+  }, [player, fill]); // startListening absichtlich nicht in den Deps: wird erst weiter unten
+  // definiert (TDZ) und wird nur zur Laufzeit aus dem Timer heraus aufgerufen.
 
   const enqueue = useCallback((sentences: string[]) => {
     if (!sentences.length) return;
@@ -208,6 +254,21 @@ export default function VoiceMode(props: VoiceModeProps) {
       startFailsRef.current = 0;
       listeningRef.current = true;
       stopPendingRef.current = false;
+      // Vor dem iOS-Limit (~60 s) selbst abschliessen: das Final kommt dann
+      // sauber ueber stop() statt als 216-Fehler mitten im Wort.
+      if (capRef.current) clearTimeout(capRef.current);
+      capRef.current = setTimeout(() => {
+        capRef.current = null;
+        if (!visibleRef.current || stoppingRef.current || !listeningRef.current) return;
+        stoppingRef.current = true;
+        stopPendingRef.current = true;
+        try { ExpoSpeechRecognitionModule.stop(); } catch { /* schon aus */ }
+        if (watchdogRef.current) clearTimeout(watchdogRef.current);
+        watchdogRef.current = setTimeout(() => {
+          watchdogRef.current = null;
+          if (stoppingRef.current && !sentRef.current && visibleRef.current) finishUtterance();
+        }, FINAL_GRACE_MS);
+      }, SPEECH_SESSION_CAP_MS);
     } catch (e) {
       setError("Spracherkennung: " + (e instanceof Error ? e.message : String(e)));
       // Nicht stumm bleiben: start() scheitert z. B. am noch laufenden Shutdown
@@ -238,6 +299,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   const finishUtterance = useCallback(() => {
     stoppingRef.current = false;
     if (sentRef.current) return;
+    if (capRef.current) { clearTimeout(capRef.current); capRef.current = null; }
     if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
     // Ein noch laufender Stille-Timer würde später die naechste Aufnahme stoppen.
     if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
@@ -269,11 +331,28 @@ export default function VoiceMode(props: VoiceModeProps) {
     bufferRef.current = "";
     answerRef.current = "";
     queueRef.current = [];
+    inflightRef.current = [];
     setAnswer("");
     setError("");
     setMetrics("");
     setPhase("denkt");
     onSend(text, true);
+    // Wachhund gegen stummes "denkt": kommt in THINK_MS kein Zeichen der Antwort
+    // (Serverfehler, toter Turn, haengender pi-Prozess), wieder zuhoeren statt
+    // wortlos in der Denk-Phase zu bleiben. Vorher blieb der Modus hier stehen.
+    if (thinkRef.current) clearTimeout(thinkRef.current);
+    thinkRef.current = setTimeout(() => {
+      thinkRef.current = null;
+      if (!visibleRef.current || !sentRef.current) return;
+      if (answerRef.current.trim()) return; // Antwort laeuft, nur langsam
+      setError("Keine Antwort vom Server — ich höre wieder zu.");
+      sentRef.current = false;
+      setPhase(handsfreeRef.current ? "hoeren" : "pause");
+      if (handsfreeRef.current) {
+        if (restartRef.current) clearTimeout(restartRef.current);
+        restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 600);
+      }
+    }, THINK_MS);
   }, [onSend, startListening]);
 
   /**
@@ -302,6 +381,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   useSpeechRecognitionEvent("result", (event) => {
     // Events einer bewusst gestoppten Session (Abbruch/Schliessen) verwerfen.
     if (suppressRef.current) return;
+    lifeEndsRef.current = 0; // Session liefert wieder Sprache -> Deckel zuruecksetzen
     // event.results sind Alternativen (results[0] = beste). iOS liefert Finals
     // segmentweise und prependet ab dem 2. Segment ein Leerzeichen -> anhängen
     // statt überschreiben, sonst bleibt nur das letzte Fragment übrig.
@@ -323,6 +403,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   });
   useSpeechRecognitionEvent("end", () => {
     if (suppressRef.current) return;
+    if (capRef.current) { clearTimeout(capRef.current); capRef.current = null; }
     // Buchhaltung: Session ist zu; gehoert dieses end zu unserem stop()?
     const fromOwnStop = stopPendingRef.current;
     stopPendingRef.current = false;
@@ -346,8 +427,34 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (!sentRef.current && visibleRef.current && phaseRef.current === "hoeren") finishUtterance();
   });
   useSpeechRecognitionEvent("error", (event) => {
-    if (event.error === "no-speech" || event.error === "aborted") return;
-    setError("Spracherkennung: " + (event.message || event.error || "unbekannt"));
+    if (suppressRef.current) return;
+    listeningRef.current = false;
+    if (capRef.current) { clearTimeout(capRef.current); capRef.current = null; }
+    // 209/216/1100/1101/1107 & Co. beenden nur die iOS-Session (Limit, Teardown
+    // nach stop(), alte Instanz noch aktiv) — das ist KEIN Fehler, den man im
+    // Chat anzeigen muesste. speechErrorText() liefert dafuer null.
+    const msg = speechErrorText(event);
+    if (msg === null) {
+      // Session starb mitten in der Aeusserung: das schon Gesprochene
+      // abschicken (finishUtterance hoert danach von selbst wieder zu bzw.
+      // sendet den Satz). Nie stumm bleiben, aber auch nicht endlos kreisen.
+      if (stoppingRef.current || sentRef.current || !visibleRef.current) return;
+      if (phaseRef.current !== "hoeren") return;
+      if (lifeEndsRef.current >= 5) {
+        setError("Spracherkennung startet nicht — bitte Modus neu öffnen.");
+        return;
+      }
+      lifeEndsRef.current += 1;
+      finishUtterance();
+      return;
+    }
+    setError("Spracherkennung: " + msg);
+    // Echter Fehler (Berechtigung/Netz/Mikrofon): im Freihaendig-Modus nach
+    // kurzer Pause neu versuchen, gedeckelt gegen Endlosschleifen.
+    if (handsfreeRef.current && visibleRef.current && startFailsRef.current < 5) {
+      startFailsRef.current += 1;
+      reopenMic(RESTART_MS);
+    }
   });
 
   // --- Antwort-Stream mitlesen --------------------------------------------
@@ -388,8 +495,10 @@ export default function VoiceMode(props: VoiceModeProps) {
       // wieder geoeffnete Mikro die eigene TTS, und Resttext der alten Antwort
       // wuerde in den naechsten Turn rutschen.
       queueRef.current = [];
+      inflightRef.current = [];
       bufferRef.current = "";
       playingRef.current = false;
+      if (thinkRef.current) { clearTimeout(thinkRef.current); thinkRef.current = null; }
       try { player.pause(); } catch { /* aus */ }
       setError(msg || "Keine Antwort vom Server - bitte nochmal.");
       sentRef.current = false;
@@ -417,6 +526,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (!visible) {
       clearTimers();
       queueRef.current = [];
+      inflightRef.current = [];
       bufferRef.current = "";
       playingRef.current = false;
       suppressRef.current = true; // Events der schliessenden Session verwerfen
@@ -430,7 +540,12 @@ export default function VoiceMode(props: VoiceModeProps) {
     // frueheren Sitzung in diese hinein.
     earlyEndsRef.current = 0;
     startFailsRef.current = 0;
+    lifeEndsRef.current = 0;
     suppressRef.current = false;
+    // Audio-Session fuer Sprache setzen: Standard in expo-audio ist
+    // playsInSilentMode=false (Antwort bliebe bei stummgeschaltetem iPhone stumm)
+    // und allowsRecording=false (Wiedergabe kollidiert mit dem Erkenner).
+    setAudioModeAsync({ playsInSilentMode: true, allowsRecording: true }).catch(() => { /* nicht kritisch */ });
     startListening();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
@@ -439,6 +554,7 @@ export default function VoiceMode(props: VoiceModeProps) {
   const interrupt = useCallback(() => {
     clearTimers();
     queueRef.current = [];
+    inflightRef.current = [];
     bufferRef.current = "";
     playingRef.current = false;
     try { player.pause(); } catch { /* aus */ }
@@ -458,7 +574,7 @@ export default function VoiceMode(props: VoiceModeProps) {
     if (restartRef.current) clearTimeout(restartRef.current);
     // 800 ms wie im uebrigen Code: start() direkt nach stop() scheitert am noch
     // laufenden Shutdown des Moduls (siehe Kommentar bei der Kurz-Text-Verwerfung).
-    restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, 800);
+    restartRef.current = setTimeout(() => { restartRef.current = null; startListening(); }, RESTART_MS);
   }, [player, onInterrupt, startListening]);
 
   const orbPress = () => {

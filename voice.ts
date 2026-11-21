@@ -6,6 +6,63 @@
  * ueber den App.tsx die Text-Deltas des Chats an den Sprachmodus weiterreicht.
  */
 
+/**
+ * iOS-Sprachstack: Codes, die eine Session BEENDEN (Limit/Teardown), keine
+ * Nutzerfehler. expo-speech-recognition 57.1.1 mappt diese Codes nicht und
+ * schickt sie als generisches "audio-capture" mit roher NSError-Beschreibung
+ * durch -> im Chat stand dann z. B.
+ *   "The operation couldn't be completed. (kAFAssistantErrorDomain error 216.)"
+ * 209/216 = Session-Ende/Teardown (nach stop(), bei ~60-s-Limit oder wenn eine
+ * neue Session zu frueh startet), 1100 = alte Instanz noch aktiv, 1101/1107 =
+ * Verbindung zum Sprachprozess weg, 203 = Retry, 1110 = keine Sprache.
+ */
+const SPEECH_LIFECYCLE_ERRORS = new Set([
+  "no-speech",
+  "aborted",
+  "busy",
+  "interrupted",
+  "language-not-supported",
+]);
+const SPEECH_LIFECYCLE_CODE_RE = /kAFAssistantErrorDomain error (203|209|216|1100|1101|1107|1110)\b/;
+const SPEECH_LIFECYCLE_TEXT_RE = /(recognition request was canceled|request was canceled|retry)/i;
+
+/**
+ * Ist das ein normales Session-Ende (kein anzuzeigender Fehler)?
+ * Robust gegen fehlende/kaputte Event-Objekte (Fehlerobjekt kann null sein).
+ */
+export function isSpeechSessionEnd(event: { error?: string; message?: string } | null | undefined): boolean {
+  if (!event || typeof event !== "object") return true; // nichts Brauchbares -> nicht anzeigen
+  const code = String(event.error ?? "").toLowerCase();
+  const message = String(event.message ?? "");
+  if (SPEECH_LIFECYCLE_ERRORS.has(code)) return true;
+  if (SPEECH_LIFECYCLE_CODE_RE.test(message)) return true;
+  if (SPEECH_LIFECYCLE_TEXT_RE.test(message)) return true;
+  return false;
+}
+
+/**
+ * Anzeigetext fuer einen ECHTEN Fehler (Berechtigung, Netz, Mikrofon) — oder
+ * null, wenn es nur ein Session-Ende war und nichts angezeigt werden soll.
+ */
+export function speechErrorText(event: { error?: string; message?: string } | null | undefined): string | null {
+  if (isSpeechSessionEnd(event)) return null;
+  const msg = String(event?.message ?? "").trim();
+  const code = String(event?.error ?? "").trim();
+  if (msg) return msg;
+  if (code) return code;
+  // Leeres/kaputtes Event: nichts Erkennbares -> keinen "unbekannt"-Text zeigen
+  return null;
+}
+
+/**
+ * Pause vor dem naechsten start(): der AFAssistant-Prozess braucht nach stop()
+ * rund eine Sekunde. Bei 350 ms kam regelnmaessig 216/1100 zurueck.
+ */
+export const SPEECH_RESTART_MS = 900;
+
+/** iOS beendet Dauer-Sessions nach ~60 s — vorher selbst abschliessen. */
+export const SPEECH_SESSION_CAP_MS = 50000;
+
 /** Wird von App.tsx gefuettert, vom Sprachmodus gelesen. */
 export const voiceHooks: {
   delta?: (text: string) => void;
@@ -21,14 +78,26 @@ export function cleanForSpeech(input: string): string {
     .replace(/`[^`]*`/g, " ")
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    // nackte URLs/Dateipfade werden sonst Buchstabe fuer Buchstabe vorgelesen
+    .replace(/\bhttps?:\/\/\S+/gi, " Link ")
+    .replace(/\bwww\.\S+/gi, " Link ")
+    // Emoji/Symbole: die Stimme liest sie als Namen vor ("Smiling Face")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{200D}]/gu, " ")
     .replace(/^\s*\|.*\|\s*$/gm, " ")
-    .replace(/^\s*[-*+]\s+/gm, " ")
+    .replace(/^\s*[-*+>]\s+/gm, " ")
     .replace(/[*_~#>|]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-const ABBREV = /(?:\b(?:z\.\s?B|u\.\s?a|d\.\s?h|bzw|ca|etc|Dr|Prof|Nr|vgl|inkl|max|min)\.)$/i;
+const ABBREV = /(?:\b(?:z\.\s?B|u\.\s?a|d\.\s?h|bzw|ca|etc|Dr|Prof|Nr|vgl|inkl|max|min|Abb|Str|Tel|evtl|ggf|sog|usw)\.)$/i;
+
+/** Monatsnamen: nach "21." folgt oft ein Datum, kein neuer Satz. */
+const MONTH = /^(?:Januar|Februar|M\u00e4rz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\b/i;
+/** "21." / "1." = Ordnungszahl (Datum, Platzierung), kein Satzende. */
+const ORDINAL_END = /\b\d{1,2}\.$/;
+/** Ein Buchstabe + Punkt = Initiale ("P. Heinemann"). */
+const INITIAL_END = /(?:^|\s)[A-Za-z\u00c4\u00d6\u00dc\u00e4\u00f6\u00fc]\.$/;
 
 /** Lange Saetze an Wortgrenzen aufteilen - kurze Stuecke sprechen frueher los.
  *  Bewusst ohne Lookbehind: Hermes (React Native) unterstuetzt das nicht. */
@@ -64,10 +133,18 @@ export function takeSentences(buffer: string, force = false): { sentences: strin
     const end = match.index + match[0].length;
     const candidate = cleanForSpeech(raw.slice(lastEnd, end));
     if (candidate.length < 2) continue;
+    const after = raw.slice(end);
     // Abkürzungen ("z. B.", "bzw.", "Dr.") sind kein Satzende -> Puffer weiterlaufen
     // lassen, sonst geht der Text zwischen zwei Abkürzungen verloren.
     if (ABBREV.test(candidate)) continue;
-    if (/(?:^|\s)[A-Za-zÄÖÜäöü]\.$/.test(candidate)) continue;
+    if (INITIAL_END.test(candidate)) continue;
+    // Datum/Uhrzeit/Ordinalzahl: "Samstag, der 21. November 2026" und "um 11. 30 Uhr"
+    // sind EIN Satz. Ohne diese Sperre sagt die Stimme "... der einundzwanzig."
+    // und beginnt dann neu mit "November ...".
+    if (ORDINAL_END.test(candidate) && (MONTH.test(after.trimStart()) || /^\s*\d/.test(after))) continue;
+    // Folgt ein klein geschriebenes Wort, war es kein Satzende ("... gibt's. der"
+    // entsteht z. B. bei Aufzählungen). Satzanfänge sind im Deutschen groß.
+    if (/^\s*[a-zäöüß]/.test(after)) continue;
     sentences.push(candidate);
     lastEnd = end;
   }
