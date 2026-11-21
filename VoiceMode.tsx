@@ -80,6 +80,8 @@ export default function VoiceMode(props: VoiceModeProps) {
   // Session-ID — ein Nachzügler-`end` der alten Session würde sonst die gerade
   // frisch gestartete Aufnahme per stop() killen.
   const startedAtRef = useRef(0);
+  // Zaehler fuer fehlgeschlagene start()-Versuche (Deckel gegen Endlosschleife).
+  const startFailsRef = useRef(0);
   const turnStartRef = useRef(0);
   const firstAudioRef = useRef(0);
 
@@ -158,12 +160,15 @@ export default function VoiceMode(props: VoiceModeProps) {
       sentRef.current = false;
       stoppingRef.current = false;
       if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
+      // Stille-Timer der vorigen Session darf die neue Aufnahme nicht stoppen.
+      if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
       transcriptRef.current = "";
       finalSegmentsRef.current = "";
       interimRef.current = "";
       setTranscript("");
       setPhase("hoeren");
       startedAtRef.current = Date.now();
+      startFailsRef.current = 0;
       ExpoSpeechRecognitionModule.start({
         lang: language,
         interimResults: true,
@@ -173,6 +178,13 @@ export default function VoiceMode(props: VoiceModeProps) {
       });
     } catch (e) {
       setError("Spracherkennung: " + (e instanceof Error ? e.message : String(e)));
+      // Nicht stumm bleiben: start() scheitert z. B. am noch laufenden Shutdown
+      // des Moduls. Nach 800 ms erneut versuchen, aber nicht endlos.
+      if (startFailsRef.current < 5 && visibleRef.current) {
+        startFailsRef.current += 1;
+        if (restartRef.current) clearTimeout(restartRef.current);
+        restartRef.current = setTimeout(() => startListening(), 800);
+      }
     }
   }, [language]);
 
@@ -190,9 +202,11 @@ export default function VoiceMode(props: VoiceModeProps) {
    * Grund: ein halbes Interim-Fragment wurde bisher als Nachricht abgeschickt.
    */
   const finishUtterance = useCallback(() => {
+    stoppingRef.current = false;
     if (sentRef.current) return;
     if (watchdogRef.current) { clearTimeout(watchdogRef.current); watchdogRef.current = null; }
-    stoppingRef.current = false;
+    // Ein noch laufender Stille-Timer würde später die naechste Aufnahme stoppen.
+    if (silenceRef.current) { clearTimeout(silenceRef.current); silenceRef.current = null; }
     const finalText = finalSegmentsRef.current.trim();
     const interimText = interimRef.current.trim();
     const text = finalText || interimText;
@@ -268,10 +282,15 @@ export default function VoiceMode(props: VoiceModeProps) {
     armSilence();
   });
   useSpeechRecognitionEvent("end", () => {
-    // Frisch gestartete Session (< 600 ms)? Dann ist dieses `end` der Nachzügler
-    // der vorherigen Session (kein Session-ID im Event). Nicht abbrechen/senden:
-    // sonst wird die neue Aufnahme gestoppt und das Mikro bleibt stumm.
-    if (Date.now() - startedAtRef.current < 600) return;
+    // Frisch gestartete Session (< 600 ms)? Das kann der Nachzügler der vorherigen
+    // Session sein (iOS liefert keine Session-ID). Nicht senden, aber auf jeden
+    // Fall dafuer sorgen, dass wieder zugehoert wird — nie stumm bleiben.
+    if (Date.now() - startedAtRef.current < 600) {
+      if (!restartRef.current && !sentRef.current && visibleRef.current) {
+        restartRef.current = setTimeout(() => startListening(), 800);
+      }
+      return;
+    }
     // Der EINZIGE Sende-Pfad: nach stop() (Stille) oder wenn iOS die Session
     // selbst beendet. Hier liegt das finale Ergebnis vor.
     if (!sentRef.current && visibleRef.current && phaseRef.current === "hoeren") finishUtterance();
