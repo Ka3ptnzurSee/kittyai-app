@@ -765,6 +765,14 @@ export default function App() {
   useEffect(() => {
     inputRef.current = input;
   }, [input]);
+  // Beim Verlassen der Ansicht darf kein Diktat-Neustart-Timer weiterlaufen.
+  useEffect(() => () => {
+    if (dictationRestartTimerRef.current) {
+      clearTimeout(dictationRestartTimerRef.current);
+      dictationRestartTimerRef.current = null;
+    }
+    dictationActiveRef.current = false;
+  }, []);
   const player = useAudioPlayer();
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const abortedRef = useRef<Set<string>>(new Set());
@@ -3045,6 +3053,10 @@ export default function App() {
   });
   useSpeechRecognitionEvent("end", () => {
     setListening(false);
+    // Session zu Ende: ohne offenen Neustart-Timer will der Nutzer nicht mehr
+    // diktieren. Ohne diesen Reset wuerde ein spaeteres 209/216 aus einer
+    // FREMDEN Session (Sprachmodus) ein Diktat-Start ausloesen -> zwei Mikros.
+    if (!dictationRestartTimerRef.current) dictationActiveRef.current = false;
     const base = dictationBaseRef.current;
     const text = [base, finalSegmentsRef.current].filter(Boolean).join(" ").trim();
     // Text bleibt im Eingabefeld – Nutzer kann korrigieren und dann ➤ drücken

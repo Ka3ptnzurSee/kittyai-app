@@ -125,6 +125,10 @@ export default function VoiceMode(props: VoiceModeProps) {
   const inflightRef = useRef<{ text: string; p: Promise<string> }[]>([]);
   // Timer gegen stummes "denkt": ohne Text nach THINK_MS wieder zuhoeren.
   const thinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // finishUtterance ueber eine Ref: der Cap-Timer in startListening lebt 50 s
+  // laenger als sein Render und wuerde sonst mit einer veralteten onSend-Closure
+  // in den falschen Chat schicken.
+  const finishRef = useRef<() => void>(() => {});
 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   useEffect(() => { visibleRef.current = visible; }, [visible]);
@@ -266,7 +270,7 @@ export default function VoiceMode(props: VoiceModeProps) {
         if (watchdogRef.current) clearTimeout(watchdogRef.current);
         watchdogRef.current = setTimeout(() => {
           watchdogRef.current = null;
-          if (stoppingRef.current && !sentRef.current && visibleRef.current) finishUtterance();
+          if (stoppingRef.current && !sentRef.current && visibleRef.current) finishRef.current();
         }, FINAL_GRACE_MS);
       }, SPEECH_SESSION_CAP_MS);
     } catch (e) {
@@ -354,6 +358,8 @@ export default function VoiceMode(props: VoiceModeProps) {
       }
     }, THINK_MS);
   }, [onSend, startListening]);
+  // Immer die aktuelle Implementierung (frische onSend-Closure) halten.
+  finishRef.current = finishUtterance;
 
   /**
    * Stille erkannt -> NICHT direkt senden, sondern die Erkennung stoppen und dem
