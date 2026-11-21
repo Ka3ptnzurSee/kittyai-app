@@ -66,6 +66,38 @@ export const SPEECH_SESSION_CAP_MS = 50000;
 /** Erkennungssprache des Diktats (KittyAI-Oberflaeche ist deutsch). */
 export const SPEECH_LANG = "de-DE";
 
+/** Kuerzere Sprech-Einheiten werden mit der naechsten verschmolzen. */
+export const SPEECH_MIN_UNIT = 48;
+/** Deckel, damit eine Einheit nicht beliebig waechst. */
+export const SPEECH_MAX_UNIT = 200;
+
+/**
+ * Verschmilzt aufeinanderfolgende Sprech-Einheiten, solange sie kuerzer als
+ * SPEECH_MIN_UNIT sind (Edge-TTS hat ~0,53 s Festkosten pro Request: TCP/TLS +
+ * WebSocket-Handshake). Leere Einheiten fallen weg, MAX_UNIT wird nie
+ * ueberschritten.
+ */
+export function coalesceForSpeech(units: string[]): string[] {
+  const out: string[] = [];
+  let cur: string | null = null;
+  for (const raw of units || []) {
+    const next = String(raw == null ? "" : raw).trim();
+    if (!next) continue; // leere Einheiten weg (nie Inhalt verwerfen)
+    if (cur === null) {
+      cur = next;
+      continue;
+    }
+    if (cur.length < SPEECH_MIN_UNIT && cur.length + 1 + next.length <= SPEECH_MAX_UNIT) {
+      cur = cur + " " + next;
+    } else {
+      out.push(cur);
+      cur = next;
+    }
+  }
+  if (cur !== null) out.push(cur);
+  return out;
+}
+
 /** Wird von App.tsx gefuettert, vom Sprachmodus gelesen. */
 export const voiceHooks: {
   delta?: (text: string) => void;

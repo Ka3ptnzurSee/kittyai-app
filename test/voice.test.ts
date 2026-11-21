@@ -64,7 +64,7 @@ test("lange Saetze werden an Wortgrenzen geteilt", () => {
 });
 
 // --- Spracherkennung: 209/216 & Co. sind Session-Ende, kein Fehler ----------
-import { isSpeechSessionEnd, speechErrorText, SPEECH_LANG, SPEECH_RESTART_MS, SPEECH_SESSION_CAP_MS } from "../voice.ts";
+import { isSpeechSessionEnd, speechErrorText, SPEECH_LANG, SPEECH_RESTART_MS, SPEECH_SESSION_CAP_MS, coalesceForSpeech, SPEECH_MIN_UNIT, SPEECH_MAX_UNIT } from "../voice.ts";
 
 test("kAFAssistantErrorDomain 216 (gemeldeter Fall) = Session-Ende", () => {
   const ev = { error: "audio-capture", message: "The operation couldn’t be completed. (kAFAssistantErrorDomain error 216.)" };
@@ -128,4 +128,44 @@ test("Session-Cap liegt unter dem iOS-Limit von ~60 s", () => {
 
 test("Diktat-Sprache ist gesetzt", () => {
   assert.match(SPEECH_LANG, /^[a-z]{2}-[A-Z]{2}$/);
+});
+
+// ---- coalesceForSpeech: kurze Einheiten buendeln (Edge-Handshake-Kosten) ----
+
+test("coalesceForSpeech: kurz + kurz verschmilzt", () => {
+  const out = coalesceForSpeech(["Ja.", "Gern."]);
+  assert.strictEqual(out.length, 1, JSON.stringify(out));
+  assert.strictEqual(out[0], "Ja. Gern.");
+});
+
+test("coalesceForSpeech: langer Satz bleibt allein", () => {
+  const long = "Das ist ein ausreichend langer Satz, der die Mindestlaenge deutlich ueberschreitet.";
+  assert.ok(long.length >= SPEECH_MIN_UNIT, String(long.length));
+  const out = coalesceForSpeech([long, "Ok."]);
+  assert.strictEqual(out.length, 2, JSON.stringify(out));
+  assert.strictEqual(out[0], long);
+  assert.strictEqual(out[1], "Ok.");
+});
+
+test("coalesceForSpeech: SPEECH_MAX_UNIT wird nie ueberschritten", () => {
+  // Viele kurze Einheiten: greedy verschmelzen, aber nie ueber den Deckel.
+  const units = Array.from({ length: 20 }, (_, i) => `Satz ${i} kurz.`);
+  const out = coalesceForSpeech(units);
+  assert.ok(out.length > 0, "leer");
+  for (const u of out) assert.ok(u.length <= SPEECH_MAX_UNIT, `zu lang: ${u.length} ${u}`);
+  // nichts verloren: Woerter aller Einheiten stecken in den Ergebnis-Einheiten
+  const joined = out.join(" ");
+  for (let i = 0; i < units.length; i++) assert.ok(joined.includes(`Satz ${i} kurz.`), `fehlt ${i}`);
+  // ein einzelnes ueberlanges next bleibt eigenstaendig und unveraendert
+  const giant = "x".repeat(SPEECH_MAX_UNIT + 50);
+  const out2 = coalesceForSpeech(["Kurz.", giant]);
+  assert.deepStrictEqual(out2, ["Kurz.", giant]);
+});
+
+test("coalesceForSpeech: leere Einheiten fallen weg", () => {
+  const out = coalesceForSpeech(["", "   ", "Hallo.", "", "Welt."]);
+  assert.strictEqual(out.length, 1, JSON.stringify(out));
+  assert.strictEqual(out[0], "Hallo. Welt.");
+  assert.deepStrictEqual(coalesceForSpeech([]), []);
+  assert.deepStrictEqual(coalesceForSpeech(["", "  "]), []);
 });

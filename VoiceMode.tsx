@@ -11,12 +11,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, Easing, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { setAudioModeAsync, setIsAudioActiveAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import {
   SPEECH_RESTART_MS,
   SPEECH_SESSION_CAP_MS,
+  coalesceForSpeech,
   speechErrorText,
   takeSentences,
   voiceHooks,
@@ -58,9 +59,13 @@ export default function VoiceMode(props: VoiceModeProps) {
   const { visible, serverUrl, authHeaders, busy, colors, onSend, onInterrupt, onClose } = props;
   const language = props.language || "de-DE";
 
-  // keepAudioSessionActive: der Player darf die gemeinsame iOS-Audio-Session nach dem
-  // Satz NICHT abschalten — sonst faellt der wieder geoeffnete Erkenner aus dem Takt.
-  const player = useAudioPlayer(null, { keepAudioSessionActive: true });
+  // keepAudioSessionActive: false — der Player gibt die gemeinsame iOS-Audio-Session
+  // nach jedem Satz frei (setActive(false, notifyOthersOnDeactivation)), sonst bleibt
+  // sie aktiv und fremde Musik (Spotify/Apple Music) bleibt dauerhaft aus.
+  // Frueherer Kommentar („der Erkenner braucht die aktive Session") ist damit hinfaellig:
+  // ein neuer Erkenner-Start setzt Kategorie + setActive(true) selbst
+  // (ExpoSpeechRecognizer.swift setupAudioSession) — er braucht die Session NICHT offen.
+  const player = useAudioPlayer(null, { keepAudioSessionActive: false });
   const status = useAudioPlayerStatus(player);
 
   const [phase, setPhase] = useState<Phase>("hoeren");
@@ -166,6 +171,13 @@ export default function VoiceMode(props: VoiceModeProps) {
   /** Bis zu zwei Saetze vorholen — TTS laeuft parallel zur Wiedergabe. */
   const fill = useCallback(() => {
     while (inflightRef.current.length < 2 && queueRef.current.length) {
+      // Kurze Einheiten vor dem Synthetisieren buendeln: jeder Edge-Request kostet
+      // ~0,53 s Festkosten (TCP/TLS + WebSocket-Handshake). Aus "Ja." + kurzem
+      // Folgesatz wird so EIN Request statt zwei. Praefetch-Tiefe bleibt 2.
+      if (queueRef.current.length > 1) {
+        const merged = coalesceForSpeech(queueRef.current);
+        if (merged.length !== queueRef.current.length) queueRef.current = merged;
+      }
       const text = queueRef.current.shift() as string;
       const p = synth(text);
       // Kein unhandled rejection: der Fehler wird beim Abspielen gemeldet.
@@ -252,6 +264,13 @@ export default function VoiceMode(props: VoiceModeProps) {
         continuous: true,
         addsPunctuation: true,
         iosTaskHint: "dictation",
+        // Mischbar aufnehmen: ohne mixWithOthers aktiviert der Erkenner die Session
+        // exklusiv -> laufende Musik anderer Apps (Spotify) stoppt hart.
+        iosCategory: {
+          category: "playAndRecord",
+          categoryOptions: ["mixWithOthers", "defaultToSpeaker", "allowBluetooth"],
+          mode: "measurement",
+        },
       });
       // Erst NACH erfolgreichem start() zuruecksetzen — sonst wuerde der Retry-Deckel
       // bei jedem Fehlversuch wieder auf 0 springen (Endlosschleife).
@@ -543,6 +562,12 @@ export default function VoiceMode(props: VoiceModeProps) {
       stopPendingRef.current = false;
       try { ExpoSpeechRecognitionModule.stop(); } catch { /* aus */ }
       try { player.pause(); } catch { /* aus */ }
+      // Session freigeben, damit Musik anderer Apps nach dem Schliessen des
+      // Sprachmodus wieder laeuft. setIsAudioActiveAsync(false) pausiert alle
+      // expo-audio-Player (hier ohnehin schon pausiert) und ruft intern
+      // setActive(false, [.notifyOthersOnDeactivation]) auf. Der Erkenner hat
+      // seine Session mit dem stop() oben bereits abgegeben.
+      setIsAudioActiveAsync(false).catch(() => { /* nicht kritisch */ });
       return;
     }
     // Frisches Oeffnen: Zaehler zuruecksetzen, sonst traegt der Deckel aus einer
