@@ -780,3 +780,39 @@ export function rehaTagName(state: { today?: string; weekday?: number } | null |
   if (Number.isFinite(n)) return REHA_DOW[((Math.trunc(n) % 7) + 7) % 7];
   return "";
 }
+
+/**
+ * Filter der Chat-Liste.
+ *   "app"    = nur Chats, die auf DIESEM Gerät liegen
+ *   "server" = Verläufe, die nur auf dem Server liegen (anderes Gerät/App-Instanz)
+ *   "all"    = beides zusammen
+ *
+ * Das war die Ursache für "ich sehe nur 2 Chats": die Startansicht war "app", also
+ * wurden die 542 Server-Verläufe (andere Geräte, WhatsApp, Terminal) ausgeblendet —
+ * unsichtbar, aber vorhanden.
+ */
+export type ChatSourceFilter = "all" | "app" | "server" | "whatsapp" | "terminal";
+
+export function filterChatsBySource<T extends { source?: string; remote?: boolean }>(
+  chats: T[],
+  filter: ChatSourceFilter,
+): T[] {
+  const src = (c: T) => c.source || "app";
+  if (filter === "all") return chats;
+  if (filter === "app") return chats.filter((c) => src(c) === "app" && !c.remote);
+  if (filter === "server") return chats.filter((c) => src(c) === "app" && !!c.remote);
+  return chats.filter((c) => src(c) === filter);
+}
+
+/** Anzahl je Filter für die Chips — damit nie unklar ist, WARUM ein Chat fehlt. */
+export function chatSourceCounts<T extends { source?: string; remote?: boolean }>(
+  chats: T[],
+): Record<ChatSourceFilter, number> {
+  return {
+    all: chats.length,
+    app: filterChatsBySource(chats, "app").length,
+    server: filterChatsBySource(chats, "server").length,
+    whatsapp: filterChatsBySource(chats, "whatsapp").length,
+    terminal: filterChatsBySource(chats, "terminal").length,
+  };
+}

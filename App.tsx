@@ -40,7 +40,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -158,6 +158,7 @@ const CHATS_KEY = "pi-chats-v2"; // Legacy-Klartext (nur noch für Migration)
 const FOLDERS_KEY = "pi-folders-v1"; // Legacy-Klartext (nur noch für Migration)
 const CWD_KEY = "pi-cwd";
 const STREAM_STATE_KEY = "pi-stream-state-v1";
+const CHAT_FILTER_KEY = "pi-chat-filter-v1"; // zuletzt gewaehlte Chat-Ansicht (Geraet/Server/…) merken
 // Verschlüsselte Ablagen (AES-GCM, Master-Key im Keychain/Keystore via secureStore.ts).
 const CHATS_ENC_KEY = "pi-chats-v2.enc";
 const FOLDERS_ENC_KEY = "pi-folders-v1.enc";
@@ -736,8 +737,13 @@ export default function App() {
   // "server" = Verläufe, die nur auf dem Server liegen (anderes Gerät/andere App-Instanz),
   // "app" = nur die Chats DIESES Geräts. Ohne die Trennung ertrinkt die Liste in
   // hunderten Server-Sessions, die man hier nie angelegt hat.
-  type ChatFilter = "all" | "app" | "server" | "whatsapp" | "terminal";
-  const [chatFilter, setChatFilter] = useState<ChatFilter>("app");
+  type ChatFilter = ChatSourceFilter;
+  // Startansicht "all": vorher war es "app" ("Dieses Gerät") — damit waren die
+  // Server-Verlaeufe (andere Geraete, WhatsApp, Terminal) unsichtbar, obwohl der
+  // Server sie liefert (gemessen 22.11.: 271 App + 272 Terminal + 1 WhatsApp).
+  const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
+  // Erst laden, dann speichern — sonst ueberschreibt der Mount-Effekt die gemerkte Wahl.
+  const filterRestoredRef = useRef(false);
   // Titel-/Vorschau-Filter ueber der Chat-Liste (Volltext kommt in Welle 2).
   const [chatSearch, setChatSearch] = useState("");
   // Storage-Keys, deren verschlüsselter Bestand vorhanden, aber nicht lesbar ist
@@ -1838,6 +1844,23 @@ export default function App() {
     if (storeTimerRef.current) { clearTimeout(storeTimerRef.current); storeTimerRef.current = null; }
   }, []);
 
+  // Chat-Ansicht merken: sonst springt jede App-Version wieder auf die Startansicht und
+  // Verläufe wirken "verschwunden", obwohl nur der Filter anders stand.
+  useEffect(() => {
+    AsyncStorage.getItem(CHAT_FILTER_KEY)
+      .then((v) => {
+        if (v === "all" || v === "app" || v === "server" || v === "whatsapp" || v === "terminal") {
+          setChatFilter(v as ChatFilter);
+        }
+      })
+      .catch(() => {})
+      .finally(() => { filterRestoredRef.current = true; });
+  }, []);
+  useEffect(() => {
+    if (!filterRestoredRef.current) return;
+    AsyncStorage.setItem(CHAT_FILTER_KEY, chatFilter).catch(() => {});
+  }, [chatFilter]);
+
   // Aufgaben automatisch aktualisieren (Plugins → Tasks)
   useEffect(() => {
     if (tab !== "plugins" || pluginsTab !== "tasks") return;
@@ -1916,7 +1939,7 @@ export default function App() {
         .map((c) => c.id)
         .filter((id) => id && !id.startsWith("file:"));
       // Query manuell bauen: URLSearchParams ist in Hermes unzuverlässig.
-      let qs = "limit=400";
+      let qs = "limit=1000"; // Server deckelt selbst auf 1000 (544 Verläufe am 22.11.)
       if (ids.length) qs += `&ids=${encodeURIComponent(ids.slice(0, 300).join(","))}`;
       const res = await fetch(`${base}/api/chats?${qs}`, { headers: authHeaders() });      if (!res.ok) return;
       const data = await res.json();
@@ -3608,14 +3631,10 @@ export default function App() {
   // Server-Verläufe (andere Geräte, WhatsApp, Terminal) hinten dran; in einem Ordner
   // haben sie nichts zu suchen (sie gehören keinem Projektordner).
   const mergedChats = [...folderScoped, ...(folderFilter ? [] : remoteChats)].sort((a, b) => b.updatedAt - a.updatedAt);
-  const filteredChats =
-    chatFilter === "all"
-      ? mergedChats
-      : chatFilter === "app"
-        ? mergedChats.filter((c) => (c.source || "app") === "app" && !c.remote)
-        : chatFilter === "server"
-          ? mergedChats.filter((c) => (c.source || "app") === "app" && c.remote)
-          : mergedChats.filter((c) => (c.source || "app") === chatFilter);
+  // Filter + Zaehler kommen aus lib.ts (getestet). Die Zähler stehen im Chip, damit
+  // sofort sichtbar ist, wie viele Verläufe hinter welcher Ansicht liegen.
+  const sourceCounts = chatSourceCounts(mergedChats);
+  const filteredChats = filterChatsBySource(mergedChats, chatFilter);
 
   // Titel-/Vorschau-Suche ueber der Liste: Titel + letzte Nachricht, Gross-/Kleinschreibung egal.
   // Volltext ueber alle Nachrichten folgt in Welle 2 (Index + Treffer-Snippets).
@@ -4177,16 +4196,16 @@ export default function App() {
               <SearchField value={chatSearch} onChangeText={setChatSearch} placeholder="Chats durchsuchen" />
             </View>
             {renderFolders()}
-            <View style={styles.srcFilterRow}>
-              {([["app", "Dieses Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"], ["all", "Alle"]] as const).map(([k, label]) => (
-                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4} accessibilityRole="tab" accessibilityLabel={label} accessibilityState={{ selected: chatFilter === k }}>
-                  <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{label}</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.srcFilterScroll} contentContainerStyle={styles.srcFilterRow}>
+              {([["all", "Alle"], ["app", "Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"]] as const).map(([k, label]) => (
+                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4} accessibilityRole="tab" accessibilityLabel={`${label} (${sourceCounts[k]} Chats)`} accessibilityState={{ selected: chatFilter === k }}>
+                  <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{`${label} ${sourceCounts[k]}`}</Text>
                 </Pressable>
               ))}
               <Pressable onPress={() => syncServerChats()} style={styles.srcFilterChip} hitSlop={6} accessibilityRole="button" accessibilityLabel="Server-Chats neu laden">
                 <Ionicons name="refresh" size={13} color={colors.muted} />
               </Pressable>
-            </View>
+            </ScrollView>
             <FlatList
               data={searchedChats}
               keyExtractor={(c) => c.id}
@@ -4691,6 +4710,7 @@ const styles = StyleSheet.create({
   srcBadge: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 },
   srcBadgeText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.3 },
   srcFilterRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingBottom: 8 },
+  srcFilterScroll: { flexGrow: 0 },
   srcFilterChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   srcFilterChipActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
   srcFilterText: { fontSize: 12, color: colors.muted, fontWeight: "600" },

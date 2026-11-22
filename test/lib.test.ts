@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -551,4 +551,41 @@ test("Speicher-Deckel bleibt klein (Performance: AES-GCM im JS-Thread)", () => {
   const chars = JSON.stringify(out).length;
   assert.ok(chars <= MAX_STORAGE_CHARS * 1.2, "gespeicherter Bestand zu gross: " + chars);
   for (const c of out) assert.ok(c.messages.length <= MAX_STORED_MESSAGES, "Chat " + c.id + " hat " + c.messages.length + " Nachrichten");
+});
+
+test("filterChatsBySource trennt lokale, Server-, WhatsApp- und Terminal-Chats", () => {
+  const list = [
+    { id: "l1", source: "app" as const },                            // lokal
+    { id: "r1", source: "app" as const, remote: true },              // nur Server
+    { id: "w1", source: "whatsapp" as const, remote: true },
+    { id: "t1", source: "terminal" as const, remote: true },
+    { id: "x1" },                                                    // source fehlt = app
+  ];
+  assert.deepStrictEqual(filterChatsBySource(list, "all").map((c) => c.id), ["l1", "r1", "w1", "t1", "x1"]);
+  assert.deepStrictEqual(filterChatsBySource(list, "app").map((c) => c.id), ["l1", "x1"]);
+  assert.deepStrictEqual(filterChatsBySource(list, "server").map((c) => c.id), ["r1"]);
+  assert.deepStrictEqual(filterChatsBySource(list, "whatsapp").map((c) => c.id), ["w1"]);
+  assert.deepStrictEqual(filterChatsBySource(list, "terminal").map((c) => c.id), ["t1"]);
+});
+
+test("chatSourceCounts zählt jede Ansicht (Summe der Teile = alle)", () => {
+  const list = [
+    { source: "app" }, { source: "app", remote: true }, { source: "app", remote: true },
+    { source: "whatsapp" }, { source: "terminal" }, { source: "terminal" },
+  ];
+  const c = chatSourceCounts(list);
+  assert.strictEqual(c.all, 6);
+  assert.strictEqual(c.app, 1);
+  assert.strictEqual(c.server, 2);
+  assert.strictEqual(c.whatsapp, 1);
+  assert.strictEqual(c.terminal, 2);
+  assert.strictEqual(c.app + c.server + c.whatsapp + c.terminal, c.all);
+});
+
+test("chatSourceCounts: leere Liste und fremde source-Werte kippen nichts", () => {
+  assert.deepStrictEqual(chatSourceCounts([]), { all: 0, app: 0, server: 0, whatsapp: 0, terminal: 0 });
+  const c = chatSourceCounts([{ source: "unbekannt" }, { source: "" }]);
+  assert.strictEqual(c.all, 2);
+  assert.strictEqual(c.app, 1); // "" → app
+  assert.strictEqual(chatSourceCounts([{ source: "unbekannt" }]).app, 0);
 });
