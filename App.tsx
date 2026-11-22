@@ -797,6 +797,8 @@ export default function App() {
   // Drossel fuer den Server-Session-Sync: ohne sie loeste jede busyChatIds-Aenderung
   // einen 21-26-KB-GET aus (gemessen: bis 53 Requests pro Minute von einem Geraet).
   const lastSessionFetchRef = useRef<Map<string, number>>(new Map());
+  /** Laufender Throttle-Timer fürs Speichern des Chat-Stores (siehe writeChatStore). */
+  const storeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // true, solange ein programmatischer scrollToEnd (animated) läuft: onScroll darf
   // währenddessen nearBottom nicht auf false setzen (Animations-Zwischenwerte).
   const isAutoScrollingRef = useRef(false);
@@ -1812,21 +1814,29 @@ export default function App() {
     }
   }
 
-  // Chats automatisch speichern (debounced).
+  // Chats automatisch speichern — GEDROSSELT (Throttle, kein Debounce!).
   // WICHTIG (Performance, gemessen 20.11.): während eines Turns ändert sich `chats` bei
   // JEDEM Delta. Das Speichern verschlüsselt den ganzen Bestand per AES-GCM im JS-Thread
   // (331 ms bei 2,2 MB) — hundertfach pro Antwort war das die Ursache für ~2 s verzögerte
-  // Taps. Deshalb: beim Streamen nur GEDROSSELT speichern (alle 6 s) statt gar nicht.
+  // Taps. Deshalb: beim Streamen nur alle 6 s.
+  // Ein echter Timer-Throttle ist hier Pflicht: ein Debounce (clearTimeout bei jedem
+  // Delta) würde bei durchlaufendem Stream NIE feuern.
   // Vorher wurde während eines Turns komplett übersprungen → wurde die App im Hintergrund
   // beendet, war der ganze Turn (Frage UND Antwort) nie gespeichert und nach dem
   // Neustart weg ("Antwort wird nicht angezeigt").
   useEffect(() => {
     if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
+    if (storeTimerRef.current) return; // es ist schon ein Schreibvorgang geplant → nicht neu starten
     const delay = busyChatIds.size > 0 ? 6000 : 1200;
-    const t = setTimeout(() => { void writeChatStore(); }, delay);
-    return () => clearTimeout(t);
+    storeTimerRef.current = setTimeout(() => {
+      storeTimerRef.current = null;
+      void writeChatStore();
+    }, delay);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats, busyChatIds]);
+  useEffect(() => () => {
+    if (storeTimerRef.current) { clearTimeout(storeTimerRef.current); storeTimerRef.current = null; }
+  }, []);
 
   // Aufgaben automatisch aktualisieren (Plugins → Tasks)
   useEffect(() => {
