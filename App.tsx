@@ -30,6 +30,7 @@ import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./v
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import * as Notifications from "expo-notifications";
+import * as Updates from "expo-updates";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import * as Clipboard from "expo-clipboard";
@@ -987,6 +988,10 @@ export default function App() {
       else next.delete(chatId);
       return next;
     });
+    // Nach jeder Antwort sind Tokens/Kosten höher und das Guthaben kleiner → sofort
+    // nachziehen (Server-Cache wird per fresh umgangen), damit die Anzeige nicht
+    // bis zu einer Minute hinterherhinkt.
+    if (!busy) void refreshUsage(chatId, true);
   }
   function setChatThinking(chatId: string, value: string) {
     setThinkingByChat((prev) => ({ ...prev, [chatId]: value }));
@@ -1034,6 +1039,20 @@ export default function App() {
       setUsageLoading(false);
     }
   }, [serverUrl, authHeaders]);
+
+  // Der Aufruf fehlte komplett: refreshUsage wurde NUR vom Tippen auf die Chat-Pille
+  // ausgelöst — und die Pille rendert erst, wenn chatUsage.tokens > 0 ist. Henne/Ei:
+  // es gab nie einen /api/usage-Request, also blieb balance null und die Kopfzeile
+  // zeigte dauerhaft "Guthaben nicht abrufbar". Beleg: nginx-Log des Geräts enthielt
+  // keinen einzigen /api/usage-Aufruf. Jetzt: beim Start, bei Tab-/Chat-Wechsel und
+  // alle 60 s nachziehen.
+  useEffect(() => {
+    void refreshUsage(activeChatId ?? null);
+  }, [refreshUsage, activeChatId, tab]);
+  useEffect(() => {
+    const t = setInterval(() => { void refreshUsage(activeChatId ?? null); }, 60 * 1000);
+    return () => clearInterval(t);
+  }, [refreshUsage, activeChatId]);
 
   function patchChat(chatId: string, fn: (c: Chat) => Chat) {
     setChats((cs) => cs.map((c) => (c.id === chatId ? fn(c) : c)));
@@ -1842,6 +1861,29 @@ export default function App() {
   }, [chats, busyChatIds]);
   useEffect(() => () => {
     if (storeTimerRef.current) { clearTimeout(storeTimerRef.current); storeTimerRef.current = null; }
+  }, []);
+
+  // OTA-Update: expo-updates laedt ein Update im Hintergrund und wendet es erst beim
+  // NAECHSTEN Start an (checkAutomatically ON_LOAD, fallbackToCacheTimeout 0). Genau
+  // daran hing "der Fix kommt nicht an": der erste Start zieht das Bundle, sichtbar
+  // wurde es erst beim zweiten. Deshalb: nach dem Laden ein Hinweis + Knopf, der die
+  // App mit dem neuen Bundle neu startet (Updates.reloadAsync).
+  const [updateReady, setUpdateReady] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (!Updates.isEnabled || !Updates.isEmbeddedLaunch) return;
+        const chk = await Updates.checkForUpdateAsync();
+        if (!alive || !chk.isAvailable) return;
+        const fetched = await Updates.fetchUpdateAsync();
+        if (!alive) return;
+        if (fetched.isNew) setUpdateReady(true);
+      } catch {
+        // Kein Update-Kanal (Dev-Build/Expo Go/offline) ist kein Fehlerfall.
+      }
+    })();
+    return () => { alive = false; };
   }, []);
 
   // Chat-Ansicht merken: sonst springt jede App-Version wieder auf die Startansicht und
@@ -3916,13 +3958,15 @@ export default function App() {
             <Text style={styles.usageSub} numberOfLines={1}>
               {balance && balance.ok && balance.total != null
                 ? `DeepSeek-Guthaben ${fmtUsd(balance.total)}`
-                : usageLoading ? "Verbrauch wird geladen …" : "DeepSeek-Guthaben nicht abrufbar"}
+                : usageLoading ? "Verbrauch wird geladen …"
+                  : balance && balance.error ? `Guthaben nicht abrufbar: ${balance.error}` : "DeepSeek-Guthaben nicht abrufbar"}
             </Text>
           ) : (
-            <Text style={styles.usageSub} numberOfLines={1}>
+            <Text style={styles.usageSub} numberOfLines={1} onPress={() => { void refreshUsage(null, true); }}>
               {balance && balance.ok && balance.total != null
                 ? `DeepSeek ${fmtUsd(balance.total)} übrig${totalUsage && totalUsage.byProvider && totalUsage.byProvider.deepseek ? ` · ${fmtUsd(totalUsage.byProvider.deepseek.cost)} verbraucht` : ""}`
-                : usageLoading ? "Guthaben wird geladen …" : "Guthaben nicht abrufbar"}
+                : usageLoading ? "Guthaben wird geladen …"
+                  : balance && balance.error ? `Guthaben nicht abrufbar: ${balance.error}` : "Guthaben nicht abrufbar"}
             </Text>
           )}
         </View>
@@ -4206,6 +4250,17 @@ export default function App() {
           </>
         ) : (
           <>
+            {updateReady ? (
+              <Pressable
+                onPress={() => { void Updates.reloadAsync().catch(() => {}); }}
+                style={styles.updateBar}
+                accessibilityRole="button"
+                accessibilityLabel="Update laden und App neu starten"
+              >
+                <Ionicons name="cloud-download-outline" size={15} color={colors.accent} />
+                <Text style={styles.updateBarText}>Neue Version geladen — antippen zum Neustart</Text>
+              </Pressable>
+            ) : null}
             <View style={{ paddingHorizontal: 12, paddingBottom: 8 }}>
               <SearchField value={chatSearch} onChangeText={setChatSearch} placeholder="Chats durchsuchen" />
             </View>
@@ -4725,6 +4780,8 @@ const styles = StyleSheet.create({
   srcBadgeText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.3 },
   srcFilterRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingBottom: 8 },
   srcFilterScroll: { flexGrow: 0 },
+  updateBar: { flexDirection: "row", alignItems: "center", gap: 8, marginHorizontal: 12, marginBottom: 8, paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12, borderWidth: 1, borderColor: colors.accent, backgroundColor: colors.accentSoft },
+  updateBarText: { flex: 1, fontSize: 13, fontWeight: "600", color: colors.accent },
   srcFilterChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
   srcFilterChipActive: { borderColor: colors.accent, backgroundColor: colors.accentSoft },
   srcFilterText: { fontSize: 12, color: colors.muted, fontWeight: "600" },
