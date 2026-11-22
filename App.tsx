@@ -1846,9 +1846,11 @@ export default function App() {
 
   // Chat-Ansicht merken: sonst springt jede App-Version wieder auf die Startansicht und
   // Verläufe wirken "verschwunden", obwohl nur der Filter anders stand.
+  const filterPickedRef = useRef(false); // Nutzer hat selbst getippt → Restore darf nicht mehr überschreiben
   useEffect(() => {
     AsyncStorage.getItem(CHAT_FILTER_KEY)
       .then((v) => {
+        if (filterPickedRef.current) return;
         if (v === "all" || v === "app" || v === "server" || v === "whatsapp" || v === "terminal") {
           setChatFilter(v as ChatFilter);
         }
@@ -1941,7 +1943,8 @@ export default function App() {
       // Query manuell bauen: URLSearchParams ist in Hermes unzuverlässig.
       let qs = "limit=1000"; // Server deckelt selbst auf 1000 (544 Verläufe am 22.11.)
       if (ids.length) qs += `&ids=${encodeURIComponent(ids.slice(0, 300).join(","))}`;
-      const res = await fetch(`${base}/api/chats?${qs}`, { headers: authHeaders() });      if (!res.ok) return;
+      const res = await fetch(`${base}/api/chats?${qs}`, { headers: authHeaders() });
+      if (!res.ok) return;
       const data = await res.json();
       const list: any[] = Array.isArray(data?.chats) ? data.chats : [];
       const localIds = new Set(locals.map((c) => c.id));
@@ -2225,6 +2228,10 @@ export default function App() {
     clearPendingAttachments();
     setActiveChatId(id);
     setTab("chats");
+    // Gemerkte Ansicht kann "Server"/"Terminal" sein — der neue lokale Chat waere dort
+    // unsichtbar. Deshalb beim Anlegen auf "Alle" zurueckschalten.
+    filterPickedRef.current = true; // ein evtl. noch laufender Restore darf das nicht kippen
+    setChatFilter("all");
     return id;
   }
 
@@ -4198,7 +4205,7 @@ export default function App() {
             {renderFolders()}
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.srcFilterScroll} contentContainerStyle={styles.srcFilterRow}>
               {([["all", "Alle"], ["app", "Gerät"], ["server", "Server"], ["whatsapp", "WhatsApp"], ["terminal", "Terminal"]] as const).map(([k, label]) => (
-                <Pressable key={k} onPress={() => setChatFilter(k as any)} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4} accessibilityRole="tab" accessibilityLabel={`${label} (${sourceCounts[k]} Chats)`} accessibilityState={{ selected: chatFilter === k }}>
+                <Pressable key={k} onPress={() => { filterPickedRef.current = true; setChatFilter(k as ChatFilter); }} style={[styles.srcFilterChip, chatFilter === k && styles.srcFilterChipActive]} hitSlop={4} accessibilityRole="tab" accessibilityLabel={`${label} (${sourceCounts[k]} Chats)`} accessibilityState={{ selected: chatFilter === k }}>
                   <Text style={[styles.srcFilterText, chatFilter === k && styles.srcFilterTextActive]}>{`${label} ${sourceCounts[k]}`}</Text>
                 </Pressable>
               ))}
