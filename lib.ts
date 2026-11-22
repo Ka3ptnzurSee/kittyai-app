@@ -333,6 +333,27 @@ export function formatTime(ts: number): string {
   return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
 }
 
+/**
+ * Relative Zeit für die Chat-Liste („vor 2 Std", „gestern", „vor 3 Tagen").
+ * Absolute Uhrzeiten in der zweiten Zeile reichen nicht: bei 444 Chats sehen
+ * viele Zeilen identisch aus — die relative Zeit trennt sie sichtbar.
+ * `nowTs` ist injizierbar (Tests, stabile Ausgaben).
+ */
+export function relativeTime(ts: number, nowTs: number = Date.now()): string {
+  if (!Number.isFinite(ts)) return "";
+  const diff = nowTs - ts;
+  if (diff < 60_000) return "gerade eben";
+  const min = Math.floor(diff / 60_000);
+  if (min < 60) return `vor ${min} Min`;
+  const std = Math.floor(min / 60);
+  if (std < 24) return `vor ${std} Std`;
+  const tage = Math.floor(std / 24);
+  if (tage === 1) return "gestern";
+  if (tage < 30) return `vor ${tage} Tagen`;
+  const d = new Date(ts);
+  return d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+
 // Eindeutige ID mit Zeitstempel + Zufall – verhindert Kollisionen,
 // wenn mehrere Elemente in derselben Millisekunde erzeugt werden.
 export function uid(prefix: string): string {

@@ -41,7 +41,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -3616,6 +3616,8 @@ export default function App() {
           : item.remote
             ? { text: "Server", color: colors.accent }
             : null;
+    // Quellen-Name für die Metazeile (Badge gibt es nur für Nicht-App-Quellen).
+    const srcLabel = srcBadge?.text ?? "App";
     const avatarIcon = item.source === "whatsapp" ? "logo-whatsapp" : item.source === "terminal" ? "terminal-outline" : "chatbubbles-outline";
     return (
       <Pressable
@@ -3631,19 +3633,23 @@ export default function App() {
           <View style={[styles.chatStatusDot, { backgroundColor: statusColor }]} />
         </View>
         <View style={styles.chatInfo}>
-          <View style={styles.chatTitleRow}>
-            <Text style={styles.chatTitle} numberOfLines={1}>{item.title}</Text>
+          {/* Titel darf 2 Zeilen nutzen (viele Titel sind lang und waren vorher
+              abgeschnitten identisch) — feste Blockhöhe verhindert Springen. */}
+          <Text style={styles.chatTitle} numberOfLines={2} ellipsizeMode="tail">{item.title || "Chat"}</Text>
+          {/* Eine Metazeile, die auch ohne langen Titel unterscheidbar macht:
+              Quelle + relative Zeit. */}
+          <View style={styles.chatMetaRow}>
             {srcBadge ? (
               <View style={[styles.srcBadge, { borderColor: srcBadge.color }]}>
                 <Text style={[styles.srcBadgeText, { color: srcBadge.color }]}>{srcBadge.text}</Text>
               </View>
             ) : null}
-            {item.readOnly ? <Ionicons name="lock-closed" size={11} color={colors.muted} /> : null}
+            {item.readOnly ? <Ionicons name="lock-closed" size={10} color={colors.muted} /> : null}
+            <Text style={styles.chatMeta} numberOfLines={1} ellipsizeMode="tail">{`${srcLabel} · ${relativeTime(item.updatedAt)}`}</Text>
           </View>
-          <Text style={styles.chatPreview} numberOfLines={1}>{preview}</Text>
+          <Text style={styles.chatPreview} numberOfLines={1} ellipsizeMode="tail">{preview}</Text>
         </View>
         <View style={styles.chatRight}>
-          <Text style={styles.chatTime}>{formatTime(item.updatedAt)}</Text>
           <View style={styles.chatRightRow}>
             {item.readOnly ? null : (
               <Pressable onPress={() => { setRenameChatId(item.id); setRenameInput(item.title); }} hitSlop={8} accessibilityRole="button" accessibilityLabel="Bearbeiten">
@@ -4279,6 +4285,11 @@ export default function App() {
               data={searchedChats}
               keyExtractor={(c) => c.id}
               renderItem={renderChatItem}
+              initialNumToRender={12}
+              maxToRenderPerBatch={12}
+              updateCellsBatchingPeriod={50}
+              windowSize={7}
+              removeClippedSubviews
               style={styles.list}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={
@@ -4763,6 +4774,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
+    minHeight: 96,
     padding: 12,
     borderRadius: 14,
     backgroundColor: colors.surface,
@@ -4772,10 +4784,13 @@ const styles = StyleSheet.create({
   chatItemActive: { borderColor: colors.accent },
   chatAvatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.accentSoft, alignItems: "center", justifyContent: "center", position: "relative" },
   chatStatusDot: { position: "absolute", top: -1, right: -1, width: 13, height: 13, borderRadius: 7, borderWidth: 2, borderColor: colors.surface },
-  chatInfo: { flex: 1 },
-  chatTitle: { fontSize: 16, fontWeight: "700", color: colors.text },
-  chatPreview: { fontSize: 13, color: colors.muted, marginTop: 2 },
+  // Feste Blockhöhe = kein Layout-Sprung zwischen 1- und 2-zeiligen Titeln.
+  chatInfo: { flex: 1, minHeight: 68, justifyContent: "center" },
+  chatTitle: { fontSize: 15, fontWeight: "600", lineHeight: 19, color: colors.text },
+  chatPreview: { fontSize: 12, lineHeight: 16, color: colors.muted, marginTop: 2 },
   chatTitleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  chatMetaRow: { flexDirection: "row", alignItems: "center", gap: 5, marginTop: 3, height: 16 },
+  chatMeta: { fontSize: 11, lineHeight: 15, color: colors.muted, flexShrink: 1 },
   srcBadge: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 5, paddingVertical: 1 },
   srcBadgeText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.3 },
   srcFilterRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingBottom: 8 },

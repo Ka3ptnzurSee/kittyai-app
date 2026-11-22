@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -67,6 +67,22 @@ test("formatTime liefert Uhrzeit für heute", () => {
   const now = Date.now();
   const t = formatTime(now);
   assert.match(t, /^\d{2}:\d{2}$/);
+});
+
+test("relativeTime: Sekunden/Minuten/Stunden/Tage", () => {
+  const now = 1_700_000_000_000;
+  assert.strictEqual(relativeTime(now - 5_000, now), "gerade eben");
+  assert.strictEqual(relativeTime(now - 5 * 60_000, now), "vor 5 Min");
+  assert.strictEqual(relativeTime(now - 2 * 3_600_000, now), "vor 2 Std");
+  assert.strictEqual(relativeTime(now - 25 * 3_600_000, now), "gestern");
+  assert.strictEqual(relativeTime(now - 3 * 86_400_000, now), "vor 3 Tagen");
+});
+
+test("relativeTime: alte und kaputte Werte kippen nicht", () => {
+  const now = 1_700_000_000_000;
+  assert.match(relativeTime(now - 90 * 86_400_000, now), /^\d{2}\.\d{2}\.\d{2}$/);
+  assert.strictEqual(relativeTime(Number.NaN, now), "");
+  assert.strictEqual(relativeTime(now + 5_000, now), "gerade eben"); // Zukunft
 });
 
 test("presetCron baut 5-Feld-Cron aus Presets", () => {
