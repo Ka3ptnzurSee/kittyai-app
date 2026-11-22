@@ -837,3 +837,25 @@ export function chatSourceCounts<T extends { source?: string; remote?: boolean }
     terminal: filterChatsBySource(chats, "terminal").length,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Server-Neustart: wann muss die App die Teilantwort nachladen?
+// ---------------------------------------------------------------------------
+// Ein Turn, der wegen eines Server-Neustarts stirbt, ist kein Endzustand: der Server
+// persistiert den Turn (turn-store) und schreibt die Teilantwort bzw. den Auto-Retry
+// in die Session-Datei — oft erst 1-2 s nach dem Reconnect. Die App laedt deshalb
+// nach diesen Fehlerarten 2x im Abstand von 3 s nach und ersetzt die Fehlerblase
+// durch den Text, statt eine leere/abgebrochene Blase stehen zu lassen.
+export const RESTART_RELOAD_DELAYS_MS: readonly number[] = [0, 3000];
+
+/** Fehlerarten, nach denen ein Nachladen sinnvoll ist (Server lebt wieder). */
+export function isRestartErrorKind(kind: string, text?: string): boolean {
+  const k = String(kind || "").trim().toLowerCase();
+  if (k === "server_restart" || k === "engine_down") return true;
+  return isRestartErrorText(text);
+}
+
+/** Textvariante (aeltere Server ohne `kind`-Feld). */
+export function isRestartErrorText(text?: string): boolean {
+  return /server wurde neu gestartet|server neu gestartet|server nicht bereit/i.test(String(text || ""));
+}

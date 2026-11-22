@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
+import { isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -604,4 +604,36 @@ test("chatSourceCounts: leere Liste und fremde source-Werte kippen nichts", () =
   assert.strictEqual(c.all, 2);
   assert.strictEqual(c.app, 1); // "" → app
   assert.strictEqual(chatSourceCounts([{ source: "unbekannt" }]).app, 0);
+});
+
+
+// --- Nachladen nach Server-Neustart (22.11.2026) -----------------------------
+// Befund: Turns, die "Server wurde neu gestartet" meldeten, blieben als leere bzw.
+// abgebrochene Blase stehen, obwohl der Server die Teilantwort gespeichert hatte.
+test("isRestartErrorKind erkennt die Neustart-Fehlerarten", () => {
+  assert.equal(isRestartErrorKind("server_restart"), true);
+  assert.equal(isRestartErrorKind("engine_down"), true);
+  assert.equal(isRestartErrorKind("SERVER_RESTART"), true);
+  assert.equal(isRestartErrorKind(" server_restart "), true);
+  assert.equal(isRestartErrorKind("timeout"), false);
+  assert.equal(isRestartErrorKind("rate_limit"), false);
+  assert.equal(isRestartErrorKind(""), false);
+});
+
+test("isRestartErrorKind/isRestartErrorText greifen auch ohne kind-Feld", () => {
+  const msg = "Server wurde neu gestartet, bevor die Antwort fertig war — bitte Nachricht erneut senden.";
+  assert.equal(isRestartErrorKind("", msg), true);
+  assert.equal(isRestartErrorText(msg), true);
+  assert.equal(isRestartErrorText("Server nicht bereit"), true);
+  assert.equal(isRestartErrorText("Zeitüberschreitung"), false);
+  // Robust gegen fehlende/kaputte Werte (kein Throw)
+  for (const bad of ["", "   ", "Kontext zu lang", "Limit erreicht"]) {
+    assert.equal(isRestartErrorText(bad), false);
+  }
+  assert.equal(isRestartErrorText(undefined), false);
+  assert.equal(isRestartErrorKind(undefined as unknown as string), false);
+});
+
+test("RESTART_RELOAD_DELAYS_MS: erster Versuch sofort, zweiter nach 3 s", () => {
+  assert.deepEqual([...RESTART_RELOAD_DELAYS_MS], [0, 3000]);
 });

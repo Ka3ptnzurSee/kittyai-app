@@ -41,7 +41,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -1232,6 +1232,28 @@ export default function App() {
     } catch {
       return false;
     }
+  }
+
+  // Nach einem SERVER-NEUSTART ist die Fehlerblase ("Server neu gestartet") nicht das
+  // Ende: der Server hat den Turn als rettbar gespeichert und schreibt die Teilantwort
+  // (oder den Auto-Retry) in die Session-Datei — oft erst ein bis zwei Sekunden nach
+  // dem Reconnect. Deshalb 2x im Abstand von 3 s nachladen und die Fehlerblase durch
+  // den Text ersetzen, statt eine leere/abgebrochene Blase stehen zu lassen.
+  async function reloadAfterRestart(chatId: string, aiId: string): Promise<boolean> {
+    for (const delay of RESTART_RELOAD_DELAYS_MS) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      let applied = false;
+      try {
+        applied = await reloadFromServer(chatId);
+      } catch { /* offline → nächster Versuch */ }
+      const chat = chatsRef.current.find((c) => c.id === chatId);
+      const msg = chat ? chat.messages.find((m) => m.id === aiId) : undefined;
+      // Erfolg = reloadFromServer hat etwas angewandt, es steht echter Text in der Blase
+      // UND die Fehlerkarte ist weg. Sonst (Server schreibt erst spaeter / Turn tot)
+      // weiter warten und am Ende die Fehlerkarte stehen lassen.
+      if (applied && msg && (msg.text || "").trim() && !msg.error) return true;
+    }
+    return false;
   }
 
   // Prüft, ob der Server-Turn für diesen Chat noch läuft: die letzte Session-Nachricht
@@ -2855,6 +2877,10 @@ export default function App() {
         }
         // Echter Server-Fehler (kein Netzproblem) → Fehler-Karte statt Text-Suffix.
         setErrorCard(chatId, aiId, classifyError(rawMsg), isRetryable(rawMsg), "send_failed", rawMsg);
+        // "Server wurde neu gestartet" ist kein Endzustand: Teilantwort nachladen.
+        if (isRestartErrorText(rawMsg)) {
+          void reloadAfterRestart(chatId, aiId);
+        }
         // Anhänge zurück in die Eingabezeile: nach einem echten Fehler muss der
         // Nutzer Bild/PDF/Audio nicht neu auswählen — ein Tippen auf Senden reicht.
         if (pendingImages.length) setPendingImages(pendingImages);
@@ -3051,6 +3077,16 @@ export default function App() {
         };
         const label = KIND_LABEL[kind] || classifyError(raw);
         setErrorCard(chatId, aiId, label, isRetryable(raw), "sse_error", raw);
+        // Neustart/Engine weg: der Turn kann serverseitig weiterlaufen bzw. die
+        // Teilantwort steht schon in der Session-Datei → automatisch nachladen.
+        if (isRestartErrorKind(kind, raw)) {
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Server neu gestartet — Antwort wird nachgeladen …" }));
+          void reloadAfterRestart(chatId, aiId).then((ok) => {
+            setStatusByChat((prev) => (prev[chatId]?.startsWith("Server neu gestartet") ? { ...prev, [chatId]: "" } : prev));
+            if (!ok) voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
+          });
+          return;
+        }
         voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
       }
     };
