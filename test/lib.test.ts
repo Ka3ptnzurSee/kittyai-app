@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, trimChatsForStorage, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -321,28 +321,100 @@ test("fileExtOf liest die Endung", () => {
   assert.strictEqual(fileExtOf(""), "");
 });
 
-test("trimChatsForStorage lässt kleine Verläufe unangetastet", () => {
+test("compactChatsForStorage lässt kleine Verläufe unangetastet", () => {
   const chats = [{ id: "a", updatedAt: 2, messages: [{ t: 1 }, { t: 2 }] }];
-  assert.deepStrictEqual(trimChatsForStorage(chats), chats);
+  assert.deepStrictEqual(compactChatsForStorage(chats), chats);
 });
 
-test("trimChatsForStorage halbiert Nachrichten, wenn der Deckel greift (nie unter 20)", () => {
+test("compactChatsForStorage halbiert Nachrichten, wenn der Deckel greift (nie unter 8)", () => {
   const messages = Array.from({ length: 1000 }, (_, i) => ({ i }));
   const chats = [{ id: "a", updatedAt: 1, messages }];
-  const out = trimChatsForStorage(chats, 5000, 30_000);
+  const out = compactChatsForStorage(chats, 5000, 12_000, 30_000);
   assert.ok(JSON.stringify(out).length <= 30_000);
-  assert.ok(out[0].messages.length >= 20);
+  assert.ok(out[0].messages.length >= 8);
   // die NEUESTEN Nachrichten bleiben erhalten
   assert.deepStrictEqual(out[0].messages[out[0].messages.length - 1], { i: 999 });
 });
 
-test("trimChatsForStorage opfert älteste Chats, den letzten nie", () => {
-  const mk = (id: string, updatedAt: number) => ({ id, updatedAt, messages: [{ x: "y".repeat(500) }] });
-  const chats = [mk("alt", 1), mk("mittel", 2), mk("neu", 3)];
-  const out = trimChatsForStorage(chats, 5000, 1500);
-  assert.ok(out.length < chats.length);
-  assert.ok(out.some((c) => c.id === "neu")); // jüngster überlebt immer
-  assert.ok(!out.some((c) => c.id === "alt"));
+// Kern des Feld-Bugs (21.11.2026): eine einzige lange Antwort sprengte das Budget und
+// `trimChatsForStorage` opferte danach GANZE Chats — nach dem Neustart waren sie weg.
+test("compactChatsForStorage löscht NIE einen Chat-Eintrag (auch nicht bei Riesen-Antworten)", () => {
+  const mk = (id: string, updatedAt: number, len: number) => ({
+    id,
+    title: `Chat ${id}`,
+    updatedAt,
+    messages: [
+      { id: `${id}-u`, role: "user", text: "frage " + id },
+      { id: `${id}-a`, role: "assistant", text: "y".repeat(len) },
+    ],
+  });
+  const chats = [mk("a", 1, 400_000), mk("b", 2, 400_000), mk("c", 3, 2000), mk("d", 4, 9000)];
+  const out = compactChatsForStorage(chats);
+  const ids = out.map((c) => c.id);
+  assert.deepStrictEqual(ids, ["a", "b", "c", "d"]); // alle vier bleiben, Reihenfolge erhalten
+  // der große Text wurde gedeckelt, die Nutzernachricht lebt weiter
+  const a = out.find((c) => c.id === "a")!;
+  assert.ok((a.messages[0] as { text: string }).text.includes("frage a"));
+  assert.ok((a.messages[1] as { text: string }).text.length < 400_000);
+});
+
+test("compactChatsForStorage gibt bei extremem Budget den Körper auf, behält aber den Eintrag + Vorschau", () => {
+  const chats = Array.from({ length: 12 }, (_, i) => ({
+    id: `c${i}`,
+    title: `Chat ${i}`,
+    updatedAt: i,
+    messages: [{ id: `m${i}`, role: "assistant", text: `antwort ${i} ` + "z".repeat(20_000) }],
+  }));
+  const out = compactChatsForStorage(chats, 200, 12_000, 8_000);
+  assert.strictEqual(out.length, 12); // kein Chat verloren
+  assert.deepStrictEqual(out.map((c) => c.id), chats.map((c) => c.id));
+  assert.ok(out.every((c) => !!c.title));
+});
+
+// ── mergeServerTail: Antworten nachträglich vom Server holen ──
+test("mergeServerTail hängt eine fehlende Antwort an (Frage lokal da, Antwort nie gespeichert)", () => {
+  const local = [{ id: "u1", role: "user", text: "Wie ist der Stand?" }];
+  const server = [
+    { id: "s1", role: "user", text: "Wie ist der Stand?" },
+    { id: "s2", role: "assistant", text: "Alles erledigt." },
+  ];
+  const out = mergeServerTail(local, server);
+  assert.ok(out);
+  assert.strictEqual(out!.length, 2);
+  assert.strictEqual(out![1].text, "Alles erledigt.");
+});
+
+test("mergeServerTail holt den ganzen Verlauf, wenn lokal nichts mehr da ist (Auto-Compact)", () => {
+  const server = [
+    { id: "s1", role: "user", text: "hallo" },
+    { id: "s2", role: "assistant", text: "hi" },
+  ];
+  const out = mergeServerTail([], server);
+  assert.deepStrictEqual(out, [
+    { id: "s1", role: "user", text: "hallo" },
+    { id: "s2", role: "assistant", text: "hi" },
+  ]);
+});
+
+test("mergeServerTail doppelt nichts, wenn die Antwort lokal schon vollständig ist", () => {
+  const local = [
+    { id: "u1", role: "user", text: "hallo" },
+    { id: "a1", role: "assistant", text: "hi" },
+  ];
+  const server = [
+    { id: "s1", role: "user", text: "hallo" },
+    { id: "s2", role: "assistant", text: "hi" },
+  ];
+  assert.strictEqual(mergeServerTail(local, server), null);
+});
+
+test("mergeServerTail ignoriert einen Server, der hinterherhängt (Frage nie angekommen)", () => {
+  const local = [
+    { id: "u1", role: "user", text: "erste" },
+    { id: "u2", role: "user", text: "zweite (offline gesendet)" },
+  ];
+  const server = [{ id: "s1", role: "user", text: "erste" }, { id: "s2", role: "assistant", text: "ok" }];
+  assert.strictEqual(mergeServerTail(local, server), null);
 });
 
 // ── sanitizeLoadedMessages: persistierte Fehlerkarten beim Start verwerfen ──

@@ -508,39 +508,179 @@ export function isRetryable(raw: string): boolean {
 }
 
 /** Speicher-Deckel für den lokalen (verschlüsselten) Chat-Store in JSON-Zeichen.
- *  Ohne Deckel kann `messages` (5.000 je Chat × 50 Chats) den AsyncStorage-Write
- *  sprengen — dann schlägt das Speichern fehl und der Verlauf ist nach einem
- *  Neustart weg. */
-// Speicher-Deckel fuer die lokale Chat-Kopie. Gemessen (Benchmark mit dem echten
-// Code): 2,2 MB brauchen 331 ms, 4,3 MB 664 ms AES-GCM im JS-Thread (noble, hex
-// verdoppelt die Schreibmenge) — bei jedem Speichern, also bei jedem Turn-Ende.
-// Der volle Verlauf liegt ohnehin in der Server-Session; lokal reicht ein Cache.
-export const MAX_STORAGE_CHARS = 700_000;
+ *  Gemessen (echter Code): 2,2 MB ≈ 331 ms, 4,3 MB ≈ 664 ms AES-GCM im JS-Thread
+ *  (noble + hex verdoppelt die Schreibmenge). Der Deckel hält die Schreibkosten klein. */
+export const MAX_STORAGE_CHARS = 900_000;
 export const MAX_STORED_MESSAGES = 200;
+/** Text-Deckel je gespeicherter Nachricht. Der Volltext steht in der Server-Session
+ *  und wird beim Öffnen des Chats nachgeladen — eine Antwort darf nicht das ganze
+ *  Speicher-Budget eines Geräts fressen (MAX_REPLY_CHARS = 500 000 Zeichen!). */
+export const MAX_STORED_TEXT_CHARS = 12_000;
+/** Ab hier wird ein Chat nicht weiter verkleinert (letzte Nachrichten bleiben). */
+export const MIN_COMPACT_MESSAGES = 8;
 
-/** Kürzt Chats so, dass der lokale Store nicht überläuft. Reihenfolge bleibt erhalten.
- *  Stufen: (1) je Chat die letzten `maxMessages`, (2) Nachrichten je Chat halbieren
- *  (nie unter 20), (3) älteste Chats opfern (nie den letzten). */
-export function trimChatsForStorage<T extends { messages: unknown[]; updatedAt?: number }>(
+/**
+ * Komprimiert den lokalen Chat-Store: **kein Chat wird gelöscht**.
+ *
+ * Vorher (bis 20.11.2026) hat `trimChatsForStorage` bei Überschreiten des Budgets
+ * ganze Chats "geopfert" (älteste zuerst). Folge im Feld: eine einzige sehr lange
+ * Antwort (bis 500 000 Zeichen) sprengte die 700-KB-Grenze allein — danach waren
+ * nach dem nächsten App-Start alle anderen Chats aus der Liste verschwunden.
+ *
+ * Jetzt gilt Auto-Compact wie beim Server:
+ *   1. je Chat die letzten `maxMessages` Nachrichten,
+ *   2. je Nachricht den Text auf `maxText` Zeichen kappen (Volltext bleibt am Server),
+ *   3. reicht das nicht: den GRÖSSTEN Chat-Körper zuerst halbieren (nie unter
+ *      `minMessages`), danach dessen Körper ganz ablegen und `bodyCompacted` setzen.
+ * Der Chat-Eintrag (Titel, Zeitstempel, letzte Vorschau) bleibt IMMER erhalten und
+ * der Verlauf wird beim Öffnen per `/api/session/<id>` nachgeladen.
+ */
+export function compactChatsForStorage<
+  T extends { messages: unknown[]; updatedAt?: number; preview?: string; bodyCompacted?: boolean },
+>(
   chats: T[],
   maxMessages = MAX_STORED_MESSAGES,
+  maxText = MAX_STORED_TEXT_CHARS,
   maxChars = MAX_STORAGE_CHARS,
+  minMessages = MIN_COMPACT_MESSAGES,
 ): T[] {
-  let list = chats.map((c) => ({ ...c, messages: c.messages.slice(-maxMessages) }));
+  const capText = (m: unknown): unknown => {
+    if (!m || typeof m !== "object") return m;
+    const o = m as Record<string, unknown>;
+    const t = typeof o.text === "string" ? o.text : "";
+    if (t.length <= maxText) return m;
+    // Kopf behalten (die Pointe steht bei Antworten meist am Ende → Ende behalten
+    // wäre riskant; wir behalten den Anfang und markieren die Kürzung im UI-frei
+    // sichtbaren Text, damit nichts stillschweigend verschwindet).
+    return { ...o, text: `${t.slice(0, maxText)}\n\n… (gekürzt gespeichert — Volltext lädt beim Öffnen nach)` };
+  };
+  const previewOf = (c: T): string | undefined => {
+    if (c.preview) return c.preview;
+    for (let i = c.messages.length - 1; i >= 0; i--) {
+      const m = c.messages[i] as { text?: string } | null;
+      const t = String(m?.text || "").replace(/\s+/g, " ").trim();
+      if (t) return t.slice(0, 160);
+    }
+    return undefined;
+  };
+  let list: T[] = chats.map((c) => ({
+    ...c,
+    messages: c.messages.slice(-maxMessages).map(capText),
+  }));
   const size = (l: T[]) => JSON.stringify(l).length;
-  while (size(list) > maxChars && list.some((c) => c.messages.length > 20)) {
-    list = list.map((c) =>
-      c.messages.length > 20
-        ? { ...c, messages: c.messages.slice(-Math.max(20, Math.floor(c.messages.length / 2))) }
-        : c,
-    );
-  }
-  while (size(list) > maxChars && list.length > 1) {
-    let oldest = 0;
-    for (let i = 1; i < list.length; i++) if ((list[i].updatedAt ?? 0) < (list[oldest].updatedAt ?? 0)) oldest = i;
-    list = list.filter((_, i) => i !== oldest);
+  const bodySize = (c: T) => JSON.stringify(c.messages).length;
+  let guard = 0;
+  while (size(list) > maxChars && guard++ < 500) {
+    // Größten Körper zuerst komprimieren (fair: kleine Chats bleiben vollständig).
+    let idx = -1;
+    let biggest = 0;
+    for (let i = 0; i < list.length; i++) {
+      const s = bodySize(list[i]);
+      if (s > biggest) { biggest = s; idx = i; }
+    }
+    if (idx < 0 || biggest < 200) break; // nichts mehr zu holen
+    const victim = list[idx];
+    const msgs = victim.messages as unknown[];
+    if (msgs.length > minMessages) {
+      const keep = Math.max(minMessages, Math.floor(msgs.length / 2));
+      list = list.map((c, i) => (i === idx ? { ...c, messages: c.messages.slice(-keep), bodyCompacted: true } : c));
+    } else if (msgs.length > 0) {
+      list = list.map((c, i) =>
+        i === idx ? { ...c, messages: [], preview: previewOf(c), bodyCompacted: true } : c,
+      );
+    } else {
+      // Körper schon leer → als erledigt markieren, damit die Schleife nicht hängt.
+      list = list.map((c, i) => (i === idx ? { ...c, messages: [] } : c));
+      break;
+    }
   }
   return list;
+}
+
+/** @deprecated Alter Name — opferte Chats. Ruft jetzt `compactChatsForStorage` auf. */
+export function trimChatsForStorage<
+  T extends { messages: unknown[]; updatedAt?: number; preview?: string; bodyCompacted?: boolean },
+>(chats: T[], maxMessages = MAX_STORED_MESSAGES, maxChars = MAX_STORAGE_CHARS): T[] {
+  return compactChatsForStorage(chats, maxMessages, MAX_STORED_TEXT_CHARS, maxChars);
+}
+
+/**
+ * Fehlende Verlaufs-Teile vom Server an den lokalen Chat anhängen.
+ *
+ * Warum: Antworten gingen verloren, wenn die App während (oder direkt nach) einem
+ * Turn beendet wurde — lokal war die KI-Bubble leer/weg, und die bisherige Logik
+ * konnte eine Server-Antwort nur in eine VORHANDENE Bubble schreiben. Ergebnis:
+ * "Antwort wird nicht angezeigt" bzw. nach dem Schließen ganz weg.
+ *
+ * Regeln:
+ *  - lokal leer (Körper komprimiert) → letzten Server-Nachrichten übernehmen
+ *  - sonst: letzte lokale Nutzernachricht im Server suchen (Text-Vergleich, tolerant)
+ *    und alles danach anhängen — aber nur, wenn lokal noch keine Antwort vorliegt
+ *    bzw. der Server NEUE Turns kennt. Sonst `null` (nichts zu tun).
+ */
+export function mergeServerTail<
+  T extends { id?: string; role?: string; text?: string; images?: unknown[] },
+>(
+  local: T[],
+  server: { id?: string; role?: string; text?: string; images?: unknown[] }[],
+  opts: { maxAppend?: number; resolveImages?: (imgs: unknown[]) => unknown[] | undefined } = {},
+): T[] | null {
+  const maxAppend = opts.maxAppend ?? 40;
+  const srv = Array.isArray(server) ? server : [];
+  if (!srv.length) return null;
+  const localMsgs = Array.isArray(local) ? local : [];
+  const toLocal = (m: { id?: string; role?: string; text?: string; images?: unknown[] }, i: number): T => {
+    const images = Array.isArray(m.images) && m.images.length
+      ? (opts.resolveImages ? opts.resolveImages(m.images) : m.images)
+      : undefined;
+    return {
+      id: String(m.id || `srv${i}`),
+      role: m.role === "user" ? "user" : "assistant",
+      text: String(m.text || "").slice(0, 500_000),
+      ...(images ? { images } : {}),
+    } as unknown as T;
+  };
+  const worthKeeping = (m: T) => {
+    const text = String((m as { text?: string }).text || "").trim();
+    const imgs = (m as { images?: unknown[] }).images;
+    return (m as { role?: string }).role === "user" || !!text || (Array.isArray(imgs) && imgs.length > 0);
+  };
+  const norm = (s?: string) => String(s || "").replace(/\s+/g, " ").trim().slice(0, 240);
+
+  if (localMsgs.length === 0) {
+    const tail = srv.slice(-maxAppend).map(toLocal).filter(worthKeeping);
+    return tail.length ? tail : null;
+  }
+  const localUsers = localMsgs.filter((m) => m.role === "user").length;
+  const srvUsers = srv.filter((m) => m.role === "user").length;
+  if (srvUsers < localUsers) return null; // Server hinkt hinterher → nichts anwenden
+  const lastLocalUser = [...localMsgs].reverse().find((m) => m.role === "user");
+  if (!lastLocalUser) return null;
+  const want = norm(lastLocalUser.text);
+  if (!want) return null;
+  let anchor = -1;
+  for (let i = srv.length - 1; i >= 0; i--) {
+    if (srv[i].role === "user" && norm(srv[i].text) === want) { anchor = i; break; }
+  }
+  if (anchor < 0) return null;
+  const lastLocalUserIdx = localMsgs.map((m) => m.role).lastIndexOf("user");
+  const localHasAnswer = localMsgs
+    .slice(lastLocalUserIdx + 1)
+    .some((m) => m.role === "assistant" && String(m.text || "").trim());
+  let tail: T[];
+  if (localHasAnswer) {
+    // Antwort ist da → nur NEUE Server-Turns anhängen (sonst doppelt).
+    if (srvUsers <= localUsers) return null;
+    const lastSrvUser = srv.map((m) => m.role).lastIndexOf("user");
+    if (lastSrvUser <= anchor) return null;
+    tail = srv.slice(lastSrvUser + 1).map(toLocal);
+  } else {
+    tail = srv.slice(anchor + 1).map(toLocal);
+  }
+  const seen = new Set(localMsgs.map((m) => String(m.id || "")).filter(Boolean));
+  const add = tail.filter((m) => worthKeeping(m) && !seen.has(String((m as { id?: string }).id || "")));
+  if (!add.length) return null;
+  return [...localMsgs, ...add];
 }
 
 /** Chat-Titel aus der ersten Nutzernachricht ableiten (gekürzt, an Wortgrenze). */

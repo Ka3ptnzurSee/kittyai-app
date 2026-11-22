@@ -40,7 +40,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, trimChatsForStorage, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -69,6 +69,9 @@ type Chat = {
   serverKey?: string;
   /** Vorschau der letzten Nachricht vom Server (remote-Chats haben noch keinen Verlauf geladen). */
   preview?: string;
+  /** Lokal wurde nur ein Teil des Verlaufs gespeichert (Auto-Compact). Der Rest wird
+   *  beim Öffnen per /api/session/<id> nachgeladen — der Chat bleibt in der Liste. */
+  bodyCompacted?: boolean;
 };
 type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
 type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
@@ -1148,7 +1151,19 @@ export default function App() {
       // hinterlassen; die Antwort darf nicht von der Fehler-Karte verdeckt werden).
       if (serverLast && serverLastIdxS > lastUserIdxS && serverLast.text?.trim()) {
         const lastAi = [...chat.messages].reverse().find((m) => m.role === "assistant");
-        if (!lastAi) return false;
+        // Keine lokale KI-Bubble (App wurde mitten im Turn beendet → der Turn war nie
+        // gespeichert, oder der Körper wurde beim Auto-Compact abgelegt): Antwort vom
+        // Server ANHÄNGEN statt aufzugeben. Vorher ging sie hier verloren.
+        if (!lastAi) {
+          const tail = mergeServerTail(chat.messages, serverMsgs, {
+            resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
+          });
+          if (!tail) return false;
+          patchChat(chatId, (c) => ({ ...c, messages: tail, bodyCompacted: false, updatedAt: Date.now() }));
+          delete streamStateRef.current[chatId];
+          persistStreamState(chatId);
+          return true;
+        }
         const answerText = (serverLast.text || "").slice(0, MAX_REPLY_CHARS);
         const localText = lastAi.text?.trim() || "";
         // Nur überschreiben, wenn die Server-Antwort VOLLSTÄNDIGER ist als die lokale
@@ -1546,7 +1561,22 @@ export default function App() {
                 messages: sanitizeLoadedMessages(msgs, anchorId),
               };
             });
-            setChats((prev) => (prev.length ? prev : cleaned));
+            // Merge statt Verwerfen: hat die App schon einen Chat angelegt (Widget,
+            // Deep-Link, geteilter Text/Screenshot) bevor der Speicher geladen war, wurde
+            // der gespeicherte Bestand bisher KOMPLETT weggeworfen („nur ein Chat in der
+            // Liste") und danach die kurze Liste gespeichert — Datenverlust.
+            setChats((prev) => {
+              if (!prev.length) return cleaned;
+              const stored = new Map(cleaned.map((c) => [c.id, c]));
+              const merged = prev.map((p) => {
+                const s = stored.get(p.id);
+                if (!s) return p;
+                stored.delete(p.id);
+                // die Seite mit mehr Nachrichten gewinnt (frisch gesendet vs. gespeichert)
+                return p.messages.length >= s.messages.length ? p : s;
+              });
+              return [...merged, ...[...stored.values()]].sort((a, b) => b.updatedAt - a.updatedAt);
+            });
             // Auto-Resume: für jeden Chat mit Stream-State + leerer KI-Bubble + User-Nachricht
             // den letzten Turn am Server fortsetzen (kompletter App-Kill -> Antwort wiederherstellen).
             for (const chat of cleaned) {
@@ -1658,6 +1688,13 @@ export default function App() {
         setChats((cs) =>
           cs.map((c) => {
             if (c.id !== activeChatId) return c;
+            // Fehlt der lokale Verlauf (Auto-Compact) oder wurde die App mitten im Turn
+            // beendet (Frage/Antwort nie gespeichert), die fehlenden Server-Nachrichten
+            // anhängen — sonst bliebe die fertige Antwort für immer unsichtbar.
+            const tail = mergeServerTail(c.messages, data.messages, {
+              resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
+            });
+            if (tail) return { ...c, messages: tail, bodyCompacted: false, updatedAt: Date.now() };
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant" && String(m.text || "").trim());
             // Server-Session ist die Wahrheit: eine (Resume-)Fehler-Karte auffüllen, wenn der
@@ -1745,35 +1782,50 @@ export default function App() {
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
 
-  // Chats automatisch speichern (debounced; trimmen: max 50 Chats, 200 Nachrichten je Chat).
-  // WICHTIG (Performance, gemessen 20.11.): während eines Turns ändert sich `chats` bei
-  // JEDEM Delta. Das Speichern verschlüsselt den ganzen Bestand per AES-GCM im JS-Thread
-  // (331 ms bei 2,2 MB, 664 ms bei 4,3 MB) + hex-verdoppelt in AsyncStorage — hundertfach
-  // pro Antwort war das die Ursache für ~2 s verzögerte Taps. Deshalb: beim Streamen NICHT
-  // speichern, sondern einmal, wenn nichts mehr läuft (busyChatIds leer).
-  useEffect(() => {
-    if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
-    if (busyChatIds.size > 0) return;
-    const t = setTimeout(() => {
+  // Lokalen (verschlüsselten) Chat-Store schreiben — AUTO-COMPACT statt Löschen.
+  // `compactChatsForStorage` opfert NIE einen Chat-Eintrag: es werden nur Nachrichten-
+  // körper verkleinert (je Nachricht gedeckelt, größte Chats zuerst), der Volltext
+  // bleibt in der Server-Session und wird beim Öffnen nachgeladen.
+  async function writeChatStore(): Promise<void> {
+    if (!loadedRef.current) return;
+    if (storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
+    const tSave = Date.now();
+    const compacted = compactChatsForStorage(
       // Nur-lesbare Verläufe (WhatsApp/Terminal) NICHT lokal speichern: sie werden bei
       // jedem Sync frisch vom Server geholt und können sehr groß sein (bis ~7 MB).
-      const trimmed = trimChatsForStorage(
-        chats
-          .filter((c) => !c.readOnly)
-          .slice(0, 50)
-          .map((c) => ({ ...c, title: deriveTitle(c.title || ""), messages: stripErrorFlags(c.messages || []) })),
-      );
-      const tSave = Date.now();
-      const payload = JSON.stringify(trimmed);
-      secureSet(CHATS_ENC_KEY, payload)
-        .then(() => {
-          writeWarnedRef.current.delete(CHATS_ENC_KEY);
-          // Speicherkosten im Feld messen (Verschluesseln + Schreiben blockiert den JS-Thread).
-          perfAdd("store.save", Date.now() - tSave, Math.round(payload.length / 1024) + "KB");
-        })
-        .catch(() => warnWriteFailure(CHATS_ENC_KEY));
-    }, 2500);
+      chatsRef.current.filter((c) => !c.readOnly).map((c) => ({
+        ...c,
+        // Titel NICHT mehr beim Speichern auf 18 Zeichen kürzen (deriveTitle) — sonst
+        // stand nach jedem Neustart ein abgeschnittener Titel in der Liste.
+        title: c.title || "Chat",
+        messages: stripErrorFlags(c.messages || []),
+      })),
+    );
+    const payload = JSON.stringify(compacted);
+    try {
+      await secureSet(CHATS_ENC_KEY, payload);
+      writeWarnedRef.current.delete(CHATS_ENC_KEY);
+      // Speicherkosten im Feld messen (Verschluesseln + Schreiben blockiert den JS-Thread).
+      perfAdd("store.save", Date.now() - tSave, Math.round(payload.length / 1024) + "KB");
+    } catch {
+      warnWriteFailure(CHATS_ENC_KEY);
+    }
+  }
+
+  // Chats automatisch speichern (debounced).
+  // WICHTIG (Performance, gemessen 20.11.): während eines Turns ändert sich `chats` bei
+  // JEDEM Delta. Das Speichern verschlüsselt den ganzen Bestand per AES-GCM im JS-Thread
+  // (331 ms bei 2,2 MB) — hundertfach pro Antwort war das die Ursache für ~2 s verzögerte
+  // Taps. Deshalb: beim Streamen nur GEDROSSELT speichern (alle 6 s) statt gar nicht.
+  // Vorher wurde während eines Turns komplett übersprungen → wurde die App im Hintergrund
+  // beendet, war der ganze Turn (Frage UND Antwort) nie gespeichert und nach dem
+  // Neustart weg ("Antwort wird nicht angezeigt").
+  useEffect(() => {
+    if (!loadedRef.current || storageBlockedRef.current.has(CHATS_ENC_KEY)) return;
+    const delay = busyChatIds.size > 0 ? 6000 : 1200;
+    const t = setTimeout(() => { void writeChatStore(); }, delay);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats, busyChatIds]);
 
   // Aufgaben automatisch aktualisieren (Plugins → Tasks)
@@ -2120,6 +2172,10 @@ export default function App() {
     pullPendingShare();
     const appStateSub = AppState.addEventListener("change", (st) => {
       if (st === "active") pullPendingShare();
+      // Beim Wegschalten SOFORT speichern (nicht auf den 1,2-s/6-s-Debounce warten):
+      // iOS beendet die App im Hintergrund oft ohne weitere JS-Ausführung. Vorher war
+      // eine gerade gestreamte Antwort dadurch komplett ungespeichert.
+      else if (loadedRef.current) void writeChatStore();
     });
     Linking.getInitialURL().then((u) => deepLinkRef.current(u)).catch(() => {});
     const sub = Linking.addEventListener("url", (e) => deepLinkRef.current(e.url));
@@ -2139,28 +2195,62 @@ export default function App() {
     return id;
   }
 
-  function deleteChat(chatId: string) {
-    setChats((cs) => cs.filter((c) => c.id !== chatId));
-    if (activeChatId === chatId) {
-      setActiveChatId(null);
-      clearPendingAttachments();
+  /** Chat entfernen — NUR nach Rückfrage.
+   *  Vorher löschte der Papierkorb-Button im Chat-Kopf sofort und rief zusätzlich
+   *  `/api/new-session` auf — der Server UNLINKT dabei die Session-Datei
+   *  (server.js resetChat). Ein Fehltap war damit unwiderruflich: Chat weg, Server-
+   *  Verlauf weg. Jetzt: Auswahl „Nur in der App“ (Standard, Server bleibt) oder
+   *  „Auch auf dem Server löschen“ (destruktiv) plus „Rückgängig“ nach dem Löschen. */
+  function deleteChat(chatId: string, opts: { skipConfirm?: boolean } = {}) {
+    const victim = chatsRef.current.find((c) => c.id === chatId);
+    if (!victim) return;
+    const doDelete = (alsoServer: boolean) => {
+      setChats((cs) => cs.filter((c) => c.id !== chatId));
+      if (activeChatId === chatId) {
+        setActiveChatId(null);
+        clearPendingAttachments();
+      }
+      // Laufende lokale Antwort immer abbrechen (der pi-Prozess soll nicht weiterrechnen).
+      const running = abortControllersRef.current.get(chatId);
+      running?.abort();
+      abortControllersRef.current.delete(chatId);
+      if (running) abortedRef.current.add(chatId); // nur bei laufendem Stream signalisieren (kein Leak)
+      fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ chatId }),
+      }).catch(() => {});
+      if (alsoServer) {
+        // Destruktiv: löscht die Server-Session (Verlauf endgültig weg).
+        fetch(`${serverUrl.replace(/\/+$/, "")}/api/new-session`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ chatId }),
+        }).catch(() => {});
+      }
+      // Rückgängig anbieten (8 s) — der Chat wird nur aus der Liste genommen.
+      const restore = () => {
+        setChats((cs) => (cs.some((c) => c.id === victim.id) ? cs : [victim, ...cs]));
+      };
+      Alert.alert(
+        alsoServer ? "Chat überall gelöscht" : "Chat aus der Liste entfernt",
+        alsoServer ? "Der Verlauf wurde auch auf dem Server gelöscht." : "Der Verlauf bleibt auf dem Server erhalten.",
+        [{ text: "Rückgängig", onPress: restore }, { text: "OK", style: "cancel" }],
+      );
+    };
+    if (opts.skipConfirm) {
+      doDelete(false);
+      return;
     }
-    // Server-seitig aufräumen: laufende Antwort abbrechen + Session zurücksetzen,
-    // damit kein toter pi-Prozess/keine tote Session weiterläuft.
-    const running = abortControllersRef.current.get(chatId);
-    running?.abort();
-    abortControllersRef.current.delete(chatId);
-    if (running) abortedRef.current.add(chatId); // nur bei laufendem Stream signalisieren (kein Leak)
-    fetch(`${serverUrl.replace(/\/+$/, "")}/api/abort`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ chatId }),
-    }).catch(() => {});
-    fetch(`${serverUrl.replace(/\/+$/, "")}/api/new-session`, {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ chatId }),
-    }).catch(() => {});
+    Alert.alert(
+      "Chat löschen?",
+      `„${victim.title || "Chat"}“\n\nNur in der App entfernen (Server-Verlauf bleibt) oder überall löschen?`,
+      [
+        { text: "Abbrechen", style: "cancel" },
+        { text: "Nur in App", onPress: () => doDelete(false) },
+        { text: "Überall", style: "destructive", onPress: () => doDelete(true) },
+      ],
+    );
   }
 
   async function speakReply(text: string) {
