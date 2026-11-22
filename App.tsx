@@ -1859,7 +1859,10 @@ export default function App() {
       .finally(() => { filterRestoredRef.current = true; });
   }, []);
   useEffect(() => {
-    if (!filterRestoredRef.current) return;
+    // Auch eine Wahl VOR abgeschlossenem Restore speichern (sonst ging ein frueher
+    // Chip-Tap beim naechsten Start verloren: Restore kehrt dann frueh zurueck und
+    // der Effekt feuert kein zweites Mal).
+    if (!filterRestoredRef.current && !filterPickedRef.current) return;
     AsyncStorage.setItem(CHAT_FILTER_KEY, chatFilter).catch(() => {});
   }, [chatFilter]);
 
@@ -2230,8 +2233,12 @@ export default function App() {
     setTab("chats");
     // Gemerkte Ansicht kann "Server"/"Terminal" sein — der neue lokale Chat waere dort
     // unsichtbar. Deshalb beim Anlegen auf "Alle" zurueckschalten.
-    filterPickedRef.current = true; // ein evtl. noch laufender Restore darf das nicht kippen
-    setChatFilter("all");
+    // Nur umschalten, wenn der neue lokale Chat sonst unsichtbar waere ("Server"/
+    // "Terminal"/"WhatsApp") — kein sinnloser Render/Persist beim Senden aus "Alle".
+    if (chatFilter !== "all" && chatFilter !== "app") {
+      filterPickedRef.current = true; // ein evtl. noch laufender Restore darf das nicht kippen
+      setChatFilter("all");
+    }
     return id;
   }
 
