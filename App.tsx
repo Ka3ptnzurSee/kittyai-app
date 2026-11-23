@@ -1131,13 +1131,15 @@ export default function App() {
   // oben bleibt als Notausgang, falls Apple nicht erreichbar ist.
   const submitAppleLogin = useCallback(async () => {
     // Ref statt State: zwei Taps im selben Tick sehen beide ein veraltetes pairBusy.
-    if (appleBusyRef.current) return;
-    appleBusyRef.current = true;
+    // Zusaetzlich pairBusy: der Code-Weg darf nicht parallel laufen (Token-Race).
+    if (appleBusyRef.current || pairBusy) return;
     if (!serverUrl.startsWith("https://")) {
-      appleBusyRef.current = false;
       setPairErr("Apple-Anmeldung nur über HTTPS möglich");
       return;
     }
+    // Erst nach allen Vorpruefungen sperren — der einzige Reset steht im finally,
+    // damit kein Wurf zwischen Sperre und try das Ref haengen laesst.
+    appleBusyRef.current = true;
     setPairBusy(true);
     setPairErr("");
     try {
@@ -1202,7 +1204,7 @@ export default function App() {
       appleBusyRef.current = false;
       setPairBusy(false);
     }
-  }, [pairName, serverUrl]);
+  }, [pairName, pairBusy, serverUrl]);
 
   // Verbrauch + Guthaben vom Server holen. chatId null = nur Gesamt/Guthaben (Hauptmenü).
   // fresh=true umgeht die Server-Caches (Guthaben 60 s): Tippen auf die Anzeige erneuert sie.
