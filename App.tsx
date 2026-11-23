@@ -743,6 +743,9 @@ export default function App() {
   // dauerhaft blockieren — nach PAIR_LOCK_STALE_MS gilt die Sperre als verwaist.
   const PAIR_LOCK_STALE_MS = 60_000;
   const pairLockAt = useRef(0);
+  // Eigentuemer-Marke: monoton statt Date.now(), damit zwei Aufrufe nie denselben
+  // Stamp bekommen koennen.
+  const pairLockSeq = useRef(0);
   const [pairName, setPairName] = useState(Platform.OS === "ios" ? "iPhone/iPad" : "Android");
   const [pairBusy, setPairBusy] = useState(false);
   const [pairErr, setPairErr] = useState("");
@@ -1090,8 +1093,8 @@ export default function App() {
       setPairErr("Kopplung nur über HTTPS möglich");
       return;
     }
-    const stamp = Date.now();
-    pairLockAt.current = stamp;
+    const stamp = ++pairLockSeq.current;
+    pairLockAt.current = Date.now();
     setPairBusy(true);
     setPairErr("");
     // 15 s Timeout: ein hängender Request darf die Kopplung nicht blockieren.
@@ -1110,6 +1113,9 @@ export default function App() {
         setPairErr(data?.error || `Kopplung fehlgeschlagen (${res.status})`);
         return;
       }
+      // Nur der Eigentuemer darf Token/State schreiben; nach Stale-Ablauf kann
+      // ein zweiter Weg parallel laufen und wuerde sonst divergieren.
+      if (pairLockSeq.current !== stamp) return;
       setApiToken(String(data.token));
       setPairGate(false);
       setPairCode("");
@@ -1130,8 +1136,10 @@ export default function App() {
       clearTimeout(timer);
       // Nur der Eigentuemer gibt frei: ein nach Stale-Ablauf gestarteter zweiter
       // Weg darf von diesem hier nicht entsperrt werden.
-      if (pairLockAt.current === stamp) pairLockAt.current = 0;
-      setPairBusy(false);
+      if (pairLockSeq.current === stamp) {
+        pairLockAt.current = 0;
+        setPairBusy(false);
+      }
     }
   }, [pairCode, pairName, serverUrl]);
 
@@ -1149,8 +1157,8 @@ export default function App() {
     }
     // Erst nach allen Vorpruefungen sperren — der einzige Reset steht im finally,
     // damit kein Wurf zwischen Sperre und try das Ref haengen laesst.
-    const stamp = Date.now();
-    pairLockAt.current = stamp;
+    const stamp = ++pairLockSeq.current;
+    pairLockAt.current = Date.now();
     setPairBusy(true);
     setPairErr("");
     try {
@@ -1186,6 +1194,7 @@ export default function App() {
         // Kein Klartext-Fallback: das Geräte-Token ist ein Bearer-Token und hat
         // in AsyncStorage (lesbare Plist/SQLite, Backups) nichts zu suchen.
         // Schlägt der Keychain fehl, brechen wir ab statt unsicher zu speichern.
+        if (pairLockSeq.current !== stamp) return;
         const token = String(data.token);
         const saved = await SecureStore.setItemAsync(TOKEN_KEY, token, {
           keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
@@ -1212,8 +1221,10 @@ export default function App() {
         setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
       }
     } finally {
-      if (pairLockAt.current === stamp) pairLockAt.current = 0;
-      setPairBusy(false);
+      if (pairLockSeq.current === stamp) {
+        pairLockAt.current = 0;
+        setPairBusy(false);
+      }
     }
   }, [pairName, serverUrl]);
 
