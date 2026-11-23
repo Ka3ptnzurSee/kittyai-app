@@ -1036,6 +1036,11 @@ export default function App() {
       setPairErr("Bitte den 6-stelligen Code eingeben");
       return;
     }
+    // authHeaders() sendet das Token nur über HTTPS — Kopplung über HTTP wäre sinnlos.
+    if (!serverUrl.startsWith("https://")) {
+      setPairErr("Kopplung nur über HTTPS möglich");
+      return;
+    }
     setPairBusy(true);
     setPairErr("");
     // 15 s Timeout: ein hängender Request darf die Kopplung nicht blockieren.
@@ -1584,9 +1589,18 @@ export default function App() {
             .catch(() => {}); // Klartext behalten — nächster Start migriert erneut
         }
       }
-      // Ohne Geräte-Token: Kopplungs-Schirm zeigen (Server verlangt Token,
-      // sobald AUTH_REQUIRED=1 gesetzt ist).
-      if (!savedToken) setPairGate(true);
+      // Ohne Geräte-Token: nur blockieren, wenn der Server Token WIRKLICH verlangt
+      // (AUTH_REQUIRED=1 laut /api/health). Sonst bliebe die App vor dem
+      // Scharfschalten unnötig hinter dem Kopplungs-Schirm hängen.
+      if (!savedToken) {
+        try {
+          const res = await fetch(serverUrl.replace(/\/+$/, "") + "/api/health");
+          const health: any = await res.json().catch(() => ({}));
+          if (health?.authRequired) setPairGate(true);
+        } catch {
+          // Server nicht erreichbar → kein Gate; der Chat zeigt den Fehler.
+        }
+      }
       try {
         const savedCwd = await AsyncStorage.getItem(CWD_KEY);
         if (savedCwd) {
@@ -4670,6 +4684,9 @@ export default function App() {
             <Pressable style={styles.pairButton} onPress={submitPairCode} disabled={pairBusy} accessibilityRole="button" accessibilityLabel="Koppeln">
               <Text style={styles.pairButtonText}>{pairBusy ? "Koppeln …" : "Koppeln"}</Text>
             </Pressable>
+            <Pressable onPress={() => setPairGate(false)} style={styles.pairSkip} accessibilityRole="button" accessibilityLabel="Später koppeln">
+              <Text style={styles.pairSkipText}>Später</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -5063,4 +5080,6 @@ const styles = StyleSheet.create({
   pairError: { fontSize: 13, color: "#ff8a8a" },
   pairButton: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 13, alignItems: "center", marginTop: 4 },
   pairButtonText: { color: "#ffffff", fontWeight: "700", fontSize: 15 },
+  pairSkip: { alignItems: "center", paddingVertical: 6 },
+  pairSkipText: { color: colors.muted, fontSize: 13 },
 });
