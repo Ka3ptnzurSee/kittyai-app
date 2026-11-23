@@ -1242,11 +1242,6 @@ export function isRestartErrorText(text?: string): boolean {
 }
 
 /**
- * Erste Komponente aus einem React-`componentStack` ("   in Dil (at Dil.tsx:1200)").
- * Wird von der Fehler-Grenze (SichererBlock) für die Telemetrie genutzt — bewusst
- * hier in lib.ts, damit es ohne React-Native-Laufzeit testbar ist.
- */
-/**
  * Secrets/PII aus Fehlertexten entfernen, BEVOR sie das Gerät verlassen.
  *
  * Review-Fund 23.11.2026 (security-reviewer, gemessen): eine reine Denylist
@@ -1262,8 +1257,17 @@ export function redigiere(text: string): string {
   let s = String(text ?? "");
   // 1) Werte nach Schlüsselwort: token=…, "password": …, Authorization: Bearer …
   s = s.replace(/(token|secret|passwort|password|passwd|pw|apikey|api[-_]key|key|bearer|authorization)[\s"']*[=:][\s"']*\S+/gi, "$1=#");
-  // 2) Wörter mit Token-Charakter: JWT-Segmente, Base64 (inkl. + / = .), Hashes
-  s = s.replace(/[A-Za-z0-9+/=_.-]{20,}/g, (m) => (/[0-9]/.test(m) && /[A-Za-z]/.test(m) ? "#tok" : m));
+  // 2) Wörter mit Token-Charakter: JWT-Segmente, Base64 (inkl. + / = .), Hashes.
+  //    Kein Ziffern-Zwang mehr: sonst überlebte ein 200-Zeichen-Buchstabentoken die
+  //    Redaktion und wurde vom 160-Zeichen-Cap nur halb abgeschnitten (Review 23.11.2026).
+  s = s.replace(/[A-Za-z0-9+/=_.-]{20,}/g, "#tok");
+  // 2b) Hex-Hashes ab 16 Zeichen (oft ohne Ziffer+Buchstaben-Mix erkannt)
+  s = s.replace(/\b[0-9a-f]{16,}\b/gi, "#tok");
+  // 2c) PII: IP, E-Mail, Telefon, Home-Pfade mit Benutzernamen
+  s = s.replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "#ip");
+  s = s.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "#mail");
+  s = s.replace(/\+?\d[\d /()-]{7,}\d/g, "#nr");
+  s = s.replace(/\/(?:Users|home)\/[^\s"']+/g, "#pfad");
   // 3) JSON-/Quoted-Werte
   s = s.replace(/"[^"]{8,}"/g, '"#"');
   // 4) Whitelist: alles außer Buchstaben (inkl. Umlaute), Ziffern und dieser Satzzeichen raus
@@ -1271,6 +1275,11 @@ export function redigiere(text: string): string {
   return s.replace(/\s{2,}/g, " ").trim();
 }
 
+/**
+ * Erste Komponente aus einem React-`componentStack` ("   in Dil (at Dil.tsx:1200)").
+ * Wird von der Fehler-Grenze (SichererBlock) für die Telemetrie genutzt — bewusst
+ * hier in lib.ts, damit es ohne React-Native-Laufzeit testbar ist.
+ */
 export function firstFrame(componentStack?: string): string {
   // Längen-Cap VOR dem Split: ein riesiger componentStack würde sonst im Crash-Pfad
   // viele MB Zeilen-Array allokieren (Review-Fund 23.11.2026).

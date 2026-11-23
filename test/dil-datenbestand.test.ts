@@ -183,6 +183,21 @@ test("redigiere entfernt Tokens/Secrets aus Fehlertexten", () => {
     }
     assert.ok(!/[<>{}"'\\]/.test(r), `Sonderzeichen müssen gefiltert sein: "${r}"`);
   }
+  // Zweite Runde (security-reviewer, gemessen): PII, Hex-Hashes ohne Buchstaben-Mix,
+  // kurze Tokens und lange Buchstabentokens dürfen ebenfalls nicht durchrutschen.
+  const runde2: Array<[string, string]> = [
+    ["verbinde 192.168.1.10:8080", "192.168"],
+    ["mail an max.mustermann@example.de", "max.mustermann"],
+    ["pfad /Users/per.heinemann/Library/x", "per.heinemann"],
+    ["hash 9f8e7d6c5b4a3f1e9d", "9f8e7d6c5b4a3f1e9d"],
+    ["token " + "a".repeat(200), "a".repeat(40)],
+    ["kontakt +49 171 1234567", "1234567"],
+  ];
+  for (const [eingabe, verboten] of runde2) {
+    const r = redigiere(eingabe);
+    assert.ok(!r.includes(verboten), `"${verboten}" muss entfernt sein (aus "${eingabe}" wurde "${r}")`);
+  }
+
   // Nützliche Informatik bleibt lesbar
   assert.match(redigiere("TypeError: Cannot read property x of undefined (at App.tsx:42)"), /TypeError/);
 });

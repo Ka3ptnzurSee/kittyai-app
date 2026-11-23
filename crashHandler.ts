@@ -58,23 +58,38 @@ function telemetrieHeaders(base: string): Record<string, string> {
  * Zusätzlich harter Deckel pro App-Lauf gegen Fehlerstürme.
  */
 const bereitsGemeldet = new Set<string>();
+/** Gerade unterwegs — verhindert doppelte POSTs für denselben Fehler im selben Flug. */
+const unterwegs = new Set<string>();
 const MAX_SENDS = 20;
 let sends = 0;
 
+/**
+ * Zählt nur ERFOLGREICH gesendete Meldungen. Vorher zählte der Zähler Versuche: 20
+ * fehlgeschlagene POSTs (App startet offline) erschöpften das Budget für den ganzen Lauf,
+ * ein echter fataler Crash danach ging verloren (Review-Fund 23.11.2026).
+ */
 function darfSenden(schluessel: string): boolean {
-  if (bereitsGemeldet.has(schluessel) || sends >= MAX_SENDS) return false;
-  sends += 1;
+  if (bereitsGemeldet.has(schluessel) || unterwegs.has(schluessel) || sends >= MAX_SENDS) return false;
+  unterwegs.add(schluessel);
   return true;
 }
 
 function alsGesendetMerken(schluessel: string): void {
-  // LRU statt clear(): bei >200 verschiedenen Texten würde ein clear() die Dedup komplett
-  // verlieren und jeden Fehler erneut posten (Review-Fund 23.11.2026).
-  if (bereitsGemeldet.size >= 200) {
+  unterwegs.delete(schluessel);
+  sends += 1;
+  // LRU statt clear(): bei vielen verschiedenen Texten würde ein clear() die Dedup komplett
+  // verlieren und jeden Fehler erneut posten. Schwelle = MAX_SENDS, weil mehr Schlüssel
+  // ohnehin nie gemerkt werden können.
+  if (bereitsGemeldet.size >= MAX_SENDS) {
     const aeltester = bereitsGemeldet.values().next().value;
     if (aeltester) bereitsGemeldet.delete(aeltester);
   }
   bereitsGemeldet.add(schluessel);
+}
+
+/** Fehlversuch: Schlüssel wieder freigeben, damit ein späterer Versuch es noch schafft. */
+function alsFehlgeschlagenMerken(schluessel: string): void {
+  unterwegs.delete(schluessel);
 }
 
 function starteMeldung(base: string, koerper: Record<string, unknown>, schluessel: string): void {
@@ -85,9 +100,11 @@ function starteMeldung(base: string, koerper: Record<string, unknown>, schluesse
   })
     .then((res) => {
       if (res && res.ok) alsGesendetMerken(schluessel);
+      else alsFehlgeschlagenMerken(schluessel);
     })
     .catch(() => {
-      /* Telemetrie darf nie stören */
+      /* Telemetrie darf nie stören — aber der Schlüssel bleibt nicht als "unterwegs" hängen */
+      alsFehlgeschlagenMerken(schluessel);
     });
 }
 
@@ -178,7 +195,6 @@ export function installGlobalErrorHandlers(getBase?: () => string, getToken?: ()
   if (getBase) getBaseFn = getBase;
   if (getToken) getTokenFn = getToken;
   if (installed) return;
-  installed = true;
 
   const g = globalThis as unknown as {
     ErrorUtils?: {
@@ -190,5 +206,8 @@ export function installGlobalErrorHandlers(getBase?: () => string, getToken?: ()
   if (ErrorUtils && typeof ErrorUtils.setGlobalHandler === "function") {
     prevHandler = ErrorUtils.getGlobalHandler ? ErrorUtils.getGlobalHandler() : null;
     ErrorUtils.setGlobalHandler(handler);
+    // Erst NACH erfolgreicher Installation markieren: fehlt ErrorUtils beim ersten Aufruf
+    // (z. B. sehr früher Start), darf ein späterer Aufruf es erneut versuchen.
+    installed = true;
   }
 }
