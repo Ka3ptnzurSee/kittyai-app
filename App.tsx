@@ -1176,7 +1176,7 @@ export default function App() {
       // Harter Deckel auf den Apple-Dialog: sonst bleibt der Lock bei einem
       // haengenden System-Dialog stehen und ein zweiter Tausch koennte parallel
       // laufen (Keychain-Race). Race -> Reject mit AbortError.
-      let signInTimer: any = null;
+      let signInTimer: ReturnType<typeof setTimeout> | null = null;
       const cred: any = await Promise.race([
         AppleAuthentication.signInAsync({
           requestedScopes: [
@@ -1186,7 +1186,13 @@ export default function App() {
         }),
         new Promise((_, reject) => {
           signInTimer = setTimeout(
-            () => reject(Object.assign(new Error("Apple-Dialog Zeitüberschreitung"), { name: "AbortError" })),
+            () =>
+              reject(
+                Object.assign(new Error("Apple-Dialog antwortet nicht"), {
+                  // Eigener Name: nicht mit dem fetch-Abbruch (AbortError) verwechseln.
+                  name: "AppleSignInTimeout",
+                }),
+              ),
             SIGN_IN_TIMEOUT_MS,
           );
         }),
@@ -1241,6 +1247,9 @@ export default function App() {
       // Nutzer hat den Apple-Dialog abgebrochen: keine Fehlermeldung noetig.
       if (e?.code === "ERR_REQUEST_CANCELED" || e?.code === "ERR_CANCELED") {
         setPairErr("");
+      } else if (e?.name === "AppleSignInTimeout") {
+        // Der Server wurde hier nie kontaktiert - nicht "nicht erreichbar" melden.
+        setPairErr("Apple-Dialog antwortet nicht — bitte erneut versuchen");
       } else if (e?.name === "AbortError") {
         setPairErr("Zeitüberschreitung — Server nicht erreichbar");
       } else {
