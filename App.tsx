@@ -1038,12 +1038,16 @@ export default function App() {
     }
     setPairBusy(true);
     setPairErr("");
+    // 15 s Timeout: ein hängender Request darf die Kopplung nicht blockieren.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15_000);
     try {
       const base = serverUrl.replace(/\/+$/, "");
       const res = await fetch(base + "/api/pair/claim", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code, name: pairName.trim() || "Geraet", platform: Platform.OS }),
+        signal: ac.signal,
       });
       const data: any = await res.json().catch(() => ({}));
       if (!res.ok || !data?.token) {
@@ -1053,11 +1057,21 @@ export default function App() {
       setApiToken(String(data.token));
       setPairGate(false);
       setPairCode("");
-      SecureStore.setItemAsync(TOKEN_KEY, String(data.token), { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }).catch(() => {});
-      AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+      // Token NUR in den Keychain. AsyncStorage (Klartext) ausschließlich als
+      // Fallback, wenn SecureStore nicht verfügbar ist — und dann nur einmalig.
+      const saved = await SecureStore.setItemAsync(TOKEN_KEY, String(data.token), {
+        keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+      }).then(() => true).catch(() => false);
+      if (saved) {
+        AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
+      } else {
+        AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+      }
     } catch (e: any) {
-      setPairErr("Netzwerkfehler: " + (e?.message || String(e)));
+      const aborted = e?.name === "AbortError";
+      setPairErr(aborted ? "Zeitüberschreitung — Server nicht erreichbar" : "Netzwerkfehler: " + (e?.message || String(e)));
     } finally {
+      clearTimeout(timer);
       setPairBusy(false);
     }
   }, [pairCode, pairName, serverUrl]);
@@ -1070,6 +1084,8 @@ export default function App() {
     setUsageLoading(true);
     try {
       const res = await fetch(`${base}/api/usage${q ? "?" + q : ""}`, { headers: authHeaders() });
+      // Token widerrufen/ungültig → Kopplungs-Schirm statt stiller Fehler
+      if (res.status === 401) setPairGate(true);
       if (!res.ok) return;
       const d = await res.json();
       if (!d || d.ok !== true) return;
