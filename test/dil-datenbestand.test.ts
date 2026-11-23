@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { splitDilBlocks, dilInhaltHash, dilNeuSeeden } from "../dil.ts";
-import { firstFrame } from "../lib.ts";
+import { firstFrame, redigiere } from "../lib.ts";
 
 /**
  * Datenbestand-Reproduktion für den Absturz am 23.11.2026 (Build 132).
@@ -109,12 +109,15 @@ test("Hash ist bei Riesenbäumen begrenzt und crasht nicht", () => {
   const t0 = performance.now();
   const h = dilInhaltHash(gross);
   const ms = performance.now() - t0;
-  assert.match(h, /^\d+:[a-z0-9]+:[a-z0-9]+$/);
+  assert.match(h, /^\d+:[a-z0-9]+$/);
   assert.ok(ms < 60, `Hash dauerte ${ms.toFixed(1)} ms`);
   // zyklische Struktur darf nicht werfen
   const zyklisch: Record<string, unknown> = { type: "X" };
   zyklisch.self = zyklisch;
-  assert.equal(dilInhaltHash(zyklisch), "unserialisierbar");
+  assert.match(dilInhaltHash(zyklisch), /^\d+:[a-z0-9]+$/, "zyklischer Baum muss einen echten Hash liefern");
+  const zyklisch2: Record<string, unknown> = { type: "Y" };
+  zyklisch2.self = zyklisch2;
+  assert.notEqual(dilInhaltHash(zyklisch), dilInhaltHash(zyklisch2), "zwei verschiedene zyklische Bäume dürfen nicht kollidieren");
 });
 
 test("Hash sieht auch Änderungen am ENDE (nicht nur am Kopf)", () => {
@@ -142,4 +145,44 @@ test("alle echten Fences liefern stabile Hashes (kein Flackern)", () => {
     const b = dilInhaltHash(JSON.parse(body));
     assert.equal(a, b);
   }
+});
+
+test("Hash deckt auch die MITTE langer Bäume ab (nicht nur Kopf und Schwanz)", () => {
+  // Review-Fund 23.11.2026: mit nur Kopf+Schwanz blieb der Mittelteil ungehasht; bei n=8001
+  // fiel sogar Index 4000 in die Lücke. Eine geänderte Zelle mitten in einer langen Tabelle
+  // hätte keinen Reseed ausgelöst.
+  const baue = (mitte: string) => {
+    const zellen = Array.from({ length: 1200 }, (_, i) => "zelle" + i);
+    zellen[600] = mitte;
+    return { type: "Table", props: { rows: zellen.map((z) => [z, "x"]) } };
+  };
+  const a = baue("MITTE-ALT");
+  const b = baue("MITTE-NEU");
+  assert.ok(JSON.stringify(a).length > 12_000);
+  assert.notEqual(dilInhaltHash(a), dilInhaltHash(b), "Änderung in der Mitte muss sichtbar sein");
+});
+
+test("redigiere entfernt Tokens/Secrets aus Fehlertexten", () => {
+  // Gemessene Fälle des security-reviewers: die alte Denylist ließ 9 von 10 unverändert.
+  const faelle = [
+    "401 Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig",
+    '{"token":"s3cr3t"}',
+    "GET /api/x?token=abc123def",
+    "basic dXNlcjpwYXNz+ZGF0YQ==",
+    "sk-live-4f3c/8ab+9de=",
+    "client_secret: 9f8e7d6c5b4a",
+    "pw=Hunter2!",
+    'Authorization: Bearer abcdefghijklmnopqrstuvwx',
+    "<script>alert(1)</script>",
+    "Fehler\u202Emit\u202DBidi",
+  ];
+  for (const f of faelle) {
+    const r = redigiere(f);
+    for (const verboten of ["s3cr3t", "Hunter2", "abc123def", "9f8e7d6c5b4a", "dXNlcjpwYXNz", "eyJhbGciOiJIUzI1NiJ9", "<script>", "\u202E"]) {
+      assert.ok(!r.includes(verboten), `"${verboten}" muss aus "${r}" (Quelle: ${f}) entfernt sein`);
+    }
+    assert.ok(!/[<>{}"'\\]/.test(r), `Sonderzeichen müssen gefiltert sein: "${r}"`);
+  }
+  // Nützliche Informatik bleibt lesbar
+  assert.match(redigiere("TypeError: Cannot read property x of undefined (at App.tsx:42)"), /TypeError/);
 });

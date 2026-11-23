@@ -1,4 +1,5 @@
 import Constants from "expo-constants";
+import { redigiere } from "./lib";
 
 /**
  * Globaler Crash-Handler (Telemetrie).
@@ -24,22 +25,24 @@ let getTokenFn: (() => string) | null = null;
 let prevHandler: ((error: unknown, isFatal?: boolean) => void) | null = null;
 
 /**
- * Secrets/PII aus Fehlertexten entfernen, bevor sie das Gerät verlassen.
- * Review-Fund 23.11.2026: Fehlermeldungen enthalten teils Server-Antworten mit URLs
- * (inkl. Query-Parametern) oder langen Tokens — die haben in der Telemetrie nichts zu suchen.
+ * Origin, an die das Geräte-Token gehen darf. `serverUrl` kommt aus `detectBase()` und kann
+ * über `Constants.expoConfig.hostUri` auf einen Expo-/ngrok-Tunnel zeigen — dorthin darf
+ * das Token NICHT (Review-Fund 23.11.2026).
  */
-function redigiere(text: string): string {
-  return String(text || "")
-    .replace(/https?:\/\/\S+/gi, "#url")
-    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, "#tok");
-}
+const TOKEN_ORIGIN = "https://hashtagweinboehla.de";
 
-/** Header für Telemetrie — Token nur mitsenden, wenn die App eins hat. */
-function telemetrieHeaders(): Record<string, string> {
+/** Header für Telemetrie — Token nur mitsenden, wenn die App eins hat UND der Origin passt. */
+function telemetrieHeaders(base: string): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   try {
     const token = getTokenFn ? getTokenFn() : "";
-    if (token) headers["X-API-Token"] = token;
+    let originPasst = false;
+    try {
+      originPasst = new URL(base).origin === TOKEN_ORIGIN;
+    } catch {
+      originPasst = false;
+    }
+    if (token && originPasst) headers["X-API-Token"] = token;
   } catch {
     /* ohne Token senden ist besser als gar nicht melden */
   }
@@ -49,13 +52,43 @@ function telemetrieHeaders(): Record<string, string> {
 /**
  * Einmal-Guard: dieselbe Meldung (Bereich + Text) nur EINMAL pro App-Lauf senden.
  * Ohne das postet jedes „Erneut versuchen" und jedes FlatList-Remount denselben Fehler erneut.
+ *
+ * Der Schlüssel wird erst NACH einer erfolgreichen Antwort gemerkt — sonst gilt eine
+ * offline/401/500 verschluckte Meldung als gesendet und geht endgültig verloren.
+ * Zusätzlich harter Deckel pro App-Lauf gegen Fehlerstürme.
  */
 const bereitsGemeldet = new Set<string>();
-function einmalig(schluessel: string): boolean {
-  if (bereitsGemeldet.has(schluessel)) return false;
-  if (bereitsGemeldet.size > 200) bereitsGemeldet.clear();
-  bereitsGemeldet.add(schluessel);
+const MAX_SENDS = 20;
+let sends = 0;
+
+function darfSenden(schluessel: string): boolean {
+  if (bereitsGemeldet.has(schluessel) || sends >= MAX_SENDS) return false;
+  sends += 1;
   return true;
+}
+
+function alsGesendetMerken(schluessel: string): void {
+  // LRU statt clear(): bei >200 verschiedenen Texten würde ein clear() die Dedup komplett
+  // verlieren und jeden Fehler erneut posten (Review-Fund 23.11.2026).
+  if (bereitsGemeldet.size >= 200) {
+    const aeltester = bereitsGemeldet.values().next().value;
+    if (aeltester) bereitsGemeldet.delete(aeltester);
+  }
+  bereitsGemeldet.add(schluessel);
+}
+
+function starteMeldung(base: string, koerper: Record<string, unknown>, schluessel: string): void {
+  fetch(`${base}/api/client-error`, {
+    method: "POST",
+    headers: telemetrieHeaders(base),
+    body: JSON.stringify(koerper),
+  })
+    .then((res) => {
+      if (res && res.ok) alsGesendetMerken(schluessel);
+    })
+    .catch(() => {
+      /* Telemetrie darf nie stören */
+    });
 }
 
 function report(detail: string, fatal: boolean): void {
@@ -63,21 +96,20 @@ function report(detail: string, fatal: boolean): void {
     const base = (getBaseFn ? getBaseFn() : "https://hashtagweinboehla.de/kittyai").replace(/\/+$/, "");
     if (!base) return;
     const text = `${fatal ? "fatal " : ""}${redigiere(detail)}`.slice(0, 160);
-    if (!einmalig(`js|${text}`)) return;
-    fetch(`${base}/api/client-error`, {
-      method: "POST",
-      headers: telemetrieHeaders(),
-      body: JSON.stringify({
+    const schluessel = `js|${text}`;
+    if (!darfSenden(schluessel)) return;
+    starteMeldung(
+      base,
+      {
         kind: "js_crash",
         source: "global",
         phase: "app",
         chatId: "",
         appVersion: APP_VERSION,
         detail: text,
-      }),
-    }).catch(() => {
-      /* Telemetrie darf nie stören */
-    });
+      },
+      schluessel,
+    );
   } catch {
     /* ignorieren */
   }
@@ -106,21 +138,20 @@ export function meldeRenderFehler(detail: string, bereich: string): void {
     if (!base) return;
     const ort = String(bereich || "unbekannt").slice(0, 40);
     const text = redigiere(detail).slice(0, 160);
-    if (!einmalig(`render|${ort}|${text}`)) return;
-    fetch(`${base}/api/client-error`, {
-      method: "POST",
-      headers: telemetrieHeaders(),
-      body: JSON.stringify({
+    const schluessel = `render|${ort}|${text}`;
+    if (!darfSenden(schluessel)) return;
+    starteMeldung(
+      base,
+      {
         kind: "render_crash",
         source: "boundary",
         phase: ort,
         chatId: "",
         appVersion: APP_VERSION,
         detail: text,
-      }),
-    }).catch(() => {
-      /* Telemetrie darf nie stören */
-    });
+      },
+      schluessel,
+    );
   } catch {
     /* ignorieren */
   }

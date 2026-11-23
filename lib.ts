@@ -1246,6 +1246,31 @@ export function isRestartErrorText(text?: string): boolean {
  * Wird von der Fehler-Grenze (SichererBlock) für die Telemetrie genutzt — bewusst
  * hier in lib.ts, damit es ohne React-Native-Laufzeit testbar ist.
  */
+/**
+ * Secrets/PII aus Fehlertexten entfernen, BEVOR sie das Gerät verlassen.
+ *
+ * Review-Fund 23.11.2026 (security-reviewer, gemessen): eine reine Denylist
+ * (URLs + 24-Zeichen-Alnum) ließ 9 von 10 echten Fällen unverändert —
+ * `Bearer eyJ…`, `{"token":"s3cr3t"}`, `?token=abc123def`, `basic dXNlcjpwYXNz+…`,
+ * `sk-live-4f3c/8ab+9de=`, `client_secret: 9f8e…`, `pw=Hunter2!`.
+ * Deshalb umgekehrt: erst gezielt Werte nach Schlüsselworten/JWT/Base64 ersetzen,
+ * am Ende auf eine Zeichen-WHITELIST filtern (wirft Quotes, Backslashes, Klammern,
+ * Bidi-/Unicode-Tag-Zeichen weg — damit ist auch Injection in ein künftiges
+ * Dashboard unmöglich).
+ */
+export function redigiere(text: string): string {
+  let s = String(text ?? "");
+  // 1) Werte nach Schlüsselwort: token=…, "password": …, Authorization: Bearer …
+  s = s.replace(/(token|secret|passwort|password|passwd|pw|apikey|api[-_]key|key|bearer|authorization)[\s"']*[=:][\s"']*\S+/gi, "$1=#");
+  // 2) Wörter mit Token-Charakter: JWT-Segmente, Base64 (inkl. + / = .), Hashes
+  s = s.replace(/[A-Za-z0-9+/=_.-]{20,}/g, (m) => (/[0-9]/.test(m) && /[A-Za-z]/.test(m) ? "#tok" : m));
+  // 3) JSON-/Quoted-Werte
+  s = s.replace(/"[^"]{8,}"/g, '"#"');
+  // 4) Whitelist: alles außer Buchstaben (inkl. Umlaute), Ziffern und dieser Satzzeichen raus
+  s = s.replace(/[^A-Za-z0-9äöüÄÖÜß .,:;/()_+#@!?%\-]/g, " ");
+  return s.replace(/\s{2,}/g, " ").trim();
+}
+
 export function firstFrame(componentStack?: string): string {
   // Längen-Cap VOR dem Split: ein riesiger componentStack würde sonst im Crash-Pfad
   // viele MB Zeilen-Array allokieren (Review-Fund 23.11.2026).

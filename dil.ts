@@ -859,23 +859,36 @@ export function cellWert(knoten: unknown, tiefe = 0): string {
 export function dilInhaltHash(json: unknown): string {
   let s: string;
   try {
-    s = JSON.stringify(json) ?? "";
+    // Zyklen mit Marker serialisieren statt zu werfen: ein zyklischer Baum bekam vorher den
+    // konstanten String "unserialisierbar", zwei VERSCHIEDENE zyklische Bäume kollidierten und
+    // ein Reseed blieb aus (Review-Fund 23.11.2026).
+    const gesehen = new WeakSet<object>();
+    s =
+      JSON.stringify(json, (_k, v) => {
+        if (v && typeof v === "object") {
+          if (gesehen.has(v as object)) return "[zyklisch]";
+          gesehen.add(v as object);
+        }
+        return v as unknown;
+      }) ?? "";
   } catch {
+    // Nur noch Nicht-Serialisierbares (z. B. BigInt): stabiler Ersatzwert.
     return "unserialisierbar";
   }
-  // Achtung (Review-Fund 23.11.2026): NUR den Anfang zu hashen macht Änderungen am Ende
-  // unsichtbar — zwei Bäume mit gleichem Kopf und unterschiedlichem Schwanz ergaben
-  // denselben Hash, der neue DIL-Zustand wurde dann nie geseedet (Slider/Select blieben
-  // auf dem alten Wert). Deshalb Kopf UND Schwanz hashen, plus Gesamtlänge: ein 5-MB-Baum
-  // kostet so weiterhin nur 2×4000 Zeichen pro Render.
-  const n = s.length;
-  const kopfEnde = n > 8_000 ? 4_000 : n;
-  const schwanzStart = n > 8_000 ? n - 4_000 : kopfEnde;
-  let hKopf = 5381;
-  for (let i = 0; i < kopfEnde; i++) hKopf = ((hKopf << 5) + hKopf + s.charCodeAt(i)) | 0;
-  let hSchwanz = 5381;
-  for (let i = schwanzStart; i < n; i++) hSchwanz = ((hSchwanz << 5) + hSchwanz + s.charCodeAt(i)) | 0;
-  return `${n}:${(hKopf >>> 0).toString(36)}:${(hSchwanz >>> 0).toString(36)}`;
+  // Vollständig hashen statt Stichproben: der Hash läuft NUR bei geändertem JSON-Objekt
+  // (Gate model.json !== json), nicht pro Render. Stichproben (Kopf/Mitte/Schwanz) hatten
+  // eine strukturelle Lücke — eine Änderung zwischen den Stützstellen blieb unsichtbar und
+  // der DIL-Zustand wurde nicht neu geseedet (Review-Fund 23.11.2026, gemessen).
+  // Deckel erst bei absurden Größen (MAX_RESOLVED_NODES = 10.000 Knoten liegen weit darunter).
+  const grenze = 500_000;
+  let h = 5381;
+  const bis = s.length > grenze ? grenze : s.length;
+  for (let i = 0; i < bis; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  if (s.length > grenze) {
+    // Rest am Ende wenigstens anteilig einbeziehen, damit ein geänderter Schlusswert zählt.
+    for (let i = Math.max(bis, s.length - 4_000); i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return `${s.length}:${(h >>> 0).toString(36)}`;
 }
 
 /** Muss der Runtime-Zustand neu geseedet werden? (gleicher Inhalt → nein) */

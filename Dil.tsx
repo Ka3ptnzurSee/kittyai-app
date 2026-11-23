@@ -11,7 +11,7 @@ import {
   View,
 } from "react-native";
 import type { ResolvedNode } from "./dil";
-import { splitDilBlocks, resolveDilRoot, isSafeImageSrc, sliderWert, cellWert, dilNeuSeeden } from "./dil";
+import { splitDilBlocks, resolveDilRoot, isSafeImageSrc, sliderWert, cellWert, dilNeuSeeden, dilInhaltHash } from "./dil";
 import { absoluteImageUri, getImageBaseUrl } from "./lib";
 import { BildMitVollbild } from "./BildAnsicht";
 import { Markdown } from "./Markdown";
@@ -1234,15 +1234,21 @@ function useRuntime(json: unknown, onAction?: (text: string, name: string) => vo
   // jsonRef merkt sich die ZULETZT GESEHENE Identität — unabhängig davon, ob geseedet
   // wurde. Sonst bliebe model.json !== json dauerhaft wahr und der Hash (inkl. vollem
   // JSON.stringify) liefe in jedem Render (Review-Fund: 0,21 ms/Render ohne Nutzen).
+  // hashRef startet mit dem Hash des INITIALEN Baums: sonst würde der erste
+  // Identitätswechsel (z. B. Verlauf-Refresh mit neu geparsten, inhaltsgleichen Blöcken)
+  // immer neu seeden und Slider/Select auf Default zurückwerfen (Review-Fund 23.11.2026).
   const hashRef = useRef<string | null>(null);
-  const jsonRef = useRef(json);
-  if (jsonRef.current !== json) {
-    jsonRef.current = json;
+  if (hashRef.current === null) hashRef.current = dilInhaltHash(json);
+  if (model.json !== json) {
     const pruefung = dilNeuSeeden(hashRef.current, json);
     if (pruefung.neu) {
       hashRef.current = pruefung.hash;
       const seed = extractRuntimeSeed(json);
       setModel({ json, rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) } });
+    } else {
+      // Gleicher Inhalt, neues Objekt: nur die Referenz nachziehen (State-basiert, damit die
+      // Bedingung oben beim nächsten Render false ist und StrictMode-Doppelrender nichts verliert).
+      setModel((m) => (m.json === json ? m : { ...m, json }));
     }
   }
 
