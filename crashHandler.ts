@@ -45,17 +45,48 @@ function report(detail: string, fatal: boolean): void {
   }
 }
 
-function handler(error: unknown, isFatal?: boolean): void {
+/**
+ * Fehler kompakt für die Telemetrie beschreiben (max. 160 Zeichen):
+ * Meldung + erster Stack-Frame (der Ort) — bewusst ohne Nachrichtentexte.
+ */
+export function beschreibeFehler(error: unknown): string {
   try {
     const e = error as { message?: string; stack?: string };
     const msg = e && typeof e.message === "string" ? e.message : String(error);
     const stack = e && typeof e.stack === "string" ? e.stack : "";
-    // Meldung + kurzer Stack-Ausschnitt (erste Zeile = Ort des Fehlers).
     const line = stack.split("\n").filter(Boolean)[1] || "";
-    report(`${msg} | ${line}`.slice(0, 160), Boolean(isFatal));
+    return `${msg} | ${line}`.slice(0, 160);
+  } catch {
+    return "unbekannter Fehler";
+  }
+}
+
+/** Beliebigen Render-Fehler melden (ErrorBoundary) — Kategorie + Ort, kein Inhalt. */
+export function meldeRenderFehler(detail: string, bereich: string): void {
+  try {
+    const base = (getBaseFn ? getBaseFn() : "https://hashtagweinboehla.de/kittyai").replace(/\/+$/, "");
+    if (!base) return;
+    fetch(`${base}/api/client-error`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind: "render_crash",
+        source: "boundary",
+        phase: String(bereich || "unbekannt").slice(0, 40),
+        chatId: "",
+        appVersion: APP_VERSION,
+        detail: String(detail || "").slice(0, 160),
+      }),
+    }).catch(() => {
+      /* Telemetrie darf nie stören */
+    });
   } catch {
     /* ignorieren */
   }
+}
+
+function handler(error: unknown, isFatal?: boolean): void {
+  report(beschreibeFehler(error), Boolean(isFatal));
   // Original-Verhalten (RedBox im Dev, Absturz in Prod) NICHT unterdrücken.
   if (prevHandler) {
     try {

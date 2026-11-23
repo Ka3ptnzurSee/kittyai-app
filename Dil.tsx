@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   Animated,
   Image,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -10,10 +11,12 @@ import {
   View,
 } from "react-native";
 import type { ResolvedNode } from "./dil";
-import { splitDilBlocks, resolveDilRoot, isSafeImageSrc } from "./dil";
+import { splitDilBlocks, resolveDilRoot, isSafeImageSrc, sliderWert, cellWert, dilNeuSeeden } from "./dil";
+import { absoluteImageUri, getImageBaseUrl } from "./lib";
+import { BildMitVollbild } from "./BildAnsicht";
 import { Markdown } from "./Markdown";
 import { MathView } from "./MathView";
-import Svg, { Path, Polyline, Circle, Line as SvgLine, Text as SvgText } from "react-native-svg";
+import Svg, { Path, Polyline, Circle, Line as SvgLine, Text as SvgText, Defs, LinearGradient, Stop } from "react-native-svg";
 import { normalizeChart, computePieSlices, classifyDiff } from "./dilviz";
 import type { ChartPoint } from "./dilviz";
 import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
@@ -96,6 +99,25 @@ function getProp(props: Props, name: string, fallback?: unknown): unknown {
   if (Object.prototype.hasOwnProperty.call(props, name)) return props[name];
   if (Object.prototype.hasOwnProperty.call(props, "$" + name)) return props["$" + name];
   return fallback;
+}
+
+// TableRow/TableCell-Bauform in rows/columns uebersetzen.
+// Ohne das rendert eine Tabelle leer, die in children-Form gebaut wurde (Befund 23.11.2026).
+// rowSpan/colSpan werden bewusst nicht uebernommen - die children-Form ist ein Fallback,
+// echte Spaltenstruktur gehoert in props.rows.
+
+export function tabelleAusKindern(kinder: unknown[], maxZeilen = 50): { columns: string[]; rows: string[][]; gesamt: number } {
+  const alleZeilen = kinder.filter((k) => /^Table(Row|Header)$/.test(String((k as { type?: string })?.type || '')));
+  // Header zuerst aus der GESAMTEN Liste ziehen - sonst geht er verloren, wenn er hinter dem Fenster liegt
+  const kopfKnoten = alleZeilen.find((z) => String((z as { type?: string }).type) === 'TableHeader') as { children?: unknown[] } | undefined;
+  const alleDaten = alleZeilen.filter((z) => String((z as { type?: string }).type) !== 'TableHeader');
+  const zeilen = alleDaten.slice(0, maxZeilen);
+  const grid = zeilen.map((z) => {
+    const zk = Array.isArray((z as { children?: unknown[] }).children) ? (z as { children: unknown[] }).children : [];
+    return zk.slice(0, 50).map((c) => cellWert(c));
+  });
+  const kopf = kopfKnoten && Array.isArray(kopfKnoten.children) ? kopfKnoten.children.slice(0, 50).map((c) => cellWert(c)) : [];
+  return { columns: kopf, rows: grid, gesamt: alleDaten.length };
 }
 
 function str(v: unknown, fallback = ""): string {
@@ -217,7 +239,7 @@ function CheckboxWidget({ props }: { props: Props }) {
     if (typeof checkedProp === "boolean") setChecked(checkedProp);
   }, [checkedProp]);
   return (
-    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked }} accessibilityLabel={t(getProp(props, "label"), "Auswahl")}
+    <Pressable accessibilityRole="checkbox" accessibilityState={{ checked }} aria-checked={checked} accessibilityLabel={t(getProp(props, "label"), "Auswahl")}
       style={styles.checkboxRow}
       onPress={() => {
         const next = !checked;
@@ -249,7 +271,7 @@ function RadioGroupWidget({ props }: { props: Props }) {
         const val = typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, label);
         const active = value === val;
         return (
-          <Pressable accessibilityRole="radio" accessibilityState={{ selected: active }} accessibilityLabel={t(o, "?")}
+          <Pressable accessibilityRole="radio" accessibilityState={{ selected: active }} aria-checked={active} accessibilityLabel={t(o, "?")}
             key={i}
             style={styles.checkboxRow}
             onPress={() => {
@@ -264,6 +286,82 @@ function RadioGroupWidget({ props }: { props: Props }) {
           </Pressable>
         );
       })}
+    </View>
+  );
+}
+
+/** Zahl mit fester Nachkommastellenzahl, ohne Float-Artefakte (0.3 statt 0.30000000000000004). */
+function festeZahl(v: number, dez: number): string {
+  if (!Number.isFinite(v)) return "0";
+  return v.toFixed(dez);
+}
+
+function SliderWidget({ min, max, wert, dispatch, props }: { min: number; max: number; wert: number; dispatch: DilDispatch | null; props: Props }) {
+  const [breite, setBreite] = useState(0);
+  const [lokal, setLokal] = useState<number | null>(null);
+  const spanne = max > min ? max - min : 1;
+  const anzeige = lokal ?? (Number.isFinite(wert) ? wert : min);
+  const pct = Math.max(0, Math.min(1, (anzeige - min) / spanne));
+  const schritt = num(getProp(props, "step"), 1) || 1;
+  // Anzeige-Praezision aus dem Schritt ("0.1" -> 1 Nachkommastelle), max 3
+  const dezimal = Math.min(3, (String(schritt).split(".")[1] || "").length);
+  // Befund 23.11.2026: der Slider war reine Anzeige (kein Handler). Jetzt ziehbar.
+  // Waehrend des Ziehens nur lokal zeichnen - Dispatch erst beim Loslassen (sonst
+  // ~60 Actions/Renders pro Sekunde, Befund 23.11.2026).
+  const rechnen = (x: number) => (breite > 0 ? sliderWert(min, max, schritt, x / breite) : null);
+  const setzen = (x: number) => {
+    const v = rechnen(x);
+    if (v != null) setLokal(v);
+  };
+  const übernehmen = (x: number) => {
+    const v = rechnen(x);
+    if (v != null) fireControl(dispatch, props, v);
+    setLokal(null);
+  };
+  const pan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (e) => übernehmen(e.nativeEvent.locationX), // Tap auf die Spur = 1 Action
+        onPanResponderMove: (e) => setzen(e.nativeEvent.locationX),
+        onPanResponderRelease: (e) => übernehmen(e.nativeEvent.locationX),
+        onPanResponderTerminate: (e) => übernehmen(e.nativeEvent.locationX),
+      }),
+    // breite/schritt/min/max bestimmen die Rechnung; props-Identität wechselt pro Render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [breite, min, max, schritt, props],
+  );
+  const label = str(getProp(props, "label"), "");
+  return (
+    <View style={{ marginVertical: 2 }}>
+      {label ? (
+        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 2 }}>
+          <Text style={styles.sliderLabel}>{label}</Text>
+        </View>
+      ) : null}
+      {/* Trefferflaeche = Wrapper (24 px hoch), sichtbare Spur nur 8 px */}
+      <View
+        style={styles.sliderTouch}
+        onLayout={(e) => setBreite(e.nativeEvent.layout.width)}
+        {...pan.panHandlers}
+        accessibilityRole="adjustable"
+        accessibilityLabel={str(getProp(props, "label"), "Schieberegler")}
+        accessibilityValue={{ min, max, now: Math.round(anzeige) }}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={Math.round(anzeige)}
+      >
+        <View style={styles.sliderTrack}>
+          <View style={[styles.sliderFill, { width: `${Math.round(pct * 100)}%` }]} />
+        </View>
+        <View style={[styles.sliderKnopf, { left: `${Math.round(pct * 100)}%` }]} pointerEvents="none" />
+      </View>
+      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+        <Text style={styles.sliderValue}>{festeZahl(min, dezimal)}</Text>
+        <Text style={[styles.sliderValue, { color: colors.accent, fontWeight: "700" }]}>{festeZahl(anzeige, dezimal)}</Text>
+        <Text style={styles.sliderValue}>{festeZahl(max, dezimal)}</Text>
+      </View>
     </View>
   );
 }
@@ -387,11 +485,14 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       const opts = options.map((o) => (typeof o === "string" ? o : (o as Record<string, unknown>)?.label ?? (o as Record<string, unknown>)?.value ?? String(o)));
       const values = options.map((o, i) => (typeof o === "string" ? o : str((o as Record<string, unknown>)?.value, str(opts[i], String(i)))));
       const id = str(getProp(props, "id"), str(getProp(props, "name"), ""));
-      const selected = str(getProp(props, "value"), "") || (id ? str(dilCtx?.rt.state[id], "") : "");
+      // Runtime-State hat Vorrang vor dem Prop-Wert: props.value ist der Snapshot vom Turn-Anfang;
+      // solange er gewinnt, springt die Auswahl nach jedem Tap zurueck (Befund 23.11.2026).
+      const ausState = id ? str(dilCtx?.rt.state[id], "") : "";
+      const selected = ausState || str(getProp(props, "value"), "");
       return (
         <View style={styles.select}>
           {opts.map((o, i) => (
-            <Pressable accessibilityRole="radio" accessibilityState={{ selected: selected === values[i] }} accessibilityLabel={t(o, "?")}
+            <Pressable accessibilityRole="radio" accessibilityState={{ selected: selected === values[i] }} aria-checked={selected === values[i]} accessibilityLabel={t(o, "?")}
               key={i}
               onPress={() => {
                 fireControl(dispatch, props, values[i]);
@@ -406,32 +507,34 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       );
     }
     case "Slider": {
-      const val = num(getProp(props, "value"), num(getProp(props, "defaultValue"), 0));
       const min = num(getProp(props, "min"), 0);
       const max = num(getProp(props, "max"), 100);
-      const pct = max > min ? Math.max(0, Math.min(1, (val - min) / (max - min))) : 0;
-      return (
-        <View style={styles.sliderTrack}>
-          <View style={[styles.sliderFill, { width: `${Math.round(pct * 100)}%` }]} />
-          <Text style={styles.sliderValue}>{val}</Text>
-        </View>
-      );
+      const id = str(getProp(props, "id"), str(getProp(props, "name"), ""));
+      const ausState = id ? num(dilCtx?.rt.state[id], NaN) : NaN;
+      const val = Number.isFinite(ausState) ? ausState : num(getProp(props, "value"), num(getProp(props, "defaultValue"), min));
+      return <SliderWidget min={min} max={max} wert={val} dispatch={dispatch} props={props} />;
     }
 
     // ── Inhalt ──
     case "Image": {
-      const src = str(getProp(props, "src"), str(getProp(props, "url"), ""));
+      const roh = str(getProp(props, "src"), str(getProp(props, "url"), ""));
       const w = Math.max(0, num(getProp(props, "width"), 0));
       const h = Math.max(0, num(getProp(props, "height"), 0));
       const radius = Math.max(0, num(getProp(props, "radius"), 12));
-      if (!src) return null;
+      if (!roh) return null;
+      // Relative Pfade (/generated/…) gegen die Server-Basis auflösen - sonst rendert das Bild nicht
+      // und der Nutzer landet beim Antippen auf der Website.
+      const src = /^\/generated\//i.test(roh) ? absoluteImageUri(roh, getImageBaseUrl()) || "" : roh;
       // Schema-Allowlist: nur https + whitelistete data:image/* (kein file:///http:///Tracking).
-      if (!isSafeImageSrc(src)) return null;
+      if (!src || !isSafeImageSrc(src)) return null;
       return (
-        <Image
-          source={{ uri: src }}
+        <BildMitVollbild
+          uri={src}
+          width={w || "100%"}
+          height={Math.min(h || 220, MAX_MEDIA_H)} // Deckel gegen Riesen-Props
+          radius={radius}
           resizeMode="cover"
-          style={{ width: w || "100%", maxWidth: "100%", height: Math.min(h || 220, MAX_MEDIA_H), borderRadius: radius, backgroundColor: "transparent" }}
+          alt={str(getProp(props, "alt"), "Bild")}
         />
       );
     }
@@ -482,11 +585,32 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
         </View>
       );
     case "Table": {
-      const allRows = Array.isArray(getProp(props, "rows")) ? (getProp(props, "rows") as unknown[]) : [];
-      const columns = Array.isArray(getProp(props, "columns")) ? (getProp(props, "columns") as unknown[]).slice(0, 50) : [];
+      const rowsProp = getProp(props, "rows");
+      const dataProp = Array.isArray(rowsProp) && (rowsProp as unknown[]).length ? null : getProp(props, "data");
+      const ausProps = Array.isArray(rowsProp) && (rowsProp as unknown[]).length
+        ? (rowsProp as unknown[])
+        : Array.isArray(dataProp) ? (dataProp as unknown[]) : [];
+      const ausKindern = ausProps.length ? { columns: [] as string[], rows: [] as string[][], gesamt: 0 } : tabelleAusKindern(Array.isArray(children) ? children : []);
+      const allRows = ausProps.length ? ausProps : ausKindern.rows;
+      const spaltenProp = getProp(props, "columns") ?? getProp(props, "headers");
+      const spaltenListe = Array.isArray(spaltenProp) ? (spaltenProp as unknown[]) : spaltenProp == null ? [] : [spaltenProp];
+      const columns = (spaltenListe.length ? spaltenListe : ausKindern.columns).slice(0, 50);
       const rows = allRows.slice(0, 50);
-      const headers = columns.map((c) => str((c as Record<string, unknown>)?.label ?? (c as Record<string, unknown>)?.header, String(c)));
+      const gesamt = ausProps.length ? ausProps.length : ausKindern.gesamt;
+      const headers = columns.map((c) => {
+        const o = c as Record<string, unknown> | null;
+        if (o && typeof o === "object") return str(o.label ?? o.header ?? o.key, "");
+        return str(c, "");
+      });
       const keys = columns.map((c) => str((c as Record<string, unknown>)?.key, ""));
+      const keysOk = keys.some((k) => k); // String-Spalten haben keinen key -> zeilenweise lesen
+      // Spaltenbreite EINMAL berechnen (vor rows.map) - sonst O(Zeilen x Keys) pro Render
+      const breite = Math.min(
+        50, // Deckel: kaputtes DIL-JSON (Zeile mit 200.000 Keys) darf nicht 200.000 Text-Knoten erzeugen
+        (headers.length || keys.length)
+          ? Math.max(headers.length, keys.length)
+          : rows.reduce((m: number, r: unknown) => Math.max(m, Array.isArray(r) ? r.length : r && typeof r === "object" ? Object.keys(r).length : 1), 0),
+      );
       return (
         <View style={styles.table}>
           {headers.some((h) => h) ? (
@@ -499,9 +623,25 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
           {rows.map((r, ri) => {
             if (r == null) return null; // null/undefined-Zeile überspringen statt crash
             const row = (typeof r === "object" && !Array.isArray(r)) ? r as Record<string, unknown> : { value: r };
-            const cells = keys.length
-              ? keys.map((k) => str(row[k], ""))
-              : Array.isArray(r) ? (r as unknown[]).map((c) => str(c, "")) : Object.values(row).map((v) => str(v, ""));
+            const werte = Object.values(row).slice(0, 50); // einmal, gedeckelt - Object.values auf 200.000 Keys ist teuer
+            // Spaltennamen aus headers zuerst, Object.values nur als Notnagel
+            const geordnet = headers.some((h) => h && Object.prototype.hasOwnProperty.call(row, h))
+              ? headers.slice(0, 50).map((h) => row[h])
+              : werte;
+            // pro Zeile entscheiden: Array-Zeile hat Vorrang vor Spalten-Keys
+            const cells = (Array.isArray(r)
+              ? (r as unknown[]).map((c) => cellWert(c))
+              : keysOk
+                ? keys.map((k, i) => {
+                    if (k) return cellWert(row[k], 0);
+                    // Spalte ohne key: erst Header-Name als Schluessel, dann Position
+                    const h = headers[i];
+                    if (h && Object.prototype.hasOwnProperty.call(row, h)) return cellWert(row[h], 0);
+                    return cellWert(werte[i], 0);
+                  })
+                : geordnet.map((v) => cellWert(v, 0))).slice(0, 50);
+            while (cells.length < breite) cells.push("");
+            if (breite > 0 && cells.length > breite) cells.length = breite; // Extra-Felder nicht anzeigen
             return (
               <View key={ri} style={styles.tableRow}>
                 {cells.map((c, ci) => (
@@ -510,8 +650,8 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
               </View>
             );
           })}
-          {allRows.length > rows.length ? (
-            <Text style={styles.tableNote}>{allRows.length - rows.length} weitere Zeilen ausgeblendet</Text>
+          {gesamt > rows.length ? (
+            <Text style={styles.tableNote}>{gesamt - rows.length} weitere Zeilen ausgeblendet</Text>
           ) : null}
         </View>
       );
@@ -686,18 +826,25 @@ function ChartWidget({ props }: { props: Props }) {
 }
 
 // ── Balken-Chart (View-basiert, optional antippbar) ──
+// Achse und Gitterlinien liegen exakt auf der Balkenbasis: der Gitter-Container ist so
+// hoch wie die Spur (TRACK_H), Labels stehen darunter - vorher sassen Ticks und Linien
+// auf verschiedenen Hoehen (Befund 23.11.2026).
+const TRACK_H = 110;
+
 function BarChart({ points, horizontal, onPick }: { points: ChartPoint[]; horizontal?: boolean; onPick?: (p: ChartPoint, i: number) => void }) {
   if (!points.length) return null;
   const max = Math.max(1, ...points.map((p) => p.value));
+  const ticks = [max, Math.round((max / 2) * 100) / 100, 0];
+  const kurz = (v: number) => (v >= 1000 ? `${Math.round(v / 100) / 10}k` : String(v));
   const barColor = colors.accent;
   if (horizontal) {
     return (
       <View style={styles.chart}>
         {points.map((p, i) => (
-          <Pressable accessibilityRole="button" accessibilityLabel={`Balken: ${p.label}`} key={i} style={styles.hBarRow} disabled={!onPick} onPress={() => onPick?.(p, i)}>
-            <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={`Balken: ${p.label}, ${p.value}`} key={i} style={styles.hBarRow} disabled={!onPick} onPress={() => onPick?.(p, i)}>
+            <Text style={styles.hBarLabel} numberOfLines={1}>{p.label}</Text>
             <View style={styles.hBarTrack}>
-              <View style={[styles.hBarFill, { width: `${Math.round((p.value / max) * 100)}%`, backgroundColor: barColor }]} />
+              <View style={[styles.hBarFill, { width: `${Math.max(2, Math.round((p.value / max) * 100))}%`, backgroundColor: barColor }]} />
             </View>
             <Text style={styles.chartValue}>{p.value}</Text>
           </Pressable>
@@ -707,15 +854,40 @@ function BarChart({ points, horizontal, onPick }: { points: ChartPoint[]; horizo
   }
   return (
     <View style={styles.chart}>
-      <View style={styles.vBarArea}>
-        {points.map((p, i) => (
-          <Pressable accessibilityRole="button" accessibilityLabel={`Säule: ${p.label}`} key={i} style={styles.vBarCol} disabled={!onPick} onPress={() => onPick?.(p, i)}>
-            <View style={styles.vBarTrack}>
-              <View style={[styles.vBarFill, { height: `${Math.min(100, Math.max(0, Math.round(((Number.isFinite(p.value) ? p.value : 0) / max) * 100)))}%`, backgroundColor: barColor }]} />
+      <View style={{ flexDirection: "row", gap: 6 }}>
+        {/* y-Skala: 3 Ticks, Hoehe = Spur, damit die Linien auf den Balken treffen */}
+        <View style={styles.axisCol}>
+          {ticks.map((tv, i) => (
+            <Text key={i} style={styles.axisTick}>{kurz(tv)}</Text>
+          ))}
+        </View>
+        <View style={{ flex: 1 }}>
+          <View style={{ height: TRACK_H, position: "relative" }}>
+            {ticks.map((_, i) => (
+              <View key={i} style={[styles.gridLine, { top: (i / (ticks.length - 1)) * TRACK_H }]} pointerEvents="none" />
+            ))}
+            <View style={styles.vBarArea}>
+              {points.map((p, i) => {
+                const wert = Number.isFinite(p.value) ? p.value : 0;
+                const pct = Math.min(100, Math.max(0, (wert / max) * 100));
+                return (
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Säule: ${p.label}, ${p.value}`} key={i} style={styles.vBarCol} disabled={!onPick} onPress={() => onPick?.(p, i)}>
+                    <View style={[styles.vBarFill, styles.vBarFillMax, { height: `${Math.max(2, pct)}%`, backgroundColor: barColor }]} />
+                  </Pressable>
+                );
+              })}
             </View>
-            <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
-          </Pressable>
-        ))}
+          </View>
+          {/* Werte + Namen unter der Spur, gleiche Spaltenbreite wie die Säulen */}
+          <View style={{ flexDirection: "row", gap: 6, marginTop: 4 }}>
+            {points.map((p, i) => (
+              <View key={i} style={{ flex: 1, alignItems: "center" }}>
+                <Text style={styles.barWert} numberOfLines={1}>{p.value}</Text>
+                <Text style={styles.chartLabel} numberOfLines={1}>{p.label}</Text>
+              </View>
+            ))}
+          </View>
+        </View>
       </View>
     </View>
   );
@@ -744,18 +916,41 @@ function LineChart({ points, area }: { points: ChartPoint[]; area?: boolean }) {
   const baseY = padT + innerH;
   const areaPath = `M ${coords[0].x},${baseY} L ${coords.map((c) => `${c.x},${c.y}`).join(" L ")} L ${coords[coords.length - 1].x},${baseY} Z`;
   const lineColor = colors.accent;
-  const areaColor = "rgba(2,133,255,0.2)";
+  const letzter = coords[coords.length - 1];
   return (
     <View style={styles.chart}>
       <Svg width={W} height={H}>
-        <SvgLine x1={padL} y1={baseY} x2={W - padR} y2={baseY} stroke={colors.border} strokeWidth={1} />
-        {area ? <Path d={areaPath} fill={areaColor} stroke="none" /> : null}
-        <Polyline points={line} fill="none" stroke={lineColor} strokeWidth={2} />
-        {coords.map((c, i) => (
-          <Circle key={i} cx={c.x} cy={c.y} r={2.5} fill={lineColor} />
+        <Defs>
+          <LinearGradient id="verlauf" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor={lineColor} stopOpacity="0.38" />
+            <Stop offset="1" stopColor={lineColor} stopOpacity="0.02" />
+          </LinearGradient>
+        </Defs>
+        {/* Gitter: 3 horizontale Hilfslinien statt nur Null-Linie */}
+        {[0, 0.5, 1].map((f, i) => (
+          <SvgLine
+            key={i}
+            x1={padL}
+            x2={W - padR}
+            y1={padT + innerH * f}
+            y2={padT + innerH * f}
+            stroke={colors.border}
+            strokeWidth={1}
+            strokeDasharray="3,4"
+          />
         ))}
-        <SvgText x={2} y={padT + 4} fontSize={9} fill={colors.muted}>{max}</SvgText>
+        <SvgLine x1={padL} y1={baseY} x2={W - padR} y2={baseY} stroke={colors.border} strokeWidth={1} />
+        {area ? <Path d={areaPath} fill="url(#verlauf)" stroke="none" /> : null}
+        <Polyline points={line} fill="none" stroke={lineColor} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
+        {coords.map((c, i) => (
+          <Circle key={i} cx={c.x} cy={c.y} r={i === coords.length - 1 ? 4 : 2.5} fill={i === coords.length - 1 ? lineColor : "#ffffff"} stroke={lineColor} strokeWidth={1.5} />
+        ))}
+        <SvgText x={2} y={padT + 8} fontSize={9} fill={colors.muted}>{max}</SvgText>
+        <SvgText x={2} y={padT + innerH / 2 + 3} fontSize={9} fill={colors.muted}>{Math.round((max + min) / 2)}</SvgText>
         <SvgText x={2} y={baseY - 2} fontSize={9} fill={colors.muted}>{min}</SvgText>
+        <SvgText x={letzter.x} y={Math.max(9, letzter.y - 8)} fontSize={10} fontWeight="bold" fill={lineColor} textAnchor="middle">
+          {points[coords.length - 1]?.value ?? ""}
+        </SvgText>
       </Svg>
       {shown.length <= 12 ? (
         <View style={styles.axisRow}>
@@ -913,7 +1108,13 @@ function renderNodes(nodes: ResolvedNode[]): ReactNode[] {
 
 // ───────────────────────────── Öffentliche Komponente ─────────────────────────────
 
-/** Eine DIL-Antwort (bereits geparstes JSON) rendern. */
+/** Eine DIL-Antwort (bereits geparstes JSON) rendern.
+ *
+ * Befund 23.11.2026: Jeder `dil`-Block einer Antwort hatte seinen EIGENEN State —
+ * ein Slider in Block 1 konnte den Chart in Block 2 nicht bewegen (Chart zeigte 0).
+ * Deshalb: liegt bereits ein Runtime-Provider darüber (DilRichText/DilBereich),
+ * wird dessen `state` benutzt; nur ohne Provider entsteht ein eigener.
+ */
 export function Dil({
   json,
   onAction,
@@ -922,24 +1123,53 @@ export function Dil({
   /** Callback aus der Sandbox (invokeDILCallbackWithResult) → App schickt Text als neuen Turn. */
   onAction?: (text: string, name: string) => void;
 }) {
-  // Runtime pro Antwort: `state` (aus defaultValue geseedet) + appData/constants als CEL-Scope.
+  const aussen = useContext(DilRuntimeCtx);
+  if (aussen) return <DilInhalt json={json} rt={aussen.rt} />;
+  return <DilAllein json={json} onAction={onAction} />;
+}
+
+/** Eigenständiger Block ohne umgebenden Provider: baut seinen Runtime selbst. */
+function DilAllein({ json, onAction }: { json: unknown; onAction?: (text: string, name: string) => void }) {
+  const { rt, dispatch } = useRuntime(json, onAction);
+  return (
+    <DilRuntimeCtx.Provider value={{ rt, dispatch }}>
+      <DilInhalt json={json} rt={rt} />
+    </DilRuntimeCtx.Provider>
+  );
+}
+
+/** Gemeinsamer Runtime/State für alle DIL-Blöcke einer Antwort. */
+export function DilBereich({ jsons, onAction, children }: { jsons: unknown[]; onAction?: (text: string, name: string) => void; children: ReactNode }) {
+  // Objektidentitaet stabil halten: useRuntime startet bei neuem `json` neu — ein bei jedem
+  // Render frisch gebautes Objekt erzeugte eine Endlos-Render-Schleife (Befund 23.11.2026).
+  const seedJson = useMemo(() => ({ children: jsons }), [jsons]);
+  const { rt, dispatch } = useRuntime(seedJson, onAction);
+  return <DilRuntimeCtx.Provider value={{ rt, dispatch }}>{children}</DilRuntimeCtx.Provider>;
+}
+
+/** Runtime + Dispatch: `state` aus allen defaultValue starten, Actions zentral anwenden. */
+function useRuntime(json: unknown, onAction?: (text: string, name: string) => void): { rt: DilRuntime; dispatch: DilDispatch } {
   const [model, setModel] = useState<{ json: unknown; rt: DilRuntime }>(() => {
     const seed = extractRuntimeSeed(json);
     return { json, rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) } };
   });
-  // Neue Antwort (neues JSON) → frischer Runtime-Zustand, ohne Render-Phase-Mutation.
+  // Neue Antwort → frischer Runtime-Zustand. Entscheidend ist der INHALT, nicht die
+  // Objektidentität: ein bei jedem Render neu gebautes JSON-Objekt ließ diese
+  // Render-Phase-Aktualisierung nie konvergieren (Endlos-Render → Watchdog-Kill der App
+  // ohne JS-Fehler, Befund 23.11.2026). hashRef verhindert das dauerhaft.
+  const hashRef = useRef<string | null>(null);
   if (model.json !== json) {
-    const seed = extractRuntimeSeed(json);
-    setModel({
-      json,
-      rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) },
-    });
+    const pruefung = dilNeuSeeden(hashRef.current, json);
+    if (pruefung.neu) {
+      hashRef.current = pruefung.hash;
+      const seed = extractRuntimeSeed(json);
+      setModel({ json, rt: { ...createRuntime(seed.appData, seed.constants), state: seedDefaults(json) } });
+    }
   }
-  const rt = model.rt;
 
   // Refs, damit der Dispatch keine stale Closures hat (Actions halten den Turn über).
-  const rtRef = useRef(rt);
-  rtRef.current = rt;
+  const rtRef = useRef(model.rt);
+  rtRef.current = model.rt;
   const onActionRef = useRef(onAction);
   onActionRef.current = onAction;
 
@@ -953,21 +1183,19 @@ export function Dil({
     if (res.error) console.warn("[dil] action", action, "→", res.error);
   }, []);
 
+  return { rt: model.rt, dispatch };
+}
+
+function DilInhalt({ json, rt }: { json: unknown; rt: DilRuntime }) {
   const nodes = useMemo(() => {
     try {
-      return resolveDilRoot(json, runtimeScope(model.rt));
+      return resolveDilRoot(json, runtimeScope(rt));
     } catch {
       return [];
     }
-  }, [json, model.rt]);
-
+  }, [json, rt]);
   if (!nodes.length) return null;
-  const value = { rt: model.rt, dispatch };
-  return (
-    <DilRuntimeCtx.Provider value={value}>
-      <View style={styles.root}>{renderNodes(nodes)}</View>
-    </DilRuntimeCtx.Provider>
-  );
+  return <View style={styles.root}>{renderNodes(nodes)}</View>;
 }
 
 /** appData/constants aus der (evtl. v2-)Wurzel ziehen. */
@@ -987,8 +1215,14 @@ function extractRuntimeSeed(json: unknown): { appData: unknown; constants: Recor
  */
 export function DilRichText({ text, onAction }: { text: string; onAction?: (text: string, name: string) => void }) {
   const blocks = useMemo(() => splitDilBlocks(text), [text]);
+  // Alle DIL-JSONs dieser Antwort in EINEN State seeden (Slider -> Chart in einem Schritt).
+  const jsons = useMemo(
+    () => blocks.flatMap((b) => (b.kind === "dil" && b.json != null ? [b.json] : [])),
+    [blocks],
+  );
   if (!blocks.length) return <Markdown text={text} />;
   return (
+    <DilBereich jsons={jsons} onAction={onAction}>
     <View style={styles.root}>
       {blocks.map((b, i) => {
         if (b.kind === "md") {
@@ -1011,6 +1245,7 @@ export function DilRichText({ text, onAction }: { text: string; onAction?: (text
         return <Dil key={i} json={b.json} onAction={onAction} />;
       })}
     </View>
+    </DilBereich>
   );
 }
 
@@ -1039,7 +1274,20 @@ const styles = StyleSheet.create({
   svgFallback: { width: 48, height: 48, borderRadius: 10, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center", alignSelf: "flex-start" },
   select: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, gap: 4, backgroundColor: colors.surface },
   selectItem: { color: colors.text, fontSize: 14, paddingVertical: 2 },
-  sliderTrack: { height: 6, borderRadius: 3, backgroundColor: colors.surface2, justifyContent: "center", marginVertical: 8 },
+  sliderLabel: { color: colors.text, fontSize: 13, fontWeight: "600" },
+  sliderTouch: { height: 26, justifyContent: "center", marginVertical: 2 },
+  sliderTrack: { height: 8, borderRadius: 4, backgroundColor: colors.surface2, justifyContent: "center" },
+  sliderKnopf: {
+    position: "absolute",
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    marginLeft: -11,
+    top: 2,
+    backgroundColor: colors.accent,
+    borderWidth: 2,
+    borderColor: "#ffffff",
+  },
   sliderFill: { height: 6, borderRadius: 3, backgroundColor: colors.accent },
   sliderValue: { color: colors.muted, fontSize: 12, marginTop: 4 },
   badge: { alignSelf: "flex-start", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1 },
@@ -1054,10 +1302,15 @@ const styles = StyleSheet.create({
   tableCell: { flex: 1, minWidth: 0, padding: 8, fontSize: 13, color: colors.text },
   tableNote: { color: colors.muted, fontSize: 11, padding: 6, textAlign: "center" },
   chart: { gap: 6, marginVertical: 4 },
-  vBarArea: { flexDirection: "row", alignItems: "flex-end", gap: 6, height: 140 },
-  vBarCol: { flex: 1, alignItems: "center", gap: 4 },
-  vBarTrack: { width: "100%", height: 110, justifyContent: "flex-end" },
-  vBarFill: { width: "100%", borderRadius: 4, minHeight: 2 },
+  vBarArea: { position: "absolute", left: 0, right: 0, top: 0, height: TRACK_H, flexDirection: "row", alignItems: "flex-end", gap: 6 },
+  axisCol: { width: 34, height: TRACK_H, justifyContent: "space-between", alignItems: "flex-end" },
+  axisTick: { color: colors.muted, fontSize: 10, fontFamily: monoFontFamily },
+  gridLine: { position: "absolute", left: 0, right: 0, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+  barWert: { color: colors.text, fontSize: 11, fontWeight: "700", fontFamily: monoFontFamily, maxWidth: "100%" },
+  hBarLabel: { color: colors.muted, fontSize: 11, width: 70 },
+  vBarCol: { flex: 1, height: "100%", justifyContent: "flex-end", alignItems: "center" },
+  vBarFillMax: { maxWidth: 54, alignSelf: "center" },
+  vBarFill: { width: "100%", borderTopLeftRadius: 6, borderTopRightRadius: 6, borderRadius: 4, minHeight: 2 },
   hBarRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   hBarTrack: { flex: 1, height: 14, backgroundColor: colors.surface2, borderRadius: 7, overflow: "hidden" },
   hBarFill: { height: "100%", borderRadius: 7 },

@@ -93,12 +93,15 @@ export function MathView({ value, display = false }: { value: string; display?: 
   const { latex, display: isBlock } = useMemo(() => normalizeMathInput(value, display), [value, display]);
   const [height, setHeight] = useState(isBlock ? 56 : 28);
   const html = useMemo(() => buildHtml(latex, isBlock), [latex, isBlock]);
+  // Stabile `source`-Identität: ein bei jedem Render neu gebautes {html}-Objekt lässt
+  // react-native-webview die (650 kB grosse, base64-eingebettete) KaTeX-Seite neu laden.
+  const source = useMemo(() => ({ html }), [html]);
   if (!latex) return null;
   return (
     <View style={isBlock ? styles.block : styles.inline}>
       <WebView
         originWhitelist={["about:blank"]}
-        source={{ html }}
+        source={source}
         scrollEnabled={false}
         javaScriptEnabled
         domStorageEnabled={false}

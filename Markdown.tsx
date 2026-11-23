@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View, Image } from "react-native";
+import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import MarkdownIt from "markdown-it";
 import type { Token } from "markdown-it";
@@ -44,6 +44,7 @@ import { aiFontFamily, colors, monoFontFamily } from "./theme";
 import { MathView } from "./MathView";
 import { splitMathSegments, escapeInlineMathMeta } from "./dilviz";
 import { breakLongLines, breakUnbreakable, absoluteImageUri, getImageBaseUrl, isGeneratedFileHref, fileExtOf } from "./lib";
+import { BildMitVollbild } from "./BildAnsicht";
 
 // --- Syntax-Highlighting (highlight.js, nur Core + gängige Sprachen → schlankes Bundle) ---
 
@@ -341,19 +342,22 @@ function MdImage({ uri, alt }: { uri: string; alt?: string }) {
     );
   }
   return (
-    <Pressable onPress={() => Linking.openURL(uri).catch(() => {})} disabled={!uri}>
-      <Image
-        source={{ uri }}
-        style={[styles.mdImage, ratio ? { height: undefined, aspectRatio: Math.min(3, Math.max(0.4, ratio)) } : null]}
-        resizeMode="contain"
-        accessibilityLabel={alt || "Bild"}
-        onLoad={(e) => {
-          const s = (e?.nativeEvent as { source?: { width?: number; height?: number } } | undefined)?.source;
-          if (s?.width && s?.height) setRatio(s.width / s.height);
-        }}
-        onError={() => setFailed(true)}
-      />
-    </Pressable>
+    <BildMitVollbild
+      uri={uri}
+      alt={alt || "Bild"}
+      resizeMode="contain"
+      height={220}
+      radius={10}
+      style={{
+        ...styles.mdImage,
+        ...(ratio ? { height: undefined, aspectRatio: Math.min(3, Math.max(0.4, ratio)) } : null),
+      }}
+      onLoad={(e) => {
+        const s = (e as { nativeEvent?: { source?: { width?: number; height?: number } } })?.nativeEvent?.source;
+        if (s?.width && s?.height) setRatio(s.width / s.height);
+      }}
+      onError={() => setFailed(true)}
+    />
   );
 }
 

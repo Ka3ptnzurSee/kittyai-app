@@ -13,7 +13,10 @@ import {
   splitDilBlocks,
   DilCelError,
   isSafeImageSrc,
+  sliderWert,
+  cellWert,
 } from "../dil.ts";
+import { absoluteImageUri } from "../lib.ts";
 
 test("parseDil erkennt Text-Knoten", () => {
   assert.strictEqual(parseDil("hallo"), "hallo");
@@ -297,4 +300,70 @@ test("resolveDilRoot v2 ohne appData liefert sicheren Fallback (kein Crash)", ()
   const nodes = resolveDilRoot({ code: "return 1", constants: { x: 1 } });
   assert.strictEqual(nodes.length, 1);
   assert.strictEqual((nodes[0] as { type: string }).type, "ClientDefinedWidget");
+});
+
+// ── Slider-Rechnung (Befund 23.11.2026: Slider war reine Anzeige) ──
+test("sliderWert: klemmt, rundet auf Schritt, vertraegt Unsinn", () => {
+  assert.strictEqual(sliderWert(0, 100, 1, 0.5), 50);
+  assert.strictEqual(sliderWert(0, 100, 10, 0.44), 40);
+  assert.strictEqual(sliderWert(0, 100, 10, 1.7), 100); // ueber das Ende gezogen
+  assert.strictEqual(sliderWert(0, 100, 10, -3), 0); // vor den Anfang gezogen
+  assert.strictEqual(sliderWert(0, 100, 1, NaN), 0); // kaputte Position
+  assert.strictEqual(sliderWert(5, 5, 1, 0.5), 5); // min === max
+  assert.strictEqual(sliderWert(0, 100, 0, 0.5), 50); // Schritt 0 -> 1
+});
+
+test("sliderWert: Raster liegt auf min + n*schritt (Linksanschlag erreichbar)", () => {
+  assert.strictEqual(sliderWert(1, 5, 2, 0), 1); // vorher 2 - min war unerreichbar
+  assert.strictEqual(sliderWert(1, 5, 2, 1), 5);
+  assert.strictEqual(sliderWert(1, 5, 2, 0.5), 3);
+});
+
+test("sliderWert: Float-Schritte ohne 0.30000000000000004", () => {
+  assert.strictEqual(sliderWert(0, 1, 0.1, 0.3), 0.3);
+  assert.strictEqual(sliderWert(0, 1, 0.1, 0.75), 0.8);
+  assert.strictEqual(sliderWert(0, 1, 0.25, 0.5), 0.5);
+});
+
+test("absoluteImageUri: relative /generated/-Pfade werden zur Server-URL", () => {
+  assert.strictEqual(absoluteImageUri("/generated/a.jpg", "https://api.example.de"), "https://api.example.de/generated/a.jpg");
+  assert.strictEqual(absoluteImageUri("/generated/a.jpg", "https://api.example.de/"), "https://api.example.de/generated/a.jpg");
+  assert.strictEqual(absoluteImageUri("/etc/passwd", "https://api.example.de"), "https://api.example.de/etc/passwd");
+  assert.strictEqual(absoluteImageUri("/generated/a b.jpg", "https://api.example.de"), null); // Leerzeichen = kein Bildpfad
+});
+
+// ── $ -Bindungen in verschachtelten Props (Slider soll Diagramme steuern) ──
+test("resolveDil loest $-Werte in data-Arrays auf (state-getrieben)", () => {
+  const nodes = resolveDil(
+    {
+      type: "Chart",
+      props: {
+        type: "bar",
+        data: [
+          { label: "10 Jahre", $value: "state.bier * 520" },
+          { label: "20 Jahre", $value: "state.bier * 1040" },
+        ],
+      },
+    },
+    { state: { bier: 4 } },
+  );
+  const p = (nodes[0] as { props: { data: { value: number }[] } }).props;
+  assert.strictEqual(p.data[0].value, 2080);
+  assert.strictEqual(p.data[1].value, 4160);
+});
+
+test("resolveDil: defekter $ -Ausdruck in data bleibt roh (kein Crash)", () => {
+  const nodes = resolveDil(
+    { type: "Chart", props: { data: [{ label: "x", $value: "state.+" }] } },
+    { state: {} },
+  );
+  const p = (nodes[0] as { props: { data: { value: string }[] } }).props;
+  assert.strictEqual(p.data[0].value, "state.+");
+});
+
+// ── cellWert: $-aufgelöste Zellen ({"value": 5}) dürfen nicht leer bleiben ──
+test("cellWert liest Knoten ohne props direkt", () => {
+  assert.strictEqual(cellWert({ value: 5 }), "5");
+  assert.strictEqual(cellWert({ label: "x", value: 10400 }), "10400");
+  assert.strictEqual(cellWert("roh"), "roh");
 });

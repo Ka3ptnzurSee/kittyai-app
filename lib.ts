@@ -1240,3 +1240,17 @@ export function isRestartErrorKind(kind: string, text?: string): boolean {
 export function isRestartErrorText(text?: string): boolean {
   return /server wurde neu gestartet|server neu gestartet|server nicht bereit/i.test(String(text || ""));
 }
+
+/**
+ * Erste Komponente aus einem React-`componentStack` ("   in Dil (at Dil.tsx:1200)").
+ * Wird von der Fehler-Grenze (SichererBlock) für die Telemetrie genutzt — bewusst
+ * hier in lib.ts, damit es ohne React-Native-Laufzeit testbar ist.
+ */
+export function firstFrame(componentStack?: string): string {
+  const zeilen = String(componentStack || "")
+    .split("\n")
+    .map((z) => z.trim())
+    .filter((z) => z.startsWith("in "));
+  const m = (zeilen[0] || "").match(/in ([A-Za-z0-9_$.]+)/);
+  return m ? m[1].slice(0, 40) : "";
+}

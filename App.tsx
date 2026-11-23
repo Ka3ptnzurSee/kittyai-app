@@ -44,6 +44,7 @@ import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
+import { SichererBlock } from "./SichererBlock";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
 import { buildIndex, matchingChatIds } from "./searchIndex";
@@ -535,16 +536,20 @@ function MessageBubble({
         </Text>
       ) : (
         <>
-          {Array.isArray(item.dil) && item.dil.length > 0 ? (
-            <View style={{ gap: 8 }}>
-              <DilRichText text={stripDilFences(item.text || "")} onAction={(t) => onDilAction?.(t)} />
-              {item.dil.map((block, i) => (
-                <Dil key={i} json={block} onAction={(t) => onDilAction?.(t)} />
-              ))}
-            </View>
-          ) : (
-            <DilRichText text={normalizeBlankRuns(item.text || "")} onAction={(t) => onDilAction?.(t)} />
-          )}
+          {/* Eigene Fehler-Grenze pro Nachricht: ein defekter DIL-/Markdown-Block darf
+              nicht den ganzen Verlauf (und damit die App) mitnehmen. */}
+          <SichererBlock bereich="dil" kompakt resetKey={String(item.id || "")}>
+            {Array.isArray(item.dil) && item.dil.length > 0 ? (
+              <View style={{ gap: 8 }}>
+                <DilRichText text={stripDilFences(item.text || "")} onAction={(t) => onDilAction?.(t)} />
+                {item.dil.map((block, i) => (
+                  <Dil key={i} json={block} onAction={(t) => onDilAction?.(t)} />
+                ))}
+              </View>
+            ) : (
+              <DilRichText text={normalizeBlankRuns(item.text || "")} onAction={(t) => onDilAction?.(t)} />
+            )}
+          </SichererBlock>
           {isLast && isBusy && item.text ? <StreamingCursor /> : null}
           {item.error ? (
             <View style={styles.errorCard}>
@@ -3977,9 +3982,13 @@ export default function App() {
   }
 
   function renderChatItem({ item }: { item: Chat }) {
-    const last = item.messages[item.messages.length - 1];
+    // Defensiv: ein Chat ohne `messages` (z. B. halb geschriebener Speicherstand oder
+    // ein Server-Chat, den eine ältere Version angelegt hat) darf die ganze Liste
+    // nicht abschießen — genau das war der Verdacht für „alle Chats stürzen ab“.
+    const msgs = Array.isArray(item.messages) ? item.messages : [];
+    const last = msgs[msgs.length - 1];
     const preview = last
-      ? last.text.replace(/\n/g, " ").slice(0, 80)
+      ? String(last.text || "").replace(/\n/g, " ").slice(0, 80)
       : item.preview
         ? item.preview.replace(/\n/g, " ").slice(0, 80)
         : item.remote
@@ -3988,7 +3997,7 @@ export default function App() {
     const isActive = item.id === activeChatId;
     // Status-Ampel: rot = arbeitet (busy), grün = fertig (hat Nachrichten), weiß = unbenutzt (leer)
     const isBusy = busyChatIds.has(item.id);
-    const hasMessages = item.messages.length > 0;
+    const hasMessages = msgs.length > 0;
     const statusColor = isBusy ? colors.danger : hasMessages ? colors.success : "#ffffff";
     // Herkunft: WhatsApp / Terminal / anderes Gerät. Ohne Markierung sieht man nicht,
     // welcher Verlauf von wo kommt — und genau das war der Punkt.
@@ -4400,7 +4409,20 @@ export default function App() {
               keyboardDismissMode="interactive"
               refreshControl={<PullToRefresh refreshing={refreshingChat} onRefresh={() => { void refreshActiveChat(); }} />}
               keyExtractor={(m) => m.id}
-              renderItem={renderMessage}
+              renderItem={(p) => (
+                <SichererBlock bereich="nachricht" kompakt resetKey={p.item.id}>
+                  {renderMessage(p)}
+                </SichererBlock>
+              )}
+              // Speicherspitzen beim Öffnen langer Verläufe begrenzen (Befund 23.11.2026:
+              // Build 132 beendete sich beim Öffnen eines Verlaufs mit 114 Nachrichten,
+              // 31 DIL-Blöcken und einer KaTeX-WebView ohne JS-Fehler — also nativ.
+              // RN-Defaults rendern 10 + 10 pro Batch; hier bewusst kleiner, damit die
+              // Charts/Formulare nicht alle gleichzeitig im Speicher landen.
+              initialNumToRender={8}
+              maxToRenderPerBatch={6}
+              updateCellsBatchingPeriod={60}
+              windowSize={11}
               style={styles.list}
               contentContainerStyle={styles.listContent}
               onScroll={(e) => {
@@ -4694,7 +4716,11 @@ export default function App() {
             <FlatList
               data={searchedChats}
               keyExtractor={(c) => c.id}
-              renderItem={renderChatItem}
+              renderItem={(p) => (
+                <SichererBlock bereich="chatzeile" kompakt resetKey={p.item.id}>
+                  {renderChatItem(p)}
+                </SichererBlock>
+              )}
               initialNumToRender={12}
               maxToRenderPerBatch={12}
               updateCellsBatchingPeriod={50}

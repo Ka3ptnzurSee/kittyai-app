@@ -465,6 +465,40 @@ export function evalCel(expression: string, scope: Record<string, unknown> = {})
   return parser.parse();
 }
 
+const DEEP_MAX_DEPTH = 8;
+
+/**
+ * `$`-Bindungen auch INNERHALB von Props auflösen (Arrays/Objekte), z. B.
+ * `data: [{label: "10 Jahre", $value: "state.bier * 520"}]`.
+ * Vorher wurde nur die oberste Prop-Ebene aufgelöst — dadurch blieben Diagrammdaten
+ * statisch und ein Slider konnte sie nicht verändern (Befund 23.11.2026).
+ */
+function resolveDeep(v: unknown, scope: Record<string, unknown>, depth = 0): unknown {
+  if (depth > DEEP_MAX_DEPTH) return v;
+  if (Array.isArray(v)) return v.map((x) => resolveDeep(x, scope, depth + 1));
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+      if (k.startsWith("$") && typeof val === "string") {
+        // `$value` ist eine Bindung FÜR `value` - nach dem Auflösen ohne `$` ablegen,
+        // sonst findet ein Normalisierer (z. B. Chart-Daten) den Wert nicht.
+        const ziel = k.slice(1);
+        try {
+          out[ziel] = evalCel(val, scope);
+        } catch (e) {
+          if (!(e instanceof DilCelError)) throw e;
+          out[ziel] = val; // defekter Ausdruck → roh durchreichen, Block bleibt nutzbar
+        }
+      } else {
+        out[k] = resolveDeep(val, scope, depth + 1);
+      }
+    }
+    return out;
+  }
+  return v;
+}
+
 /** Property auflösen: `$name` → CEL, `name` → statisch, `nameAction` → Callback-Referenz. */
 export function resolveProp(name: string, raw: unknown, scope: Record<string, unknown>): unknown {
   if (name.startsWith("$")) {
@@ -477,6 +511,7 @@ export function resolveProp(name: string, raw: unknown, scope: Record<string, un
       throw e;
     }
   }
+  if (Array.isArray(raw) || (raw && typeof raw === "object")) return resolveDeep(raw, scope);
   if (name.endsWith("Action")) {
     // Callback läuft in der Sandbox; hier nur die Referenz durchreichen.
     return raw;
@@ -758,4 +793,86 @@ export function resolveDilRoot(json: unknown, scope: Record<string, unknown> = {
 export function isDilV2(json: unknown): boolean {
   const parsed = parseDil(json);
   return !!parsed && typeof parsed === "object" && !Array.isArray(parsed) && "kind" in parsed && (parsed as DilV2Root).kind === "v2";
+}
+
+// ── Slider-Rechnung (rein, testbar) ──
+// anteil = Position 0..1 auf der Spur; Ergebnis auf `schritt` gerundet und auf [min,max] geklemmt.
+// Befund 23.11.2026: der DIL-Slider war reine Anzeige — die Rechnung liegt hier, damit sie
+// ohne React-Native-Renderer geprueft werden kann.
+export function sliderWert(min: number, max: number, schritt: number, anteil: number): number {
+  const spanne = max > min ? max - min : 1;
+  const s = schritt > 0 ? schritt : 1;
+  const a = Math.max(0, Math.min(1, Number.isFinite(anteil) ? anteil : 0));
+  const roh = min + a * spanne;
+  // Raster liegt auf min + n*schritt (sonst ist der Linksanschlag unerreichbar, z. B. min=1/schritt=2)
+  const wert = min + Math.round((roh - min) / s) * s;
+  // 0.1 + 0.2 nicht als 0.30000000000000004 weiterreichen
+  const dez = Math.min(3, (String(s).split(".")[1] || "").length);
+  const rund = Math.round(wert * 10 ** dez) / 10 ** dez;
+  return Math.max(min, Math.min(max, rund));
+}
+
+/**
+ * TableRow/TableCell-Bauform in Textzellen uebersetzen (reine Funktion, RN-frei testbar).
+ * Deckel: Tiefe 20, max. 50 Kinder je Ebene.
+ * Befund 23.11.2026: Knoten OHNE `props` (z. B. $-aufgeloest `{"value": 5}`)
+ * wurden nicht gelesen - die Zelle blieb leer.
+ */
+export function cellWert(knoten: unknown, tiefe = 0): string {
+  if (knoten == null || typeof knoten !== "object") return String(knoten ?? "");
+  if (tiefe > 20) return ""; // Schutz vor programmatisch gebauten Endlos-Ketten
+  if (Array.isArray(knoten)) {
+    return knoten.slice(0, 50).map((k) => cellWert(k, tiefe + 1)).filter(Boolean).join(" ");
+  }
+  const n = knoten as { props?: Record<string, unknown>; children?: unknown[] };
+  const p = (n.props && typeof n.props === "object" ? n.props : (n as unknown as Record<string, unknown>)) || {};
+  // children als Einzelobjekt (nicht Array) darf den Wert nicht verlieren
+  const einzel = p.children;
+  if (einzel && typeof einzel === "object" && !Array.isArray(einzel)) {
+    const w = cellWert(einzel, tiefe + 1);
+    if (w) return w;
+  }
+  // Zahlen-`value` (aus $-Bindung) schlaegt einen beschreibenden label-Text.
+  if (typeof p.value === "number") return String(p.value);
+  for (const k of ["label", "header", "text", "value", "children"]) {
+    const v = p[k];
+    if (typeof v === "string" || typeof v === "number") return String(v);
+    if (Array.isArray(v)) {
+      const g = v.map((x) => cellWert(x, tiefe + 1)).filter(Boolean).join(" ");
+      if (g) return g;
+    }
+  }
+  const kinder = (Array.isArray(n.children) ? n.children : []).slice(0, 50);
+  return kinder.map((k) => cellWert(k, tiefe + 1)).filter(Boolean).join(" ");
+}
+
+/**
+ * Inhalts-Fingerabdruck eines DIL-Baums (begrenzt, damit es billig bleibt).
+ *
+ * Hintergrund (Befund 23.11.2026, Build 132): `useRuntime` seedet seinen Zustand in der
+ * Render-Phase neu, sobald `model.json !== json` (Objektidentität). Baut der Aufrufer das
+ * JSON bei jedem Render neu (z. B. frisch geparst), konvergiert das nie: render →
+ * setState → render → setState … Der UI-Thread hängt und iOS beendet die App per
+ * Watchdog (0x8badf00d) — ohne JS-Exception, also ohne Eintrag in der Crash-Telemetrie.
+ * Deshalb entscheidet jetzt der INHALT (Hash), nicht die Objektidentität.
+ */
+export function dilInhaltHash(json: unknown): string {
+  let s: string;
+  try {
+    s = JSON.stringify(json) ?? "";
+  } catch {
+    return "unserialisierbar";
+  }
+  // Nur der Anfang zählt: gleiche DIL-Bäume sind praktisch immer am Kopf unterscheidbar,
+  // und ein 5-MB-Baum darf hier keine Millisekunden pro Render kosten.
+  const cap = s.length > 20_000 ? s.slice(0, 20_000) : s;
+  let h = 5381;
+  for (let i = 0; i < cap.length; i++) h = ((h << 5) + h + cap.charCodeAt(i)) | 0;
+  return `${cap.length}:${(h >>> 0).toString(36)}`;
+}
+
+/** Muss der Runtime-Zustand neu geseedet werden? (gleicher Inhalt → nein) */
+export function dilNeuSeeden(altHash: string | null, json: unknown): { neu: boolean; hash: string } {
+  const hash = dilInhaltHash(json);
+  return { neu: hash !== altHash, hash };
 }
