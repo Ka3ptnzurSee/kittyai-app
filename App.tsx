@@ -161,6 +161,9 @@ const CHATS_KEY = "pi-chats-v2"; // Legacy-Klartext (nur noch für Migration)
 const FOLDERS_KEY = "pi-folders-v1"; // Legacy-Klartext (nur noch für Migration)
 const CWD_KEY = "pi-cwd";
 const STREAM_STATE_KEY = "pi-stream-state-v1";
+// Der Server meldet "kein laufender Turn", aber die Antwort kam nicht an: nach so vielen
+// Poll-Runden (3 s) Busy aufgeben statt endlos weiterzupollen (Befund 23.11.2026).
+const ENDLOS_POLL_MAX = 3;
 // Werkzeug-Zeilen ("· Werkzeug: bash") im zusammengefügten Turn-Text der Blase.
 // Standard AN; abschaltbar, weil die Blase die Tool-Karten ohnehin separat zeigt.
 const TURN_TOOL_LINES_KEY = "pi-turn-tool-lines-v1";
@@ -1580,7 +1583,23 @@ export default function App() {
     // Fertig: /api/session ist die Wahrheit (hängt die Antwort an, heilt gekappte Blasen,
     // ersetzt einen stehengebliebenen Teiltext). Bei Fehlern bleibt der lokale Stand.
     const angewendet = await reloadFromServer(chatId);
-    if (!angewendet) abgleichGeprueftRef.current.delete(chatId);
+    if (!angewendet) {
+      // Nichts angewandt (Server meldete z. B. im Rennen doch noch activeTurn) → beim
+      // nächsten Öffnen/Vordergrund erneut versuchen statt den Chat abzuschreiben.
+      abgleichGeprueftRef.current.delete(chatId);
+      return;
+    }
+    // Guard nur behalten, wenn danach WIRKLICH eine Antwort nach der letzten Frage steht.
+    // Vorher blieb er auch dann gesetzt, wenn reloadFromServer nur Blasen geheilt oder eine
+    // Fehlerkarte gesetzt hatte — der Chat wäre in diesem App-Lauf nie wieder abgeglichen
+    // worden (genau der Bug, den dieser Fix behebt).
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    const msgs = chat?.messages ?? [];
+    const letzteFrage = msgs.map((m) => m.role).lastIndexOf("user");
+    const hatAntwort = msgs
+      .slice(letzteFrage + 1)
+      .some((m) => m.role === "assistant" && String(m.text || "").trim());
+    if (!hatAntwort) abgleichGeprueftRef.current.delete(chatId);
   }
 
   // Nach einem SERVER-NEUSTART ist die Fehlerblase ("Server neu gestartet") nicht das
@@ -2176,6 +2195,8 @@ export default function App() {
     if (ids.length === 0) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // Wie oft hintereinander meldete der Server "kein Turn", ohne dass eine Antwort ankam?
+    const leerRunden = new Map<string, number>();
     // ALLE busy Chats pollen, nicht nur den aktiven: sonst bleibt eine im Hintergrund
     // fertig gewordene Antwort in einem anderen Chat für immer „busy" hängen.
     const poll = async () => {
@@ -2188,7 +2209,14 @@ export default function App() {
         // der Turn wirklich fertig ist. Vorher: 3 s x 24 KB pro Chat (Poll-Sturm).
         const state = await fetchTurnState(id);
         if (cancelled) return;
-        if (state && state.running && (state.idleMs ?? 0) < 300000) {
+        if (!state) {
+          // Offline/Server weg: KEIN "Turn ist tot"-Signal — einfach weiter warten. Vorher
+          // zählte das in den Abbruch-Zähler und gab nach ~9 s offline auf.
+          stillBusy = true;
+          continue;
+        }
+        if (state.running && (state.idleMs ?? 0) < 300000) {
+          leerRunden.delete(id);
           stillBusy = true;
           continue;
         }
@@ -2210,6 +2238,17 @@ export default function App() {
           markBusy(id, false);
           continue;
         }
+        // Der Server meldet "kein Turn mehr", aber es kam keine Antwort an (typisch: die
+        // Antwort ist lokal schon identisch, ein reiner Heal-Lauf, oder sie ging verloren).
+        // Vorher blieb stillBusy=true → 3-s-Endlosschleife mit 2 Session-Downloads pro
+        // Runde, Dauer-Spinner, Senden blockiert. Nach ENDLOS_POLL_MAX Runden aufgeben.
+        leerRunden.set(id, (leerRunden.get(id) || 0) + 1);
+        if ((leerRunden.get(id) || 0) >= ENDLOS_POLL_MAX) {
+          leerRunden.delete(id);
+          setStatusByChat((prev) => ({ ...prev, [id]: "" }));
+          markBusy(id, false);
+          continue;
+        }
         stillBusy = true;
       }
       if (!cancelled && stillBusy) timer = setTimeout(poll, 3000);
@@ -2227,7 +2266,7 @@ export default function App() {
     if (!chat || chat.readOnly || chat.remote) return;
     void syncChatFromServer(activeChatId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeChatId, foregroundTick]);
+  }, [activeChatId, foregroundTick, serverUrl]);
 
   // Lokalen (verschlüsselten) Chat-Store schreiben — AUTO-COMPACT statt Löschen.
   // `compactChatsForStorage` opfert NIE einen Chat-Eintrag: es werden nur Nachrichten-
@@ -3166,13 +3205,20 @@ export default function App() {
       // im offenen fetch/read einen AbortError, NICHT BackgroundDetached. Vorher landete
       // das im "echter Server-Fehler"-Zweig: Fehlerkarte, busy weg, kein Polling →
       // die serverseitig fertig gerechnete Antwort kam nie mehr an (Befund 23.11.2026).
-      const warHintergrundAbbruch = (e as { name?: string })?.name === "AbortError" && wentBackgroundRef.current;
-      if (e instanceof BackgroundDetached || warHintergrundAbbruch) {
+      // Ein AbortError kann NUR von uns kommen (abortControllersRef): Nutzer-Abbruch wird
+      // oben über abortedRef abgefangen, deleteChat ebenso — hier bleibt Hintergrund/Timeout.
+      const istEigenerAbbruch = (e as { name?: string })?.name === "AbortError";
+      if (e instanceof BackgroundDetached || istEigenerAbbruch) {
         // Erwarteter Vorgang: App war im Hintergrund, iOS hat die Verbindung gekillt.
         // Der Server-Turn läuft weiter. KEIN Fehler, KEIN Retry-Sturm — beim
         // Zurückkehren lädt der Vordergrund-Sync die Antwort per REST nach.
         turnStillRunning = true;
-        setStatusByChat((prev) => ({ ...prev, [chatId]: "App im Hintergrund — Antwort läuft auf dem Server weiter …" }));
+        setStatusByChat((prev) => ({
+          ...prev,
+          [chatId]: wentBackgroundRef.current
+            ? "App im Hintergrund — Antwort läuft auf dem Server weiter …"
+            : "Verbindung neu aufbauen — Antwort läuft auf dem Server weiter …",
+        }));
         return;
       }
       if (e instanceof StreamInterrupted) {
