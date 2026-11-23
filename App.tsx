@@ -1079,7 +1079,7 @@ export default function App() {
   // serverseitig einzeln widerrufen werden kann.
   const submitPairCode = useCallback(async () => {
     // Gegenrichtung zur Sperre im Apple-Weg: kein paralleler Token-Tausch.
-    if (pairBusy || Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
+    if (Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
     const code = pairCode.replace(/\D/g, "");
     if (code.length !== 6) {
       setPairErr("Bitte den 6-stelligen Code eingeben");
@@ -1090,7 +1090,8 @@ export default function App() {
       setPairErr("Kopplung nur über HTTPS möglich");
       return;
     }
-    pairLockAt.current = Date.now();
+    const stamp = Date.now();
+    pairLockAt.current = stamp;
     setPairBusy(true);
     setPairErr("");
     // 15 s Timeout: ein hängender Request darf die Kopplung nicht blockieren.
@@ -1127,25 +1128,29 @@ export default function App() {
       setPairErr(aborted ? "Zeitüberschreitung — Server nicht erreichbar" : "Netzwerkfehler: " + (e?.message || String(e)));
     } finally {
       clearTimeout(timer);
-      pairLockAt.current = 0;
+      // Nur der Eigentuemer gibt frei: ein nach Stale-Ablauf gestarteter zweiter
+      // Weg darf von diesem hier nicht entsperrt werden.
+      if (pairLockAt.current === stamp) pairLockAt.current = 0;
       setPairBusy(false);
     }
-  }, [pairBusy, pairCode, pairName, serverUrl]);
+  }, [pairCode, pairName, serverUrl]);
 
   // Sign in with Apple: Apple signiert das identityToken (Face ID), der Server
   // prueft es gegen Apples JWKS und gibt ein Geraete-Token aus. Der Code-Weg
   // oben bleibt als Notausgang, falls Apple nicht erreichbar ist.
   const submitAppleLogin = useCallback(async () => {
     // Ref statt State: zwei Taps im selben Tick sehen beide ein veraltetes pairBusy.
-    // Zusaetzlich pairBusy: der Code-Weg darf nicht parallel laufen (Token-Race).
-    if (pairBusy || Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
+    // Nur das Lock zaehlt (nicht pairBusy): sonst hebt ein haengender Apple-Call
+    // die Staleness aus und der Code-Notausgang waere dauerhaft zu.
+    if (Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
     if (!serverUrl.startsWith("https://")) {
       setPairErr("Apple-Anmeldung nur über HTTPS möglich");
       return;
     }
     // Erst nach allen Vorpruefungen sperren — der einzige Reset steht im finally,
     // damit kein Wurf zwischen Sperre und try das Ref haengen laesst.
-    pairLockAt.current = Date.now();
+    const stamp = Date.now();
+    pairLockAt.current = stamp;
     setPairBusy(true);
     setPairErr("");
     try {
@@ -1207,10 +1212,10 @@ export default function App() {
         setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
       }
     } finally {
-      pairLockAt.current = 0;
+      if (pairLockAt.current === stamp) pairLockAt.current = 0;
       setPairBusy(false);
     }
-  }, [pairName, pairBusy, serverUrl]);
+  }, [pairName, serverUrl]);
 
   // Verbrauch + Guthaben vom Server holen. chatId null = nur Gesamt/Guthaben (Hauptmenü).
   // fresh=true umgeht die Server-Caches (Guthaben 60 s): Tippen auf die Anzeige erneuert sie.
