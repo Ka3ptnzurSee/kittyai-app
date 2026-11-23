@@ -1115,23 +1115,24 @@ export default function App() {
       }
       // Nur der Eigentuemer darf Token/State schreiben; nach Stale-Ablauf kann
       // ein zweiter Weg parallel laufen und wuerde sonst divergieren.
-      if (pairLockSeq.current !== stamp) return;
-      setApiToken(String(data.token));
-      setPairGate(false);
-      setPairCode("");
+      const token = String(data.token);
       // Token NUR in den Keychain. AsyncStorage (Klartext) ausschließlich als
       // Fallback, wenn SecureStore nicht verfügbar ist — und dann nur einmalig.
-      // Owner unmittelbar vor dem Write erneut pruefen: zwischen Recheck und
-      // Keychain-Write liegt ein await, der Lock kann inzwischen verwaist sein.
-      if (pairLockSeq.current !== stamp) return;
-      const saved = await SecureStore.setItemAsync(TOKEN_KEY, String(data.token), {
+      const saved = await SecureStore.setItemAsync(TOKEN_KEY, token, {
         keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
       }).then(() => true).catch(() => false);
+      // Erst NACH dem Write pruefen: vorher gibt es kein await-Fenster, jetzt
+      // kann ein neuerer Tausch den Lock uebernommen haben. Ein verworfener
+      // Flow darf danach weder State noch Klartext-Store mehr anfassen.
+      if (pairLockSeq.current !== stamp) return;
       if (saved) {
         AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
       } else {
-        AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+        AsyncStorage.setItem(TOKEN_KEY, token).catch(() => {});
       }
+      setApiToken(token);
+      setPairGate(false);
+      setPairCode("");
     } catch (e: any) {
       const aborted = e?.name === "AbortError";
       setPairErr(aborted ? "Zeitüberschreitung — Server nicht erreichbar" : "Netzwerkfehler: " + (e?.message || String(e)));
@@ -1199,10 +1200,11 @@ export default function App() {
         // Schlägt der Keychain fehl, brechen wir ab statt unsicher zu speichern.
         if (pairLockSeq.current !== stamp) return;
         const token = String(data.token);
-        if (pairLockSeq.current !== stamp) return;
         const saved = await SecureStore.setItemAsync(TOKEN_KEY, token, {
           keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
         }).then(() => true).catch(() => false);
+        // Nach dem Write: ein neuerer Tausch koennte den Lock uebernommen haben.
+        if (pairLockSeq.current !== stamp) return;
         if (!saved) {
           setPairErr("Keychain nicht verfügbar — Anmeldung abgebrochen");
           return;
