@@ -43,7 +43,7 @@ import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
 import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
-import { Dil, DilRichText } from "./Dil";
+import { Dil, DilBereich, DilRichText } from "./Dil";
 import { SichererBlock } from "./SichererBlock";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -540,12 +540,16 @@ function MessageBubble({
               nicht den ganzen Verlauf (und damit die App) mitnehmen. */}
           <SichererBlock bereich="dil" kompakt resetKey={String(item.id || "")}>
             {Array.isArray(item.dil) && item.dil.length > 0 ? (
-              <View style={{ gap: 8 }}>
-                <DilRichText text={stripDilFences(item.text || "")} onAction={(t) => onDilAction?.(t)} />
-                {item.dil.map((block, i) => (
-                  <Dil key={i} json={block} onAction={(t) => onDilAction?.(t)} />
-                ))}
-              </View>
+              // Ein DilBereich für ALLE Blöcke dieser Nachricht: Slider in Block 1
+              // muss den Chart in Block 2 bewegen (Befund 23.11.2026).
+              <DilBereich jsons={item.dil} onAction={(t) => onDilAction?.(t)}>
+                <View style={{ gap: 8 }}>
+                  <DilRichText text={stripDilFences(item.text || "")} onAction={(t) => onDilAction?.(t)} />
+                  {item.dil.map((block, i) => (
+                    <Dil key={i} json={block} onAction={(t) => onDilAction?.(t)} />
+                  ))}
+                </View>
+              </DilBereich>
             ) : (
               <DilRichText text={normalizeBlankRuns(item.text || "")} onAction={(t) => onDilAction?.(t)} />
             )}
@@ -941,6 +945,9 @@ export default function App() {
   }
 
   const appStateRef = useRef(AppState.currentState);
+  // Chats, für die in DIESEM App-Lauf schon ein Server-Abgleich lief (siehe
+  // syncChatFromServer) — verhindert einen Session-Download bei jedem Chat-Wechsel.
+  const abgleichGeprueftRef = useRef<Set<string>>(new Set());
   // true, wenn die App seit dem letzten Turn-Start im Hintergrund war. Damit kann der
   // Client "ich wurde selbst suspendiert" von "das Netz ist weg" unterscheiden — und
   // zeigt dann KEINE Fehlerkarte (so machen es ChatGPT und Claude auch).
@@ -965,7 +972,9 @@ export default function App() {
         return;
       }
       if (s === "active") {
-        // Rückkehr in den Vordergrund: alle busy Chats vom Server neu laden.
+        // Rückkehr in den Vordergrund: alle busy Chats vom Server neu laden. Den
+        // Abgleich-Guard lösen, weil in der Zwischenzeit ein Turn fertig geworden sein kann.
+        abgleichGeprueftRef.current.clear();
         setForegroundTick((t) => t + 1);
       }
     });
@@ -1547,6 +1556,33 @@ export default function App() {
     }
   }
 
+  // Antwort nachholen, die serverseitig FERTIG wurde, während der Chat geschlossen war.
+  //
+  // Befund 23.11.2026 (Per: "app stürzt nicht mehr ab, aber wieso kommen die Antworten
+  // bei Chat schließen danach nicht mehr durch?"): Der Server rechnet den Turn weiter,
+  // auch wenn der SSE-Client weg ist — die Antwort steht also in der Session-Datei.
+  // Die App hat sie aber nie geholt: lokale App-Chats wurden beim Öffnen NICHT mit dem
+  // Server abgeglichen (nur `remote`-Chats werden adoptiert und nachgeladen), und das
+  // Session-Polling läuft nur für Chats, die in DIESEM Prozess als busy markiert sind
+  // (nach einem Kaltstart ist das Set leer). Ergebnis: Teiltext oder leere Blase blieb
+  // für immer stehen, obwohl die vollständige Antwort auf dem Server lag.
+  async function syncChatFromServer(chatId: string): Promise<void> {
+    if (abortControllersRef.current.has(chatId)) return; // eigener Stream läuft bereits
+    if (abgleichGeprueftRef.current.has(chatId)) return; // in diesem Lauf schon geprüft
+    abgleichGeprueftRef.current.add(chatId);
+    const state = await fetchTurnState(chatId);
+    if (state?.running) {
+      // Turn läuft noch → Busy setzen, das Session-Polling holt die Antwort, sobald fertig.
+      abgleichGeprueftRef.current.delete(chatId); // nach dem Turn erneut prüfen dürfen
+      markBusy(chatId, true);
+      return;
+    }
+    // Fertig: /api/session ist die Wahrheit (hängt die Antwort an, heilt gekappte Blasen,
+    // ersetzt einen stehengebliebenen Teiltext). Bei Fehlern bleibt der lokale Stand.
+    const angewendet = await reloadFromServer(chatId);
+    if (!angewendet) abgleichGeprueftRef.current.delete(chatId);
+  }
+
   // Nach einem SERVER-NEUSTART ist die Fehlerblase ("Server neu gestartet") nicht das
   // Ende: der Server hat den Turn als rettbar gespeichert und schreibt die Teilantwort
   // (oder den Auto-Retry) in die Session-Datei — oft erst ein bis zwei Sekunden nach
@@ -1960,7 +1996,14 @@ export default function App() {
                 (m: any) => m.role === "assistant" && !(m.text?.trim()) && !m.error,
               ).pop();
               const userMsg = [...chat.messages].reverse().find((m: any) => m.role === "user");
-              if (!aiMsg || !userMsg) continue;
+              if (!userMsg) continue;
+              if (!aiMsg) {
+                // Keine LEERE KI-Bubble mehr (Bubble wurde geleert/entfernt oder hatte schon
+                // Teiltext): nicht erneut streamen (das würde doppelt senden), sondern den
+                // fertigen Server-Stand holen — sonst bliebe die Antwort dauerhaft weg.
+                void syncChatFromServer(chat.id);
+                continue;
+              }
               markBusy(chat.id, true);
               streamChat(userMsg.text, chat.id, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId)
                 .then(() => markBusy(chat.id, false))
@@ -2038,6 +2081,10 @@ export default function App() {
       loadMeta();
       loadConnectorsList();
       loadedRef.current = true;
+      // Den Chat-Abgleich (syncChatFromServer) nach dem Laden einmal anstoßen — der
+      // Effect hängt an activeChatId/foregroundTick und feuert sonst nicht, wenn der
+      // Chat schon VOR loadedRef (Deep-Link/Widget) aktiv war.
+      setForegroundTick((t) => t + 1);
       perfAdd("app.init", Date.now() - moduleStartedAt);
       registerPush(url, savedToken);
     })();
@@ -2170,6 +2217,17 @@ export default function App() {
     timer = setTimeout(poll, 3000);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
+
+  // Beim Öffnen eines lokal vorliegenden Chats UND bei jeder Rückkehr in den Vordergrund
+  // einmal abgleichen: nur so kommt eine Antwort an, die fertig wurde, während der Chat
+  // geschlossen bzw. die App im Hintergrund war (siehe syncChatFromServer).
+  useEffect(() => {
+    if (!loadedRef.current || !activeChatId) return;
+    const chat = chatsRef.current.find((c) => c.id === activeChatId);
+    if (!chat || chat.readOnly || chat.remote) return;
+    void syncChatFromServer(activeChatId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChatId, foregroundTick]);
 
   // Lokalen (verschlüsselten) Chat-Store schreiben — AUTO-COMPACT statt Löschen.
   // `compactChatsForStorage` opfert NIE einen Chat-Eintrag: es werden nur Nachrichten-
@@ -3104,7 +3162,12 @@ export default function App() {
         abortedRef.current.delete(chatId);
         return; // Nutzer-Abbruch → kein Fallback
       }
-      if (e instanceof BackgroundDetached) {
+      // Der AppState-Handler bricht beim Wechsel in den Hintergrund selbst ab — das wirft
+      // im offenen fetch/read einen AbortError, NICHT BackgroundDetached. Vorher landete
+      // das im "echter Server-Fehler"-Zweig: Fehlerkarte, busy weg, kein Polling →
+      // die serverseitig fertig gerechnete Antwort kam nie mehr an (Befund 23.11.2026).
+      const warHintergrundAbbruch = (e as { name?: string })?.name === "AbortError" && wentBackgroundRef.current;
+      if (e instanceof BackgroundDetached || warHintergrundAbbruch) {
         // Erwarteter Vorgang: App war im Hintergrund, iOS hat die Verbindung gekillt.
         // Der Server-Turn läuft weiter. KEIN Fehler, KEIN Retry-Sturm — beim
         // Zurückkehren lädt der Vordergrund-Sync die Antwort per REST nach.

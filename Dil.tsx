@@ -1216,8 +1216,11 @@ function DilAllein({ json, onAction }: { json: unknown; onAction?: (text: string
 export function DilBereich({ jsons, onAction, children }: { jsons: unknown[]; onAction?: (text: string, name: string) => void; children: ReactNode }) {
   // Objektidentitaet stabil halten: useRuntime startet bei neuem `json` neu — ein bei jedem
   // Render frisch gebautes Objekt erzeugte eine Endlos-Render-Schleife (Befund 23.11.2026).
+  const aussen = useContext(DilRuntimeCtx);
   const seedJson = useMemo(() => ({ children: jsons }), [jsons]);
   const { rt, dispatch } = useRuntime(seedJson, onAction);
+  // Verschachtelte Bereiche teilen den äußeren State (sonst zwei getrennte Stores).
+  if (aussen) return <>{children}</>;
   return <DilRuntimeCtx.Provider value={{ rt, dispatch }}>{children}</DilRuntimeCtx.Provider>;
 }
 
