@@ -151,8 +151,9 @@ export function Pressable({
   hitSlop?: number;
   accessibilityLabel?: string;
   accessibilityHint?: string;
-  /** z. B. "button" | "tab" | "link" — VoiceOver-Ansage (Valdi: a11y_role). */
-  accessibilityRole?: "button" | "tab" | "link" | "header" | "image" | "none" | "radio" | "checkbox" | "search";
+  /** z. B. "button" | "tab" | "link" — VoiceOver-Ansage (Valdi: a11y_role).
+   *  "switch" fuer echte An/Aus-Schalter (VoiceOver sagt dann "Schalter, an/aus"). */
+  accessibilityRole?: "button" | "tab" | "link" | "header" | "image" | "none" | "radio" | "checkbox" | "switch" | "search";
   accessibilityState?: { selected?: boolean; disabled?: boolean; busy?: boolean; expanded?: boolean; checked?: boolean };
   /** Container, der nur Taps schluckt: komplett aus der VoiceOver-Reihenfolge nehmen. */
   accessibilityElementsHidden?: boolean;

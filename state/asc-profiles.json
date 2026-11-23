@@ -1,34 +1,34 @@
 {
-  "ts": "2026-11-18T14:11:38.845Z",
+  "ts": "2026-11-23T16:20:32.941Z",
   "cert": "SS85KG94PB",
   "report": [
     {
       "bundleId": "com.meister.piapp",
-      "profileId": "Y3D3SYVG8K",
+      "profileId": "4WPRMJUYZ9",
       "file": "credentials/profile_com_meister_piapp.mobileprovision",
       "action": "neu angelegt",
       "error": null,
       "check": {
         "plistOk": true,
         "entitlements": "<key>beta-reports-active</key> <true/> <key>com.apple.developer.media-device-extension</key> <array></array> <key>com.apple.developer.networking.slicing.appcategory</key> <array> <string>communication-9000</string> <string>games-6014</string> <string>streaming-9001</string> <string>missionCritical-9500</string> </array> <key>com.apple.developer.networking.wifi-info</key> <true/> <key>com.apple.sec",
-        "bytes": 11483
+        "bytes": 11647
       }
     },
     {
       "bundleId": "com.meister.piapp.share",
-      "profileId": "792L2RQMAV",
+      "profileId": "55LM594GG7",
       "file": "credentials/profile_com_meister_piapp_share.mobileprovision",
       "action": "neu angelegt",
       "error": null,
       "check": {
         "plistOk": true,
         "entitlements": "<key>beta-reports-active</key> <true/> <key>com.apple.security.application-groups</key> <array> <string>group.com.meister.piapp</string> </array> <key>application-identifier</key> <string>VW2SBC8228.com.meister.piapp.share</string> <key>keychain-access-groups</key> <array> <string>VW2SBC8228.*</string> <string>com.apple.token</string> </array> <key>get-task-allow</key> <false/> <key>com.apple.deve",
-        "bytes": 8238
+        "bytes": 8242
       }
     },
     {
       "bundleId": "com.meister.piapp.widget",
-      "profileId": "58MB5MH5Y9",
+      "profileId": "ZAK6PF7H92",
       "file": "credentials/profile_com_meister_piapp_widget.mobileprovision",
       "action": "neu angelegt",
       "error": null,
@@ -40,7 +40,7 @@
     },
     {
       "bundleId": "com.meister.piapp.notificationservice",
-      "profileId": "SJF7TXU2HZ",
+      "profileId": "7445CS678S",
       "file": "credentials/profile_com_meister_piapp_notificationservice.mobileprovision",
       "action": "neu angelegt",
       "error": null,

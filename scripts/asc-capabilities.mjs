@@ -25,7 +25,7 @@ const APP_GROUP = 'group.com.meister.piapp';
 
 // Soll-Zustand: welche Bundle-ID braucht welche Capability?
 const TARGETS = [
-  { bundleId: ROOT_BUNDLE, name: 'KittyAI', capabilities: ['PUSH_NOTIFICATIONS', 'APP_GROUPS'] },
+  { bundleId: ROOT_BUNDLE, name: 'KittyAI', capabilities: ['PUSH_NOTIFICATIONS', 'APP_GROUPS', 'APPLE_ID_AUTH'] },
   { bundleId: ROOT_BUNDLE + '.widget', name: 'KittyAI Widget', capabilities: ['APP_GROUPS'] },
   { bundleId: ROOT_BUNDLE + '.share', name: 'KittyAI Share', capabilities: ['APP_GROUPS'] },
   { bundleId: ROOT_BUNDLE + '.notificationservice', name: 'KittyAI Push Service', capabilities: ['PUSH_NOTIFICATIONS', 'APP_GROUPS'] },
@@ -98,12 +98,13 @@ async function listCapabilities(id) {
   return (page.data || []).map((c) => c.attributes.capabilityType);
 }
 
-async function enableCapability(id, capabilityType) {
+async function enableCapability(id, capabilityType, settings) {
+  const attributes = settings ? { capabilityType, settings } : { capabilityType };
   return api('POST', '/v1/bundleIdCapabilities', {
     data: {
       type: 'bundleIdCapabilities',
       // APP_GROUPS nimmt KEINE settings entgegen (nur ICLOUD_VERSION, DATA_PROTECTION_PERMISSION_LEVEL, APPLE_ID_AUTH_APP_CONSENT sind erlaubt) — die Gruppe selbst kennt die ASC-API nicht.
-      attributes: { capabilityType },
+      attributes,
       relationships: { bundleId: { data: { type: 'bundleIds', id } } },
     },
   });
@@ -152,7 +153,13 @@ async function main() {
         if (row.capsBefore.includes(cap)) continue;
         if (!apply) { row.capsEnabled.push(cap + ' (dry-run)'); continue; }
         try {
-          await enableCapability(rec.id, cap);
+          await enableCapability(
+            rec.id,
+            cap,
+            cap === 'APPLE_ID_AUTH'
+              ? [{ key: 'APPLE_ID_AUTH_APP_CONSENT', options: [{ key: 'PRIMARY_APP_CONSENT' }] }]
+              : undefined
+          );
           row.capsEnabled.push(cap);
         } catch (e) {
           row.capsEnabled.push(cap + ' FEHLER ' + e.status + ' ' + JSON.stringify(e.body && e.body.errors && e.body.errors[0] && e.body.errors[0].detail));

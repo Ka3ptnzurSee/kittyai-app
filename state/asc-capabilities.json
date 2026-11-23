@@ -1,5 +1,5 @@
 {
-  "ts": "2026-11-18T13:44:37.641Z",
+  "ts": "2026-11-23T15:56:14.618Z",
   "apply": false,
   "team": "VW2SBC8228",
   "bundleIds": [
@@ -8,8 +8,21 @@
       "existed": true,
       "created": false,
       "capsBefore": [
+        "ICLOUD_EXTENDED_SHARE_ACCESS",
+        "FAMILY_CONTROLS_WEBSITE_USAGE",
         "IN_APP_PURCHASE",
         "PUSH_NOTIFICATIONS",
+        "USERNOTIFICATIONS_COMMUNICATION",
+        "FAMILY_CONTROLS",
+        "HEALTHKIT_RECALIBRATE_ESTIMATES",
+        "MEDIA_SHARING_EXTENSION",
+        "APPLE_ID_AUTH",
+        "FAMILY_CONTROLS_DISTRIBUTION",
+        "TAP_TO_DISPLAY_ID",
+        "NETWORK_SLICING",
+        "HOMEKIT",
+        "HEALTHKIT",
+        "ACCESS_WIFI_INFORMATION",
         "APP_GROUPS"
       ],
       "capsEnabled": [],

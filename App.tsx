@@ -33,6 +33,7 @@ import * as Notifications from "expo-notifications";
 import * as Updates from "expo-updates";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
+import * as AppleAuthentication from "expo-apple-authentication";
 import * as Clipboard from "expo-clipboard";
 import { secureGet, secureSet, SecureStoreError } from "./secureStore";
 import Constants from "expo-constants";
@@ -760,6 +761,10 @@ export default function App() {
   const [folderSuggestion, setFolderSuggestion] = useState<{ chatId: string; folderId: string; name: string } | null>(null);
   // Modell-Menü
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  // Auto-Modus (Server-Schalter je Chat): an = Tool-Aufrufe laufen ohne Freigabe-Karten.
+  // Zustand liegt auf dem Server (data/auto-mode.json), damit er pro Chat gilt und
+  // einen App-/Server-Neustart ueberlebt; hier nur die Anzeige.
+  const [autoMode, setAutoMode] = useState(false);
   const [dynamicModels, setDynamicModels] = useState<{ key: string; label: string; deactivated?: boolean }[]>([]);
   // Chat umbenennen
   const [renameChatId, setRenameChatId] = useState<string | null>(null);
@@ -1118,6 +1123,71 @@ export default function App() {
     }
   }, [pairCode, pairName, serverUrl]);
 
+  // Sign in with Apple: Apple signiert das identityToken (Face ID), der Server
+  // prueft es gegen Apples JWKS und gibt ein Geraete-Token aus. Der Code-Weg
+  // oben bleibt als Notausgang, falls Apple nicht erreichbar ist.
+  const submitAppleLogin = useCallback(async () => {
+    if (!serverUrl.startsWith("https://")) {
+      setPairErr("Apple-Anmeldung nur über HTTPS möglich");
+      return;
+    }
+    setPairBusy(true);
+    setPairErr("");
+    try {
+      const cred = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+      if (!cred?.identityToken) {
+        setPairErr("Apple hat kein Token geliefert");
+        return;
+      }
+      const base = serverUrl.replace(/\/+$/, "");
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 15_000);
+      try {
+        const res = await fetch(base + "/api/auth/apple", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            identityToken: cred.identityToken,
+            name: pairName.trim() || "iPhone",
+            platform: Platform.OS,
+          }),
+          signal: ac.signal,
+        });
+        const data: any = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.token) {
+          setPairErr(data?.error || `Apple-Anmeldung fehlgeschlagen (${res.status})`);
+          return;
+        }
+        setApiToken(String(data.token));
+        setPairGate(false);
+        const saved = await SecureStore.setItemAsync(TOKEN_KEY, String(data.token), {
+          keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+        }).then(() => true).catch(() => false);
+        if (saved) {
+          AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
+        } else {
+          AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (e: any) {
+      // Nutzer hat den Apple-Dialog abgebrochen: keine Fehlermeldung noetig.
+      if (e?.code === "ERR_REQUEST_CANCELED" || e?.code === "ERR_CANCELED") {
+        setPairErr("");
+      } else {
+        setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
+      }
+    } finally {
+      setPairBusy(false);
+    }
+  }, [pairName, serverUrl]);
+
   // Verbrauch + Guthaben vom Server holen. chatId null = nur Gesamt/Guthaben (Hauptmenü).
   // fresh=true umgeht die Server-Caches (Guthaben 60 s): Tippen auf die Anzeige erneuert sie.
   const refreshUsage = useCallback(async (chatId: string | null, fresh = false) => {
@@ -1161,6 +1231,48 @@ export default function App() {
     if (activeChatId) patchChat(activeChatId, (c) => ({ ...c, model: key }));
     setModelMenuOpen(false);
   }
+  // Auto-Modus des offenen Chats vom Server holen (Chat-Wechsel/Start). Der Server
+  // haelt den Zustand pro Chat (data/auto-mode.json) — hier nur die Anzeige.
+  useEffect(() => {
+    if (!activeChatId) { setAutoMode(false); return; }
+    let alive = true;
+    const base = serverUrl.replace(/\/+$/, "");
+    fetch(`${base}/api/auto-mode?chatId=${encodeURIComponent(activeChatId)}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: any) => { if (alive && d && typeof d.autoMode === "boolean") setAutoMode(d.autoMode); })
+      .catch(() => { /* Netz weg → alten Stand stehen lassen */ });
+    return () => { alive = false; };
+  }, [activeChatId, serverUrl, authHeaders]);
+
+  // Auto-Modus umschalten: optimistisch (Chip reagiert sofort), bei Fehler zurueckdrehen
+  // und eine kurze Meldung zeigen. Nur dieser Chat ist betroffen.
+  const toggleAutoMode = useCallback(async () => {
+    const chatId = activeChatId;
+    if (!chatId) return;
+    const next = !autoMode;
+    setAutoMode(next);
+    const base = serverUrl.replace(/\/+$/, "");
+    try {
+      const res = await fetch(base + "/api/auto-mode", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ chatId, enabled: next }),
+      });
+      const d: any = await res.json().catch(() => ({}));
+      if (!res.ok || d?.ok !== true) throw new Error(d?.error || `Server-Fehler ${res.status}`);
+      setAutoMode(d.autoMode === true);
+      if (d.autoMode === true) {
+        Alert.alert(
+          "Auto-Modus an: Dauerbetrieb",
+          "Deine naechste Nachricht startet einen /goal-Lauf: KittyAI fuehrt Werkzeuge (bash, Dateien, Code) ohne Nachfrage aus und arbeitet weiter, bis das Ziel belegt erfuellt ist oder ein Deckel greift (max. 30 h / Turn-Limit). Gilt nur fuer diesen Chat; Chip erneut antippen beendet die Freigabe.",
+        );
+      }
+    } catch (e: any) {
+      setAutoMode(!next); // zuruecksetzen auf den echten Server-Stand
+      Alert.alert("Auto-Modus nicht geändert", e?.message || String(e));
+    }
+  }, [activeChatId, autoMode, serverUrl, authHeaders]);
+
   function patchMsg(chatId: string, msgId: string, fn: (m: Msg) => Msg) {
     setChats((cs) =>
       cs.map((c) =>
@@ -4447,6 +4559,21 @@ export default function App() {
                   <Text style={styles.modelBarText} numberOfLines={1}>{modelOptions().find((o) => o.key === activeModel)?.label ?? "FLASH"}</Text>
                   <Ionicons name="chevron-down" size={12} color={colors.muted} />
                 </Pressable>
+                {/* Auto-Modus (wie Claude Codes auto mode): an = Werkzeuge laufen ohne
+                    Freigabe-Karten. Punkt + Farbe als Zustandsanzeige, Rest wie der
+                    Modell-Chip — bewusst kein zusaetzliches Menue. */}
+                <Pressable
+                  onPress={() => void toggleAutoMode()}
+                  style={[styles.modelBarChip, autoMode && styles.autoModeChipOn]}
+                  hitSlop={6}
+                  accessibilityRole="switch"
+                  accessibilityState={{ checked: autoMode }}
+                  accessibilityLabel="Auto-Modus"
+                  accessibilityHint="Werkzeuge ohne Freigabe-Karten ausführen"
+                >
+                  <View style={[styles.autoModeDot, autoMode && styles.autoModeDotOn]} />
+                  <Text style={[styles.modelBarText, autoMode && styles.autoModeTextOn]}>Auto</Text>
+                </Pressable>
               </View>
               <Text style={styles.disclaimer}>KittyAI kann Fehler machen — wichtige Informationen prüfen.</Text>
             </KeyboardAvoidingView>
@@ -4760,6 +4887,18 @@ export default function App() {
             <Text style={styles.pairHint}>
               Auf dem Server einen Code erzeugen und hier eingeben. Danach merkt sich dieses Gerät sein eigenes Token.
             </Text>
+            {Platform.OS === "ios" ? (
+              <View style={styles.appleWrap}>
+                <AppleAuthentication.AppleAuthenticationButton
+                  buttonType={AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN}
+                  buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE_OUTLINE}
+                  cornerRadius={12}
+                  style={styles.appleButton}
+                  onPress={submitAppleLogin}
+                />
+                <Text style={styles.pairSwitchHint}>Oder Code vom Server eingeben:</Text>
+              </View>
+            ) : null}
             <TextInput
               style={styles.pairInput}
               value={pairName}
@@ -5107,8 +5246,13 @@ const styles = StyleSheet.create({
   sendBtn: { width: 42, height: 42, borderRadius: 999, backgroundColor: colors.accent, alignItems: "center", justifyContent: "center" },
   sendBtnDisabled: { backgroundColor: colors.muted },
   disclaimer: { textAlign: "center", color: colors.muted, fontSize: 11, paddingTop: 2, paddingBottom: 6 },
-  modelBar: { flexDirection: "row", paddingHorizontal: 12, paddingBottom: 4, backgroundColor: colors.surface },
+  modelBar: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingBottom: 4, backgroundColor: colors.surface },
   modelBarChip: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, borderWidth: 1, borderColor: colors.border, alignSelf: "flex-start" },
+  // Auto-Modus-Chip: gleiche Form wie der Modell-Chip, Farbe/Punkt zeigen den Zustand.
+  autoModeChipOn: { borderColor: colors.accent, backgroundColor: "rgba(2,133,255,0.10)" },
+  autoModeDot: { width: 7, height: 7, borderRadius: 999, backgroundColor: colors.border },
+  autoModeDotOn: { backgroundColor: colors.accent },
+  autoModeTextOn: { color: colors.accent },
   modelBarText: { fontSize: 11, fontWeight: "700", color: colors.muted, letterSpacing: 0.4 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(26,25,24,0.35)", justifyContent: "center", padding: 24 },
   modalCard: { backgroundColor: colors.surface, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: colors.border },
@@ -5175,6 +5319,9 @@ const styles = StyleSheet.create({
   pairHint: { fontSize: 13, color: colors.muted, lineHeight: 19 },
   pairInput: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, color: colors.text, fontSize: 15 },
   pairCodeInput: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, color: colors.text, fontSize: 24, letterSpacing: 8, textAlign: "center" },
+  appleWrap: { marginBottom: 10, gap: 8 },
+  appleButton: { width: "100%", height: 48 },
+  pairSwitchHint: { fontSize: 13, color: colors.muted, textAlign: "center" },
   pairError: { fontSize: 13, color: "#ff8a8a" },
   pairButton: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 13, alignItems: "center", marginTop: 4 },
   pairButtonText: { color: "#ffffff", fontWeight: "700", fontSize: 15 },
