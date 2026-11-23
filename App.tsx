@@ -741,7 +741,11 @@ export default function App() {
   // Gemeinsame Sperre fuer BEIDE Token-Tausch-Wege (Apple + Code). Zeitstempel
   // statt bool: eine gehaengte Apple-Promise darf den Code-Notausgang nicht
   // dauerhaft blockieren — nach PAIR_LOCK_STALE_MS gilt die Sperre als verwaist.
-  const PAIR_LOCK_STALE_MS = 60_000;
+  // Notnetz, kein normaler Pfad: der Apple-Dialog hat ein eigenes Zeitlimit
+  // (SIGN_IN_TIMEOUT_MS), deshalb sollte die Sperre nie veralten. Bleibt sie
+  // trotzdem haengen (JS pausiert im Hintergrund), oeffnet sie nach 3 Minuten.
+  const PAIR_LOCK_STALE_MS = 180_000;
+  const SIGN_IN_TIMEOUT_MS = 120_000;
   const pairLockAt = useRef(0);
   // Eigentuemer-Marke: monoton statt Date.now(), damit zwei Aufrufe nie denselben
   // Stamp bekommen koennen.
@@ -1169,12 +1173,24 @@ export default function App() {
     setPairBusy(true);
     setPairErr("");
     try {
-      const cred = await AppleAuthentication.signInAsync({
-        requestedScopes: [
-          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
-          AppleAuthentication.AppleAuthenticationScope.EMAIL,
-        ],
-      });
+      // Harter Deckel auf den Apple-Dialog: sonst bleibt der Lock bei einem
+      // haengenden System-Dialog stehen und ein zweiter Tausch koennte parallel
+      // laufen (Keychain-Race). Race -> Reject mit AbortError.
+      let signInTimer: any = null;
+      const cred: any = await Promise.race([
+        AppleAuthentication.signInAsync({
+          requestedScopes: [
+            AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+            AppleAuthentication.AppleAuthenticationScope.EMAIL,
+          ],
+        }),
+        new Promise((_, reject) => {
+          signInTimer = setTimeout(
+            () => reject(Object.assign(new Error("Apple-Dialog Zeitüberschreitung"), { name: "AbortError" })),
+            SIGN_IN_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(signInTimer));
       if (!cred?.identityToken) {
         setPairErr("Apple hat kein Token geliefert");
         return;
