@@ -738,9 +738,11 @@ export default function App() {
   // Geräte-Kopplung: ohne gültiges Geräte-Token gibt der Server 401 zurück.
   const [pairGate, setPairGate] = useState(false);
   const [pairCode, setPairCode] = useState("");
-  // Synchroner Sperr-Riegel fuer den Apple-Login: State (pairBusy) ist innerhalb
-  // desselben Ticks noch nicht aktualisiert, ein Ref dagegen schon.
-  const appleBusyRef = useRef(false);
+  // Gemeinsame Sperre fuer BEIDE Token-Tausch-Wege (Apple + Code). Zeitstempel
+  // statt bool: eine gehaengte Apple-Promise darf den Code-Notausgang nicht
+  // dauerhaft blockieren — nach PAIR_LOCK_STALE_MS gilt die Sperre als verwaist.
+  const PAIR_LOCK_STALE_MS = 60_000;
+  const pairLockAt = useRef(0);
   const [pairName, setPairName] = useState(Platform.OS === "ios" ? "iPhone/iPad" : "Android");
   const [pairBusy, setPairBusy] = useState(false);
   const [pairErr, setPairErr] = useState("");
@@ -1077,7 +1079,7 @@ export default function App() {
   // serverseitig einzeln widerrufen werden kann.
   const submitPairCode = useCallback(async () => {
     // Gegenrichtung zur Sperre im Apple-Weg: kein paralleler Token-Tausch.
-    if (appleBusyRef.current || pairBusy) return;
+    if (pairBusy || Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
     const code = pairCode.replace(/\D/g, "");
     if (code.length !== 6) {
       setPairErr("Bitte den 6-stelligen Code eingeben");
@@ -1088,6 +1090,7 @@ export default function App() {
       setPairErr("Kopplung nur über HTTPS möglich");
       return;
     }
+    pairLockAt.current = Date.now();
     setPairBusy(true);
     setPairErr("");
     // 15 s Timeout: ein hängender Request darf die Kopplung nicht blockieren.
@@ -1124,6 +1127,7 @@ export default function App() {
       setPairErr(aborted ? "Zeitüberschreitung — Server nicht erreichbar" : "Netzwerkfehler: " + (e?.message || String(e)));
     } finally {
       clearTimeout(timer);
+      pairLockAt.current = 0;
       setPairBusy(false);
     }
   }, [pairBusy, pairCode, pairName, serverUrl]);
@@ -1134,14 +1138,14 @@ export default function App() {
   const submitAppleLogin = useCallback(async () => {
     // Ref statt State: zwei Taps im selben Tick sehen beide ein veraltetes pairBusy.
     // Zusaetzlich pairBusy: der Code-Weg darf nicht parallel laufen (Token-Race).
-    if (appleBusyRef.current || pairBusy) return;
+    if (pairBusy || Date.now() - pairLockAt.current < PAIR_LOCK_STALE_MS) return;
     if (!serverUrl.startsWith("https://")) {
       setPairErr("Apple-Anmeldung nur über HTTPS möglich");
       return;
     }
     // Erst nach allen Vorpruefungen sperren — der einzige Reset steht im finally,
     // damit kein Wurf zwischen Sperre und try das Ref haengen laesst.
-    appleBusyRef.current = true;
+    pairLockAt.current = Date.now();
     setPairBusy(true);
     setPairErr("");
     try {
@@ -1203,7 +1207,7 @@ export default function App() {
         setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
       }
     } finally {
-      appleBusyRef.current = false;
+      pairLockAt.current = 0;
       setPairBusy(false);
     }
   }, [pairName, pairBusy, serverUrl]);
