@@ -646,6 +646,171 @@ export function trimChatsForStorage<
   return compactChatsForStorage(chats, maxMessages, MAX_STORED_TEXT_CHARS, maxChars);
 }
 
+// ── Turn-Volltext: EINE Blase pro Turn aus ALLEN Assistant-Segmenten ─────────
+// Warum: der Server liefert pro Turn MEHRERE Assistant-Nachrichten (ein Segment pro
+// Werkzeug-Runde: Text → Tool → Text …). Der Sync übernahm bisher immer nur das
+// LETZTE Segment (`serverLast.text`) — bei „Ich prüfe das. [Tool] Ergebnis: 42"
+// blieb so nur „Ergebnis: 42" übrig (gemessen 23.11.2026: 33 von 60 Turns hatten
+// mehr als ein Segment, im Schnitt 1,8).
+export const TURN_SEGMENT_SEP = "\n\n";
+export const TURN_TOOL_PREFIX = "· Werkzeug: ";
+/** Hinweis am Ende eines abgebrochenen Turns (Server-Shutdown mit gerettetem Teiltext). */
+export const INCOMPLETE_TURN_HINT = "⏹ Abgebrochen — dies ist der bis dahin gestreamte Teiltext.";
+
+/** Ein Assistant-Segment (Server-Nachricht oder lokale Blase) eines Turns. */
+export type TurnSegment = {
+  id?: string;
+  role?: string;
+  text?: string;
+  /** Turn-Zugehörigkeit (ID der User-Nachricht, die den Turn gestartet hat). */
+  turnId?: string;
+  /** Server: `replyTo` der pi-Nachricht — als Turn-Anker nutzbar. */
+  replyTo?: unknown;
+  tools?: (string | { tool?: string; name?: string })[];
+  activity?: { id?: string; tool?: string; name?: string }[];
+  incomplete?: boolean;
+  images?: unknown[];
+  error?: unknown;
+};
+
+function toolNameOf(t: string | { tool?: string; name?: string } | undefined | null): string {
+  if (typeof t === "string") return t.trim();
+  if (!t || typeof t !== "object") return "";
+  return String((t as { tool?: string }).tool || (t as { name?: string }).name || "").trim();
+}
+
+/**
+ * Turn-Schlüssel einer Nachricht: User-Nachricht → eigene ID, Assistant → Anker
+ * (`turnId` bzw. `replyTo`), sonst `fallback` (z. B. der Turn der Vorgängernachricht).
+ * Damit lassen sich Segmente desselben Turns gruppieren, ohne sie zu raten.
+ */
+export function turnKeyOf(msg: TurnSegment | null | undefined, fallback = ""): string {
+  if (!msg || typeof msg !== "object") return fallback;
+  const own = String(msg.id || "").trim();
+  const explicit = String((msg as { turnId?: string }).turnId || "").trim();
+  if (explicit) return explicit;
+  if (msg.role === "user") return own || fallback;
+  const rt = (msg as { replyTo?: unknown }).replyTo;
+  if (typeof rt === "string" && rt.trim()) return rt.trim();
+  if (rt && typeof rt === "object") {
+    const rid = String((rt as { id?: string }).id || "").trim();
+    if (rid) return rid;
+  }
+  // Kein expliziter Anker: der übergebene Turn-Schlüssel gilt (Gruppierung), sonst
+  // die eigene ID. Sonst ließen sich Segmente ohne Anker nie zu einem Turn bündeln.
+  return fallback || own;
+}
+
+/**
+ * Text EINES Turns: alle Segmente in Reihenfolge, getrennt durch eine Leerzeile,
+ * dazwischen die Werkzeug-Zeilen (`· Werkzeug: bash`, nur einmal pro Segment).
+ * `includeTools: false` schaltet diese Zeilen ab (Setting in der App).
+ * Ein Segment mit `incomplete: true` bekommt den Abbruch-Hinweis am Ende.
+ */
+export function joinTurnSegments(
+  segments: TurnSegment[],
+  opts: { includeTools?: boolean; incompleteHint?: boolean } = {},
+): string {
+  const includeTools = opts.includeTools !== false;
+  const incompleteHint = opts.incompleteHint !== false;
+  const list = Array.isArray(segments) ? segments : [];
+  const blocks: string[] = [];
+  let incomplete = false;
+  for (const seg of list) {
+    if (!seg || typeof seg !== "object") continue;
+    if ((seg as { incomplete?: boolean }).incomplete === true) incomplete = true;
+    if (includeTools) {
+      const tools: (string | { tool?: string; name?: string })[] = [
+        ...(Array.isArray(seg.tools) ? seg.tools : []),
+        ...(Array.isArray(seg.activity) ? seg.activity : []),
+      ];
+      const seen = new Set<string>();
+      for (const raw of tools) {
+        const name = toolNameOf(raw);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        blocks.push(TURN_TOOL_PREFIX + name);
+      }
+    }
+    const text = typeof seg.text === "string" ? seg.text.trim() : "";
+    if (text) blocks.push(text);
+  }
+  if (incomplete && incompleteHint) blocks.push(INCOMPLETE_TURN_HINT);
+  return blocks.join(TURN_SEGMENT_SEP);
+}
+
+/**
+ * Der LÄNGERE von zwei Texten — Sync-Regel: ein Server-Text darf eine lokale Blase
+ * nur ersetzen, wenn er LÄNGER ist (nie einen vollständigeren Text verkürzen).
+ * Bei Gleichstand gewinnt `a`.
+ */
+export function longestTurnText(a?: string | null, b?: string | null): string {
+  const first = typeof a === "string" ? a : "";
+  const second = typeof b === "string" ? b : "";
+  return second.trim().length > first.trim().length ? second : first;
+}
+
+/** Text des LETZTEN Turns (alles nach der letzten User-Nachricht), zusammengefügt. */
+export function turnTextOfLastTurn(
+  messages: TurnSegment[],
+  opts: { includeTools?: boolean; incompleteHint?: boolean } = {},
+): string {
+  const list = Array.isArray(messages) ? messages : [];
+  let start = -1;
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i] && list[i].role === "user") { start = i; break; }
+  }
+  const segs = list.slice(start + 1).filter((m) => m && m.role !== "user");
+  return joinTurnSegments(segs as TurnSegment[], opts);
+}
+
+/**
+ * Eine Blase pro Turn: aufeinanderfolgende Assistant-Nachrichten desselben Turns
+ * zusammenfassen (Text = `joinTurnSegments`; Aktivität nach ID, Bilder aneinander).
+ * Blasen mit Fehlerkarte bleiben einzeln — die Karte gehört zu genau diesem Schritt.
+ * Rückgabe `null` = nichts zu tun (kein Re-Render, kein Endlos-Patch).
+ */
+export function collapseTurnBubbles<T extends TurnSegment>(
+  messages: T[],
+  opts: { includeTools?: boolean; incompleteHint?: boolean } = {},
+): T[] | null {
+  const list = Array.isArray(messages) ? messages : [];
+  const out: T[] = [];
+  let changed = false;
+  let i = 0;
+  while (i < list.length) {
+    const head = list[i];
+    if (!head || head.role !== "assistant") { out.push(head); i++; continue; }
+    const key = turnKeyOf(head);
+    const group: T[] = [];
+    let j = i;
+    while (j < list.length && list[j] && list[j].role === "assistant" && turnKeyOf(list[j], key) === key) {
+      group.push(list[j]);
+      j++;
+    }
+    if (group.length < 2 || group.some((g) => g.error)) { out.push(...group); i = j; continue; }
+    const merged = { ...group[0], text: joinTurnSegments(group, opts) } as T;
+    const activity: NonNullable<TurnSegment["activity"]> = [];
+    for (const g of group) {
+      for (const a of Array.isArray(g.activity) ? g.activity : []) {
+        const id = String(a?.id || "");
+        if (id && activity.some((x) => String(x?.id || "") === id)) continue;
+        activity.push(a);
+      }
+    }
+    if (activity.length) merged.activity = activity;
+    const images: unknown[] = [];
+    for (const g of group) for (const im of Array.isArray(g.images) ? g.images : []) images.push(im);
+    if (images.length) merged.images = images;
+    const withDil = [...group].reverse().find((g) => Array.isArray((g as { dil?: unknown[] }).dil) && ((g as { dil?: unknown[] }).dil as unknown[]).length > 0);
+    if (withDil) (merged as { dil?: unknown }).dil = (withDil as { dil?: unknown }).dil;
+    out.push(merged);
+    changed = true;
+    i = j;
+  }
+  return changed ? out : null;
+}
+
 /**
  * Fehlende Verlaufs-Teile vom Server an den lokalen Chat anhängen.
  *
@@ -702,34 +867,74 @@ export function mergeServerTail<
   const localUsers = localMsgs.filter((m) => m.role === "user").length;
   const srvUsers = srv.filter((m) => m.role === "user").length;
   if (srvUsers < localUsers) return older.length ? [...older, ...localMsgs] : null; // Server hinkt hinterher
-  const lastLocalUser = [...localMsgs].reverse().find((m) => m.role === "user");
-  if (!lastLocalUser) return null;
-  const want = norm(lastLocalUser.text);
-  if (!want) return null;
-  let anchor = -1;
-  for (let i = srv.length - 1; i >= 0; i--) {
-    if (srv[i].role === "user" && norm(srv[i].text) === want) { anchor = i; break; }
+
+  // Abgleich per Message-ID, sonst per Text: lokale Blasen tragen EIGENE IDs (uid),
+  // die Server-Nachrichten kommen aus der pi-Session — ein reiner ID-Vergleich würde
+  // deshalb alles doppeln. Jede lokale Nachricht bekommt ihren Server-Index; alle
+  // Server-Nachrichten ohne lokales Gegenstück werden an GENAU DIESER Stelle eingefügt,
+  // auch mitten im Turn. Vorher brach der Merge bei gleicher User-Zahl ab und der
+  // Aufrufer übernahm nur das LETZTE Assistant-Segment (Segmente 1..n-1 gingen verloren).
+  const srvIdxById = new Map<string, number>();
+  srv.forEach((m, i) => {
+    const id = String(m.id || "");
+    if (id) srvIdxById.set(id, i);
+  });
+  const localIdSet = new Set(localMsgs.map((m) => String((m as { id?: string }).id || "")).filter(Boolean));
+  const usedSrv = new Set<number>();
+  const anchors: number[] = [];
+  let textCursor = 0;
+  for (const m of localMsgs) {
+    const byId = srvIdxById.get(String((m as { id?: string }).id || ""));
+    if (byId !== undefined && !usedSrv.has(byId)) {
+      usedSrv.add(byId);
+      anchors.push(byId);
+      if (byId + 1 > textCursor) textCursor = byId + 1;
+      continue;
+    }
+    // Text-Anker: die lokale Blase trägt den Server-Wortlaut (oder dessen gekappten Kopf).
+    const want = norm((m as { text?: string }).text);
+    let hit = -1;
+    if (want) {
+      for (let i = textCursor; i < srv.length; i++) {
+        if (usedSrv.has(i)) continue;
+        if (srv[i].role !== m.role) continue;
+        const cand = norm(srv[i].text);
+        if (!cand) continue;
+        if (cand === want || (want.length >= 40 && (cand.startsWith(want) || want.startsWith(cand)))) { hit = i; break; }
+      }
+    }
+    if (hit >= 0) { usedSrv.add(hit); textCursor = hit + 1; }
+    anchors.push(hit);
   }
-  if (anchor < 0) return null;
-  const lastLocalUserIdx = localMsgs.map((m) => m.role).lastIndexOf("user");
-  const localHasAnswer = localMsgs
-    .slice(lastLocalUserIdx + 1)
-    .some((m) => m.role === "assistant" && String(m.text || "").trim());
-  let tail: T[];
-  if (localHasAnswer) {
-    // Antwort ist da → nur NEUE Server-Turns anhängen (sonst doppelt).
-    if (srvUsers <= localUsers) return older.length ? [...older, ...localMsgs] : null;
-    const lastSrvUser = srv.map((m) => m.role).lastIndexOf("user");
-    if (lastSrvUser <= anchor) return older.length ? [...older, ...localMsgs] : null;
-    tail = srv.slice(lastSrvUser + 1).map(toLocal);
-  } else {
-    tail = srv.slice(anchor + 1).map(toLocal);
+  // Server-Nachrichten bis `limit` einfügen, soweit sie lokal fehlen.
+  const out: T[] = [];
+  let inserted = 0;
+  let cursor = 0;
+  const flushUpTo = (limit: number) => {
+    for (; cursor < limit && cursor < srv.length; cursor++) {
+      if (usedSrv.has(cursor)) continue; // lokal vorhanden (ggf. mit anderer ID)
+      const id = String(srv[cursor].id || "");
+      if (id && localIdSet.has(id)) continue;
+      const m = toLocal(srv[cursor], cursor);
+      if (!worthKeeping(m)) continue;
+      out.push(m);
+      inserted++;
+    }
+  };
+  for (let i = 0; i < localMsgs.length; i++) {
+    const a = anchors[i];
+    if (a >= 0) flushUpTo(a);
+    out.push(localMsgs[i]);
   }
-  const seen = new Set(localMsgs.map((m) => String(m.id || "")).filter(Boolean));
-  const add = tail.filter((m) => worthKeeping(m) && !seen.has(String((m as { id?: string }).id || "")));
-  if (!add.length) return older.length ? [...older, ...localMsgs] : null;
-  const head = older.filter((m) => !seen.has(String((m as { id?: string }).id || "")));
-  return [...head, ...localMsgs, ...add];
+  flushUpTo(srv.length);
+
+  const head = older.filter((m) => {
+    const id = String((m as { id?: string }).id || "");
+    if (id && localIdSet.has(id)) return false;
+    return !out.some((o) => String((o as { id?: string }).id || "") === id);
+  });
+  if (!inserted && !head.length) return null;
+  return [...head, ...out];
 }
 
 /**

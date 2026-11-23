@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
+import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -721,4 +721,122 @@ test("isRestartErrorKind/isRestartErrorText greifen auch ohne kind-Feld", () => 
 
 test("RESTART_RELOAD_DELAYS_MS: erster Versuch sofort, zweiter nach 3 s", () => {
   assert.deepEqual([...RESTART_RELOAD_DELAYS_MS], [0, 3000]);
+});
+
+// ── Turn-Volltext: eine Blase pro Turn (23.11.2026) ────────────────────────
+test("turnKeyOf bestimmt den Turn: User-ID, turnId-Anker, replyTo oder Fallback", () => {
+  assert.strictEqual(turnKeyOf({ id: "u1", role: "user", text: "frage" }), "u1");
+  assert.strictEqual(turnKeyOf({ id: "a1", role: "assistant", turnId: "u1" }), "u1");
+  assert.strictEqual(turnKeyOf({ id: "a1", role: "assistant", replyTo: "u1" }), "u1");
+  assert.strictEqual(turnKeyOf({ id: "a1", role: "assistant", replyTo: { id: "u2" } }), "u2");
+  assert.strictEqual(turnKeyOf({ id: "a1", role: "assistant" }), "a1");
+  assert.strictEqual(turnKeyOf({ id: "a1", role: "assistant" }, "u9"), "u9");
+  assert.strictEqual(turnKeyOf(null, "u9"), "u9");
+});
+
+test("joinTurnSegments fügt ALLE Assistant-Segmente eines Turns zusammen (Trenner: Leerzeile)", () => {
+  const text = joinTurnSegments([
+    { role: "assistant", text: "Ich prüfe das.", tools: ["bash"] },
+    { role: "assistant", text: "Ergebnis: 42" },
+    { role: "assistant", text: "Fertig." },
+  ]);
+  // Werkzeug-Zeile steht VOR dem Text ihres Segments, Segmente durch Leerzeile getrennt
+  assert.strictEqual(text, "· Werkzeug: bash\n\nIch prüfe das.\n\nErgebnis: 42\n\nFertig.");
+  assert.ok(text.startsWith(TURN_TOOL_PREFIX), "Werkzeug-Zeile beginnt mit dem Prefix");
+  assert.strictEqual(text.split(TURN_SEGMENT_SEP).length, 4);
+  // Setting „Werkzeug-Zeilen aus": nur Text
+  const plain = joinTurnSegments(
+    [{ role: "assistant", text: "Ich prüfe das.", tools: ["bash"] }, { role: "assistant", text: "Ergebnis: 42" }],
+    { includeTools: false },
+  );
+  assert.strictEqual(plain, "Ich prüfe das.\n\nErgebnis: 42");
+  // leerer/fehlender Input crasht nicht
+  assert.strictEqual(joinTurnSegments([]), "");
+  assert.strictEqual(joinTurnSegments(null as unknown as []), "");
+});
+
+test("longestTurnText: der LÄNGERE Text gewinnt (Server darf nie verkürzen)", () => {
+  const local = "kurz";
+  const full = "A".repeat(500);
+  assert.strictEqual(longestTurnText(local, full), full);
+  assert.strictEqual(longestTurnText(full, local), full, "nie kürzer überschreiben");
+  assert.strictEqual(longestTurnText(full, full), full); // Gleichstand → a
+  assert.strictEqual(longestTurnText(undefined, "x"), "x");
+  assert.strictEqual(longestTurnText("x", null), "x");
+  // zusammengesetzter Server-Text (3 Segmente) schlägt lokalen Einzeltext
+  const joined = joinTurnSegments([{ text: "eins" }, { text: "zwei" }, { text: "drei" }]);
+  assert.strictEqual(longestTurnText("eins", joined), joined);
+});
+
+test("mergeServerTail fügt fehlende Segmente MITTEN im Turn ein (Summe statt letztem Segment)", () => {
+  const local = [
+    { id: "u1", role: "user", text: "prüfe das" },
+    { id: "a1", role: "assistant", text: "Teil 1" },
+  ];
+  const server = [
+    { id: "s1", role: "user", text: "prüfe das" },
+    { id: "s2", role: "assistant", text: "Teil 1" },
+    { id: "s3", role: "assistant", text: "Teil 2" },
+    { id: "s4", role: "assistant", text: "Teil 3" },
+  ];
+  const out = mergeServerTail(local, server);
+  assert.ok(out, "Server hat mehr Segmente → es muss etwas eingefügt werden");
+  const segs = out!.filter((m) => m.role === "assistant");
+  assert.strictEqual(segs.length, 3, "nach Merge 3 Segmente (vorher brach der Merge ab)");
+  assert.strictEqual(joinTurnSegments(segs), "Teil 1\n\nTeil 2\n\nTeil 3");
+  assert.strictEqual(out!.length, 4);
+  // ältere Nachricht bleibt vorne, User-Nachricht unverändert
+  assert.strictEqual(out![0].id, "u1");
+  assert.strictEqual(turnTextOfLastTurn(out!), "Teil 1\n\nTeil 2\n\nTeil 3");
+
+  // Segment in der MITTE fehlt (Segment 1 und 3 lokal, 2 nur auf dem Server)
+  const local2 = [
+    { id: "u1", role: "user", text: "prüfe das" },
+    { id: "a1", role: "assistant", text: "Teil 1" },
+    { id: "a3", role: "assistant", text: "Teil 3" },
+  ];
+  const out2 = mergeServerTail(local2, server);
+  assert.ok(out2);
+  assert.deepStrictEqual(out2!.map((m) => m.text), ["prüfe das", "Teil 1", "Teil 2", "Teil 3"]);
+});
+
+test("unvollständiger Turn wird markiert (incomplete:true) und bleibt EINE Blase", () => {
+  const server = [
+    { id: "s1", role: "user", text: "lange Antwort" },
+    { id: "s2", role: "assistant", text: "Teil 1" },
+    { id: "s3", role: "assistant", text: "Teil 2", incomplete: true },
+  ];
+  const text = turnTextOfLastTurn(server);
+  assert.match(text, /Teil 1\n\nTeil 2/);
+  assert.match(text, /Abgebrochen/, "abgebrochener Turn muss als unvollständig markiert sein");
+  // Abschaltbar (Setting)
+  assert.doesNotMatch(turnTextOfLastTurn(server, { incompleteHint: false }), /Abgebrochen/);
+  // collapseTurnBubbles: aus zwei Segmenten wird EINE Blase mit der Summe
+  const merged = collapseTurnBubbles([
+    { id: "u1", role: "user", text: "lange Antwort" },
+    { id: "s2", role: "assistant", text: "Teil 1", turnId: "u1", activity: [{ id: "t1", tool: "bash" }] },
+    { id: "s3", role: "assistant", text: "Teil 2", turnId: "u1", incomplete: true },
+  ]);
+  assert.ok(merged, "aus 2 Segmenten muss 1 Blase werden");
+  assert.strictEqual(merged!.length, 2);
+  assert.strictEqual(merged![1].id, "s2", "die erste Segment-ID bleibt (stabile Keys)");
+  assert.strictEqual(merged![1].text, "· Werkzeug: bash\n\nTeil 1\n\nTeil 2\n\n" + INCOMPLETE_TURN_HINT.replace(/<[^>]*>/g, "").trim());
+  // ohne expliziten Anker (Server-Segmente!) werden Segmente ebenfalls gebündelt
+  const noAnchor = collapseTurnBubbles([
+    { id: "u1", role: "user", text: "frage" },
+    { id: "s2", role: "assistant", text: "Teil 1" },
+    { id: "s3", role: "assistant", text: "Teil 2" },
+  ]);
+  assert.ok(noAnchor, "Segmente ohne turnId müssen zu einer Blase werden");
+  assert.strictEqual(noAnchor!.length, 2);
+  assert.strictEqual(noAnchor![1].text, "Teil 1\n\nTeil 2");
+  // keine Änderung → null (kein Re-Render/Endlos-Patch)
+  assert.strictEqual(collapseTurnBubbles([{ id: "u1", role: "user", text: "x" }, { id: "a1", role: "assistant", text: "y" }]), null);
+  // Fehlerkarte bleibt eine eigene Blase
+  const withErr = collapseTurnBubbles([
+    { id: "u1", role: "user", text: "x" },
+    { id: "a1", role: "assistant", text: "Teil 1", turnId: "u1" },
+    { id: "a2", role: "assistant", text: "", turnId: "u1", error: { type: "aborted" } },
+  ]);
+  assert.strictEqual(withErr, null, "Blasen mit Fehlerkarte werden nicht verschmolzen");
 });

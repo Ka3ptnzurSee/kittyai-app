@@ -41,7 +41,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -50,7 +50,7 @@ import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; attachments?: { kind: string; name: string; sizeKB?: number }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[] };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; attachments?: { kind: string; name: string; sizeKB?: number }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[]; turnId?: string; incomplete?: boolean };
 type ChatSource = "app" | "whatsapp" | "terminal";
 type Chat = {
   id: string;
@@ -159,6 +159,9 @@ const CHATS_KEY = "pi-chats-v2"; // Legacy-Klartext (nur noch für Migration)
 const FOLDERS_KEY = "pi-folders-v1"; // Legacy-Klartext (nur noch für Migration)
 const CWD_KEY = "pi-cwd";
 const STREAM_STATE_KEY = "pi-stream-state-v1";
+// Werkzeug-Zeilen ("· Werkzeug: bash") im zusammengefügten Turn-Text der Blase.
+// Standard AN; abschaltbar, weil die Blase die Tool-Karten ohnehin separat zeigt.
+const TURN_TOOL_LINES_KEY = "pi-turn-tool-lines-v1";
 const CHAT_FILTER_KEY = "pi-chat-filter-v1"; // zuletzt gewaehlte Chat-Ansicht (Geraet/Server/…) merken
 // Verschlüsselte Ablagen (AES-GCM, Master-Key im Keychain/Keystore via secureStore.ts).
 const CHATS_ENC_KEY = "pi-chats-v2.enc";
@@ -780,6 +783,9 @@ export default function App() {
   // Server-Verlaeufe (andere Geraete, WhatsApp, Terminal) unsichtbar, obwohl der
   // Server sie liefert (gemessen 22.11.: 271 App + 272 Terminal + 1 WhatsApp).
   const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
+  // Werkzeug-Zeilen im Turn-Volltext (siehe TURN_TOOL_LINES_KEY): Default an.
+  const [showTurnToolLines, setShowTurnToolLines] = useState(true);
+  const toolLinesRestoredRef = useRef(false);
   // Erst laden, dann speichern — sonst ueberschreibt der Mount-Effekt die gemerkte Wahl.
   const filterRestoredRef = useRef(false);
   // Titel-/Vorschau-Filter ueber der Chat-Liste (Volltext kommt in Welle 2).
@@ -1287,17 +1293,25 @@ export default function App() {
             resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
           });
           if (!tail) return false;
-          patchChat(chatId, (c) => ({ ...c, messages: tail, bodyCompacted: false, updatedAt: Date.now() }));
+          // Eine Blase pro Turn: die nachgezogenen Server-Segmente werden zusammengefasst.
+          const collapsed = collapseTurnBubbles(tail, { includeTools: showTurnToolLines }) || tail;
+          patchChat(chatId, (c) => ({ ...c, messages: collapsed, bodyCompacted: false, updatedAt: Date.now() }));
           delete streamStateRef.current[chatId];
           persistStreamState(chatId);
           return true;
         }
-        const answerText = (serverLast.text || "").slice(0, MAX_REPLY_CHARS);
+        // NICHT `serverLast.text` (nur das LETZTE Segment): der Server liefert pro Turn
+        // mehrere Assistant-Nachrichten (Text → Tool → Text …). Der Turn-Volltext ist die
+        // Summe ALLER Segmente nach der letzten User-Nachricht — sonst blieb von
+        // "Ich prüfe das. [Tool] Ergebnis: 42" nur "Ergebnis: 42" übrig.
+        const answerFull = turnTextOfLastTurn(serverMsgs, { includeTools: showTurnToolLines }).slice(0, MAX_REPLY_CHARS);
         const localText = lastAi.text?.trim() || "";
-        // Nur überschreiben, wenn die Server-Antwort VOLLSTÄNDIGER ist als die lokale
-        // (Teiltext aus abgebrochenem Stream). Sonst ist die Bubble schon gefüllt.
-        if (localText && !lastAi.error && answerText.trim().length <= localText.length) return false;
-        patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: resolveImageList(serverLast.images, serverUrl) || m.images, error: undefined }));
+        // Sync-Regel: nur ersetzen, wenn der zusammengesetzte Server-Text LÄNGER ist
+        // (nie einen vollständigeren lokalen Text verkürzen) — außer die Blase trägt
+        // eine Fehlerkarte, die eine echte Antwort verdeckt.
+        const answerText = lastAi.error ? answerFull : longestTurnText(localText, answerFull);
+        if (!answerText.trim() || (answerText === localText && !lastAi.error)) return false;
+        patchMsg(chatId, lastAi.id, (m) => ({ ...m, text: answerText, images: resolveImageList(serverLast.images, serverUrl) || m.images, error: undefined, incomplete: false }));
         delete streamStateRef.current[chatId];
         persistStreamState(chatId);
         return true;
@@ -1861,7 +1875,12 @@ export default function App() {
             const tail = mergeServerTail(base, data.messages, {
               resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
             });
-            if (tail) return { ...c, messages: tail, bodyCompacted: false, updatedAt: Date.now() };
+            if (tail) {
+              // Eine Blase pro Turn (Segmente zusammenfassen), sonst stünden die
+              // nachgezogenen Segmente als eigene Bubbles nebeneinander.
+              const collapsed = collapseTurnBubbles(tail, { includeTools: showTurnToolLines }) || tail;
+              return { ...c, messages: collapsed, bodyCompacted: false, updatedAt: Date.now() };
+            }
             if (healed) return { ...c, messages: healed, updatedAt: Date.now() };
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant" && String(m.text || "").trim());
@@ -1878,13 +1897,17 @@ export default function App() {
             const lastUserIdx = (data.messages as { role?: string }[]).map((m) => m.role).lastIndexOf("user");
             const serverLastIdx = serverLast ? data.messages.lastIndexOf(serverLast) : -1;
             const serverHasFreshAnswer = !!serverLast && serverLastIdx > lastUserIdx && serverUserCount >= localUserCount;
-            const serverText = (serverLast?.text || "").trim().slice(0, MAX_REPLY_CHARS);
+            // Turn-Volltext (alle Segmente nach der letzten Frage) statt nur `serverLast`:
+            // sonst überschrieb der Sync die Blase mit dem LETZTEN Segment und die
+            // Zwischentexte des Turns verschwanden dauerhaft.
+            const serverText = turnTextOfLastTurn(data.messages, { includeTools: showTurnToolLines }).slice(0, MAX_REPLY_CHARS);
             const localText = lastAi?.text?.trim() || "";
-            if (lastAi && serverHasFreshAnswer && serverText.length > localText.length) {
+            const nextText = lastAi ? longestTurnText(localText, serverText) : serverText;
+            if (lastAi && serverHasFreshAnswer && nextText.trim() && nextText !== localText) {
               return {
                 ...c,
                 messages: c.messages.map((m) =>
-                  m.id === lastAi.id ? { ...m, text: serverText, images: resolveImageList(serverLast.images, serverUrl) || m.images, error: undefined } : m,
+                  m.id === lastAi.id ? { ...m, text: nextText, images: resolveImageList(serverLast!.images, serverUrl) || m.images, error: undefined, incomplete: false } : m,
                 ),
                 updatedAt: Date.now(),
               };
@@ -1897,7 +1920,7 @@ export default function App() {
       }
     })();
     return () => { cancelled = true; };
-  }, [activeChatId, serverUrl, busyChatIds, foregroundTick]);
+  }, [activeChatId, serverUrl, busyChatIds, foregroundTick, showTurnToolLines]);
 
   // Während ein Chat „busy“ ist (Turn läuft serverseitig, z. B. nach App-Wechsel in den
   // Hintergrund), die Server-Session regelmäßig pollen: sobald die finale Antwort vorliegt,
@@ -2048,6 +2071,18 @@ export default function App() {
     if (!filterRestoredRef.current && !filterPickedRef.current) return;
     AsyncStorage.setItem(CHAT_FILTER_KEY, chatFilter).catch(() => {});
   }, [chatFilter]);
+
+  // Werkzeug-Zeilen-Einstellung laden/speichern (Default an; nur "0" schaltet ab).
+  useEffect(() => {
+    AsyncStorage.getItem(TURN_TOOL_LINES_KEY)
+      .then((raw) => { if (raw === "0") setShowTurnToolLines(false); })
+      .catch(() => { /* Storage-Fehler → Default an */ })
+      .finally(() => { toolLinesRestoredRef.current = true; });
+  }, []);
+  useEffect(() => {
+    if (!toolLinesRestoredRef.current) return;
+    AsyncStorage.setItem(TURN_TOOL_LINES_KEY, showTurnToolLines ? "1" : "0").catch(() => {});
+  }, [showTurnToolLines]);
 
   // Aufgaben automatisch aktualisieren (Plugins → Tasks)
   useEffect(() => {
@@ -2841,7 +2876,7 @@ export default function App() {
     setPendingFiles([]);
     setPendingDocuments([]);
     setReplyingTo(null);
-    const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [] };
+    const aiMsg: Msg = { id: aiId, role: "assistant", text: "", activity: [], turnId: userMsg.id };
     patchChat(chatId, (c) => ({
       ...c,
       title: c.messages.length === 0 ? (deriveTitle(message) || c.title) : c.title,
@@ -3154,7 +3189,13 @@ export default function App() {
       } else if (t === "done") {
         doneReceived = true;
         const d = (e.data || {}) as { reply?: string; activity?: Activity[]; dil?: unknown[]; images?: { uri?: string }[]; thinking?: string };
-        finalReply = (d.reply || "").trim().slice(0, MAX_REPLY_CHARS);
+        // `incomplete` kommt von der Restart-Rettung: der Server hat beim Shutdown den
+        // bis dahin gestreamten Teiltext gespeichert. Der Hinweis macht sichtbar, dass
+        // die Antwort nicht zu Ende lief (statt sie als vollständig auszugeben).
+        const doneReply = (d.reply || "").trim();
+        finalReply = ((d as { incomplete?: boolean }).incomplete === true && doneReply
+          ? doneReply + TURN_SEGMENT_SEP + INCOMPLETE_TURN_HINT
+          : doneReply).slice(0, MAX_REPLY_CHARS);
         // Nach einem Resume (App im Hintergrund/getötet) kommen keine thinking-Deltas mehr:
         // der Server schickt den Denkvorgang im done-Snapshot. Nur setzen, wenn lokal
         // noch nichts da ist — sonst würde ein doppelter Text angehängt.
@@ -4435,6 +4476,17 @@ export default function App() {
               ))}
               <Pressable onPress={() => syncServerChats()} style={styles.srcFilterChip} hitSlop={6} accessibilityRole="button" accessibilityLabel="Server-Chats neu laden">
                 <Ionicons name="refresh" size={13} color={colors.muted} />
+              </Pressable>
+              {/* Werkzeug-Zeilen im Turn-Volltext ("· Werkzeug: bash") an/aus */}
+              <Pressable
+                onPress={() => setShowTurnToolLines((v) => !v)}
+                style={[styles.srcFilterChip, showTurnToolLines && styles.srcFilterChipActive]}
+                hitSlop={4}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: showTurnToolLines }}
+                accessibilityLabel={showTurnToolLines ? "Werkzeug-Zeilen im Antworttext ausblenden" : "Werkzeug-Zeilen im Antworttext einblenden"}
+              >
+                <Text style={[styles.srcFilterText, showTurnToolLines && styles.srcFilterTextActive]}>· Werkzeug</Text>
               </Pressable>
             </ScrollView>
             <FlatList
