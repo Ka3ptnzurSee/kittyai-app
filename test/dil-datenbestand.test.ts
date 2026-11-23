@@ -109,12 +109,30 @@ test("Hash ist bei Riesenbäumen begrenzt und crasht nicht", () => {
   const t0 = performance.now();
   const h = dilInhaltHash(gross);
   const ms = performance.now() - t0;
-  assert.match(h, /^\d+:[a-z0-9]+$/);
+  assert.match(h, /^\d+:[a-z0-9]+:[a-z0-9]+$/);
   assert.ok(ms < 60, `Hash dauerte ${ms.toFixed(1)} ms`);
   // zyklische Struktur darf nicht werfen
   const zyklisch: Record<string, unknown> = { type: "X" };
   zyklisch.self = zyklisch;
   assert.equal(dilInhaltHash(zyklisch), "unserialisierbar");
+});
+
+test("Hash sieht auch Änderungen am ENDE (nicht nur am Kopf)", () => {
+  // Review-Fund 23.11.2026 (HIGH): mit einem reinen Präfix-Cap lieferten zwei Bäume mit
+  // gleichem Kopf und verschiedenem Schwanz denselben Hash -> dilNeuSeeden sagte "nicht
+  // neu" und der DIL-Zustand (Slider/Select) blieb auf dem alten Wert stehen.
+  const gross = (tail: string) => ({
+    type: "Form",
+    props: {
+      fields: Array.from({ length: 3000 }, (_, i) => ({ name: "feld" + i, type: "input", hint: "x".repeat(4) })),
+      submitLabel: tail,
+    },
+  });
+  const a = gross("ALT");
+  const b = gross("NEU");
+  assert.ok(JSON.stringify(a).length > 20_000, "Fixture muss über dem alten 20k-Cap liegen");
+  assert.notEqual(dilInhaltHash(a), dilInhaltHash(b), "unterschiedlicher Schwanz muss einen anderen Hash geben");
+  assert.equal(dilNeuSeeden(dilInhaltHash(a), b).neu, true, "geänderter Schwanz muss neu seeden");
 });
 
 test("alle echten Fences liefern stabile Hashes (kein Flackern)", () => {

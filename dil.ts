@@ -863,12 +863,19 @@ export function dilInhaltHash(json: unknown): string {
   } catch {
     return "unserialisierbar";
   }
-  // Nur der Anfang zählt: gleiche DIL-Bäume sind praktisch immer am Kopf unterscheidbar,
-  // und ein 5-MB-Baum darf hier keine Millisekunden pro Render kosten.
-  const cap = s.length > 20_000 ? s.slice(0, 20_000) : s;
-  let h = 5381;
-  for (let i = 0; i < cap.length; i++) h = ((h << 5) + h + cap.charCodeAt(i)) | 0;
-  return `${cap.length}:${(h >>> 0).toString(36)}`;
+  // Achtung (Review-Fund 23.11.2026): NUR den Anfang zu hashen macht Änderungen am Ende
+  // unsichtbar — zwei Bäume mit gleichem Kopf und unterschiedlichem Schwanz ergaben
+  // denselben Hash, der neue DIL-Zustand wurde dann nie geseedet (Slider/Select blieben
+  // auf dem alten Wert). Deshalb Kopf UND Schwanz hashen, plus Gesamtlänge: ein 5-MB-Baum
+  // kostet so weiterhin nur 2×4000 Zeichen pro Render.
+  const n = s.length;
+  const kopfEnde = n > 8_000 ? 4_000 : n;
+  const schwanzStart = n > 8_000 ? n - 4_000 : kopfEnde;
+  let hKopf = 5381;
+  for (let i = 0; i < kopfEnde; i++) hKopf = ((hKopf << 5) + hKopf + s.charCodeAt(i)) | 0;
+  let hSchwanz = 5381;
+  for (let i = schwanzStart; i < n; i++) hSchwanz = ((hSchwanz << 5) + hSchwanz + s.charCodeAt(i)) | 0;
+  return `${n}:${(hKopf >>> 0).toString(36)}:${(hSchwanz >>> 0).toString(36)}`;
 }
 
 /** Muss der Runtime-Zustand neu geseedet werden? (gleicher Inhalt → nein) */

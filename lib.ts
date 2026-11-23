@@ -1247,7 +1247,10 @@ export function isRestartErrorText(text?: string): boolean {
  * hier in lib.ts, damit es ohne React-Native-Laufzeit testbar ist.
  */
 export function firstFrame(componentStack?: string): string {
+  // Längen-Cap VOR dem Split: ein riesiger componentStack würde sonst im Crash-Pfad
+  // viele MB Zeilen-Array allokieren (Review-Fund 23.11.2026).
   const zeilen = String(componentStack || "")
+    .slice(0, 4_000)
     .split("\n")
     .map((z) => z.trim())
     .filter((z) => z.startsWith("in "));

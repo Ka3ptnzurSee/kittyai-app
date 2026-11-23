@@ -17,6 +17,7 @@ import { BildMitVollbild } from "./BildAnsicht";
 import { Markdown } from "./Markdown";
 import { MathView } from "./MathView";
 import Svg, { Path, Polyline, Circle, Line as SvgLine, Text as SvgText, Defs, LinearGradient, Stop } from "react-native-svg";
+import * as Haptics from "expo-haptics";
 import { normalizeChart, computePieSlices, classifyDiff } from "./dilviz";
 import type { ChartPoint } from "./dilviz";
 import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
@@ -299,68 +300,141 @@ function festeZahl(v: number, dez: number): string {
 function SliderWidget({ min, max, wert, dispatch, props }: { min: number; max: number; wert: number; dispatch: DilDispatch | null; props: Props }) {
   const [breite, setBreite] = useState(0);
   const [lokal, setLokal] = useState<number | null>(null);
+  const [ziehen, setZiehen] = useState(false);
   const spanne = max > min ? max - min : 1;
   const anzeige = lokal ?? (Number.isFinite(wert) ? wert : min);
   const pct = Math.max(0, Math.min(1, (anzeige - min) / spanne));
   const schritt = num(getProp(props, "step"), 1) || 1;
   // Anzeige-Praezision aus dem Schritt ("0.1" -> 1 Nachkommastelle), max 3
   const dezimal = Math.min(3, (String(schritt).split(".")[1] || "").length);
-  // Befund 23.11.2026: der Slider war reine Anzeige (kein Handler). Jetzt ziehbar.
-  // Waehrend des Ziehens nur lokal zeichnen - Dispatch erst beim Loslassen (sonst
-  // ~60 Actions/Renders pro Sekunde, Befund 23.11.2026).
+  const label = str(getProp(props, "label"), "");
+  const disabled = bool(getProp(props, "disabled"), false);
+  const required = bool(getProp(props, "required"), false);
+
+  // `marks` aus dem ChatGPT-Contract: [5, 10] oder [{value, label}] - Ticks + Tap-Ziele.
+  const marksRoh = getProp(props, "marks");
+  const marks = Array.isArray(marksRoh)
+    ? marksRoh
+        .slice(0, 12)
+        .map((m) => {
+          const o = m as Record<string, unknown> | null;
+          const v = typeof m === "number" ? m : num(o?.value, NaN);
+          return { value: v, label: typeof m === "number" ? festeZahl(m, dezimal) : str(o?.label, str(o?.value, "")) };
+        })
+        .filter((m) => Number.isFinite(m.value) && m.value >= min && m.value <= max)
+    : [];
+  const marken = marks.length
+    ? marks
+    : [{ value: min, label: festeZahl(min, dezimal) }, { value: max, label: festeZahl(max, dezimal) }];
+
+  const stufe = (v: number) => Math.round((v - min) / schritt);
+  const letzteStufe = useRef<number | null>(null);
+  // Haptisches Feedback pro Rasterschritt (nur auf echten Geraeten; im Web/Browser still).
+  const ticken = (v: number) => {
+    const st = stufe(v);
+    if (letzteStufe.current === st) return;
+    letzteStufe.current = st;
+    try {
+      void Haptics.selectionAsync();
+    } catch {
+      /* kein Haptik-Modul (Web/Tablet) - Ton ist optional */
+    }
+  };
+
   const rechnen = (x: number) => (breite > 0 ? sliderWert(min, max, schritt, x / breite) : null);
   const setzen = (x: number) => {
     const v = rechnen(x);
-    if (v != null) setLokal(v);
+    if (v == null || disabled) return;
+    setLokal(v);
+    ticken(v);
   };
   const übernehmen = (x: number) => {
     const v = rechnen(x);
-    if (v != null) fireControl(dispatch, props, v);
+    if (v != null && !disabled) fireControl(dispatch, props, v);
     setLokal(null);
+    setZiehen(false);
+    letzteStufe.current = null;
   };
+  const springe = (v: number) => {
+    if (disabled) return;
+    setLokal(null);
+    fireControl(dispatch, props, Math.max(min, Math.min(max, v)));
+    ticken(v);
+  };
+
   const pan = useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onMoveShouldSetPanResponder: () => true,
-        onPanResponderGrant: (e) => übernehmen(e.nativeEvent.locationX), // Tap auf die Spur = 1 Action
+        onStartShouldSetPanResponder: () => !disabled,
+        onMoveShouldSetPanResponder: () => !disabled,
+        onPanResponderGrant: (e) => {
+          setZiehen(true);
+          setzen(e.nativeEvent.locationX);
+        },
         onPanResponderMove: (e) => setzen(e.nativeEvent.locationX),
         onPanResponderRelease: (e) => übernehmen(e.nativeEvent.locationX),
         onPanResponderTerminate: (e) => übernehmen(e.nativeEvent.locationX),
       }),
-    // breite/schritt/min/max bestimmen die Rechnung; props-Identität wechselt pro Render
+    // breite/schritt/min/max/disabled bestimmen die Rechnung
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [breite, min, max, schritt, props],
+    [breite, min, max, schritt, disabled, props],
   );
-  const label = str(getProp(props, "label"), "");
+
   return (
-    <View style={{ marginVertical: 2 }}>
-      {label ? (
-        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 2 }}>
-          <Text style={styles.sliderLabel}>{label}</Text>
-        </View>
-      ) : null}
-      {/* Trefferflaeche = Wrapper (24 px hoch), sichtbare Spur nur 8 px */}
+    <View style={[{ marginVertical: 2 }, disabled && { opacity: 0.45 }]}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 2 }}>
+        <Text style={styles.sliderLabel}>
+          {label}
+          {required ? <Text style={{ color: colors.accent }}> *</Text> : null}
+        </Text>
+        <Text style={styles.sliderWert}>{festeZahl(anzeige, dezimal)}</Text>
+      </View>
       <View
         style={styles.sliderTouch}
         onLayout={(e) => setBreite(e.nativeEvent.layout.width)}
         {...pan.panHandlers}
         accessibilityRole="adjustable"
-        accessibilityLabel={str(getProp(props, "label"), "Schieberegler")}
+        accessibilityLabel={(label || "Schieberegler") + (required ? ", Pflichtfeld" : "")}
+        accessibilityState={{ disabled }}
         accessibilityValue={{ min, max, now: Math.round(anzeige) }}
         aria-valuemin={min}
         aria-valuemax={max}
         aria-valuenow={Math.round(anzeige)}
+        aria-disabled={disabled}
       >
         <View style={styles.sliderTrack}>
           <View style={[styles.sliderFill, { width: `${Math.round(pct * 100)}%` }]} />
+          {marks.length
+            ? marks.map((m, i) => (
+                <View
+                  key={i}
+                  pointerEvents="none"
+                  style={[styles.sliderTick, { left: `${Math.round(((m.value - min) / spanne) * 100)}%` }]}
+                />
+              ))
+            : null}
         </View>
         <View style={[styles.sliderKnopf, { left: `${Math.round(pct * 100)}%` }]} pointerEvents="none" />
+        {ziehen ? (
+          <View style={[styles.sliderBubble, { left: `${Math.round(pct * 100)}%` }]} pointerEvents="none">
+            <Text style={styles.sliderBubbleText}>{festeZahl(anzeige, dezimal)}</Text>
+          </View>
+        ) : null}
       </View>
-      <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-        <Text style={styles.sliderValue}>{festeZahl(min, dezimal)}</Text>
-        <Text style={[styles.sliderValue, { color: colors.accent, fontWeight: "700" }]}>{festeZahl(anzeige, dezimal)}</Text>
-        <Text style={styles.sliderValue}>{festeZahl(max, dezimal)}</Text>
+      {/* Skalenmarken: antippbar (Sprung), damit man nicht zielen muss */}
+      <View style={{ height: 16, position: "relative", marginTop: 2 }}>
+        {marken.map((m, i) => (
+          <Pressable
+            key={i}
+            accessibilityRole="button"
+            accessibilityLabel={`${label || "Regler"} auf ${m.label} setzen`}
+            onPress={() => springe(m.value)}
+            disabled={disabled}
+            style={[styles.markTreffer, { left: `${Math.round(((m.value - min) / spanne) * 100)}%` }]}
+          >
+            <Text style={styles.markLabel} numberOfLines={1}>{m.label}</Text>
+          </Pressable>
+        ))}
       </View>
     </View>
   );
@@ -1157,8 +1231,13 @@ function useRuntime(json: unknown, onAction?: (text: string, name: string) => vo
   // Objektidentität: ein bei jedem Render neu gebautes JSON-Objekt ließ diese
   // Render-Phase-Aktualisierung nie konvergieren (Endlos-Render → Watchdog-Kill der App
   // ohne JS-Fehler, Befund 23.11.2026). hashRef verhindert das dauerhaft.
+  // jsonRef merkt sich die ZULETZT GESEHENE Identität — unabhängig davon, ob geseedet
+  // wurde. Sonst bliebe model.json !== json dauerhaft wahr und der Hash (inkl. vollem
+  // JSON.stringify) liefe in jedem Render (Review-Fund: 0,21 ms/Render ohne Nutzen).
   const hashRef = useRef<string | null>(null);
-  if (model.json !== json) {
+  const jsonRef = useRef(json);
+  if (jsonRef.current !== json) {
+    jsonRef.current = json;
     const pruefung = dilNeuSeeden(hashRef.current, json);
     if (pruefung.neu) {
       hashRef.current = pruefung.hash;
@@ -1274,7 +1353,22 @@ const styles = StyleSheet.create({
   svgFallback: { width: 48, height: 48, borderRadius: 10, backgroundColor: colors.surface2, alignItems: "center", justifyContent: "center", alignSelf: "flex-start" },
   select: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, gap: 4, backgroundColor: colors.surface },
   selectItem: { color: colors.text, fontSize: 14, paddingVertical: 2 },
-  sliderLabel: { color: colors.text, fontSize: 13, fontWeight: "600" },
+  sliderLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flexShrink: 1 },
+  sliderWert: { color: colors.accent, fontSize: 14, fontWeight: "700", fontFamily: monoFontFamily },
+  sliderTick: { position: "absolute", top: -3, width: 2, height: 14, borderRadius: 1, backgroundColor: colors.border },
+  sliderBubble: {
+    position: "absolute",
+    top: -30,
+    width: 46,
+    marginLeft: -23,
+    paddingVertical: 3,
+    borderRadius: 8,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+  },
+  sliderBubbleText: { color: "#ffffff", fontSize: 12, fontWeight: "700", fontFamily: monoFontFamily },
+  markTreffer: { position: "absolute", width: 56, marginLeft: -28, alignItems: "center" },
+  markLabel: { color: colors.muted, fontSize: 10, fontFamily: monoFontFamily },
   sliderTouch: { height: 26, justifyContent: "center", marginVertical: 2 },
   sliderTrack: { height: 8, borderRadius: 4, backgroundColor: colors.surface2, justifyContent: "center" },
   sliderKnopf: {

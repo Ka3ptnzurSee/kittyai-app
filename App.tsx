@@ -740,6 +740,12 @@ export default function App() {
     installGlobalErrorHandlers(() => serverUrl);
   }, [serverUrl]);
   const [apiToken, setApiToken] = useState("");
+  // Token für die Crash-Telemetrie nachziehen (gleiche Regel wie authHeaders: nur HTTPS).
+  // Review-Fund 23.11.2026: meldeRenderFehler/report posteten ohne Token — sobald der
+  // Server AUTH_REQUIRED=1 fährt, wären Crashes stillschweigend verloren gegangen.
+  useEffect(() => {
+    installGlobalErrorHandlers(undefined, () => (apiToken && serverUrl.startsWith("https://") ? apiToken : ""));
+  }, [apiToken, serverUrl]);
   // Geräte-Kopplung: ohne gültiges Geräte-Token gibt der Server 401 zurück.
   const [pairGate, setPairGate] = useState(false);
   const [pairCode, setPairCode] = useState("");
