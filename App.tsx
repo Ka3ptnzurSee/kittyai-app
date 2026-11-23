@@ -738,6 +738,9 @@ export default function App() {
   // Geräte-Kopplung: ohne gültiges Geräte-Token gibt der Server 401 zurück.
   const [pairGate, setPairGate] = useState(false);
   const [pairCode, setPairCode] = useState("");
+  // Synchroner Sperr-Riegel fuer den Apple-Login: State (pairBusy) ist innerhalb
+  // desselben Ticks noch nicht aktualisiert, ein Ref dagegen schon.
+  const appleBusyRef = useRef(false);
   const [pairName, setPairName] = useState(Platform.OS === "ios" ? "iPhone/iPad" : "Android");
   const [pairBusy, setPairBusy] = useState(false);
   const [pairErr, setPairErr] = useState("");
@@ -1127,8 +1130,11 @@ export default function App() {
   // prueft es gegen Apples JWKS und gibt ein Geraete-Token aus. Der Code-Weg
   // oben bleibt als Notausgang, falls Apple nicht erreichbar ist.
   const submitAppleLogin = useCallback(async () => {
-    if (pairBusy) return; // Doppeltipp: zwei parallele Logins würden sich überschreiben
+    // Ref statt State: zwei Taps im selben Tick sehen beide ein veraltetes pairBusy.
+    if (appleBusyRef.current) return;
+    appleBusyRef.current = true;
     if (!serverUrl.startsWith("https://")) {
+      appleBusyRef.current = false;
       setPairErr("Apple-Anmeldung nur über HTTPS möglich");
       return;
     }
@@ -1193,6 +1199,7 @@ export default function App() {
         setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
       }
     } finally {
+      appleBusyRef.current = false;
       setPairBusy(false);
     }
   }, [pairName, serverUrl]);
