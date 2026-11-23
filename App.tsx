@@ -1076,6 +1076,8 @@ export default function App() {
   // Kein Geheimnis im App-Bundle — jedes Gerät bekommt ein eigenes Token, das
   // serverseitig einzeln widerrufen werden kann.
   const submitPairCode = useCallback(async () => {
+    // Gegenrichtung zur Sperre im Apple-Weg: kein paralleler Token-Tausch.
+    if (appleBusyRef.current || pairBusy) return;
     const code = pairCode.replace(/\D/g, "");
     if (code.length !== 6) {
       setPairErr("Bitte den 6-stelligen Code eingeben");
@@ -1124,7 +1126,7 @@ export default function App() {
       clearTimeout(timer);
       setPairBusy(false);
     }
-  }, [pairCode, pairName, serverUrl]);
+  }, [pairBusy, pairCode, pairName, serverUrl]);
 
   // Sign in with Apple: Apple signiert das identityToken (Face ID), der Server
   // prueft es gegen Apples JWKS und gibt ein Geraete-Token aus. Der Code-Weg
