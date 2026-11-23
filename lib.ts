@@ -99,13 +99,30 @@ export function breakUnbreakable(s: string, max = 120): string {
 // die FlatList unscrollbar: er schiebt alles andere weg und zeigt nur noch leere
 // Fläche („keine Nachrichten mehr lesbar"). Deshalb wird JEDE Blase gemessen und
 // oberhalb der Grenze eingeklappt (aufklappbar) — egal WELCHE Daten sie aufblähen.
-export const MAX_BUBBLE_PT = 6000; // ≈ 6–8 Bildschirmhöhen (normale Antworten bleiben unangetastet)
-export const BUBBLE_PREVIEW_PT = 1200; // eingeklappte Höhe, wenn eine Blase zu groß ist
+export const MAX_BUBBLE_PT = 12_000; // Sicherheitsnetz (~250–400 Zeilen) — erst GANZ oben einklappen
+export const BUBBLE_PREVIEW_PT = 1200; // eingeklappte Höhe, wenn eine Blase wirklich zu groß ist
+/** Ab dieser Textlänge wird eine Antwort eingeklappt (12000 Z ≈ 250 Zeilen ≈ 3–4 Displays).
+ *  Darunter wird IMMER vollständig gerendert — der frühere 6000-pt-Deckel hat normale
+ *  lange Antworten (9000 Z) ohne echten Grund abgeschnitten. */
+export const MAX_INLINE_TEXT_CHARS = 12_000;
+/** Sichtbarer Hinweis am Ende einer eingeklappten Blase (kein kommentarloser Schnitt). */
+export const COLLAPSED_HINT = "… gekürzt – tippen für volle Antwort";
 
 /** Ist die gemessene Höhe so groß, dass sie den Chat unlesbar macht? */
 export function tooTall(height: number, limit = MAX_BUBBLE_PT): boolean {
   const n = Number(height);
   return Number.isFinite(n) && n > limit;
+}
+
+/**
+ * Soll diese Blase eingeklappt werden?
+ * Früher: nur Höhe > 6000 pt (>6000 Z) → eingeklappt auf 1200 pt mit `overflow:hidden`,
+ * also ein harter Schnitt mitten im Text. Jetzt: erst oberhalb von `MAX_INLINE_TEXT_CHARS`
+ * Zeichen (oder wenn ein Datenblock das Höhen-Sicherheitsnetz sprengt).
+ */
+export function shouldCollapseBubble(text: string, height = 0): boolean {
+  if (String(text ?? "").length > MAX_INLINE_TEXT_CHARS) return true;
+  return tooTall(height);
 }
 
 /**
@@ -532,11 +549,15 @@ export function isRetryable(raw: string): boolean {
  *  Gemessen (echter Code): 2,2 MB ≈ 331 ms, 4,3 MB ≈ 664 ms AES-GCM im JS-Thread
  *  (noble + hex verdoppelt die Schreibmenge). Der Deckel hält die Schreibkosten klein. */
 export const MAX_STORAGE_CHARS = 900_000;
-export const MAX_STORED_MESSAGES = 200;
+export const MAX_STORED_MESSAGES = 500;
 /** Text-Deckel je gespeicherter Nachricht. Der Volltext steht in der Server-Session
  *  und wird beim Öffnen des Chats nachgeladen — eine Antwort darf nicht das ganze
  *  Speicher-Budget eines Geräts fressen (MAX_REPLY_CHARS = 500 000 Zeichen!). */
 export const MAX_STORED_TEXT_CHARS = 12_000;
+/** Marker, den `compactChatsForStorage` an gekappte Texte anhängt. Damit erkennt die App
+ *  beim Öffnen eines Chats, dass der lokale Text unvollständig ist, und holt den Volltext
+ *  aus `GET /api/session/:id` nachgeladen (siehe `healTruncatedMessages`). */
+export const LOCAL_TRUNC_MARKER = "\n\n… (gekürzt gespeichert — Volltext lädt beim Öffnen nach)";
 /** Ab hier wird ein Chat nicht weiter verkleinert (letzte Nachrichten bleiben). */
 export const MIN_COMPACT_MESSAGES = 8;
 
@@ -573,7 +594,7 @@ export function compactChatsForStorage<
     // Kopf behalten (die Pointe steht bei Antworten meist am Ende → Ende behalten
     // wäre riskant; wir behalten den Anfang und markieren die Kürzung im UI-frei
     // sichtbaren Text, damit nichts stillschweigend verschwindet).
-    return { ...o, text: `${t.slice(0, maxText)}\n\n… (gekürzt gespeichert — Volltext lädt beim Öffnen nach)` };
+    return { ...o, text: t.slice(0, maxText) + LOCAL_TRUNC_MARKER };
   };
   const previewOf = (c: T): string | undefined => {
     if (c.preview) return c.preview;
@@ -644,9 +665,10 @@ export function mergeServerTail<
 >(
   local: T[],
   server: { id?: string; role?: string; text?: string; images?: unknown[] }[],
-  opts: { maxAppend?: number; resolveImages?: (imgs: unknown[]) => unknown[] | undefined } = {},
+  opts: { maxAppend?: number; maxPrepend?: number; resolveImages?: (imgs: unknown[]) => unknown[] | undefined } = {},
 ): T[] | null {
   const maxAppend = opts.maxAppend ?? 40;
+  const maxPrepend = opts.maxPrepend ?? 320;
   const srv = Array.isArray(server) ? server : [];
   if (!srv.length) return null;
   const localMsgs = Array.isArray(local) ? local : [];
@@ -672,9 +694,14 @@ export function mergeServerTail<
     const tail = srv.slice(-maxAppend).map(toLocal).filter(worthKeeping);
     return tail.length ? tail : null;
   }
+  // Server hat MEHR Verlauf als lokal (ältere Nachrichten wurden lokal durch den
+  // Speicher-/Auto-Compact-Deckel abgeschnitten): die fehlenden ÄLTEREN Nachrichten vorne
+  // nachziehen — Ausrichtung über die Message-IDs, keine Heuristik.
+  const older = olderServerHead(localMsgs, srv, toLocal, worthKeeping, maxPrepend);
+
   const localUsers = localMsgs.filter((m) => m.role === "user").length;
   const srvUsers = srv.filter((m) => m.role === "user").length;
-  if (srvUsers < localUsers) return null; // Server hinkt hinterher → nichts anwenden
+  if (srvUsers < localUsers) return older.length ? [...older, ...localMsgs] : null; // Server hinkt hinterher
   const lastLocalUser = [...localMsgs].reverse().find((m) => m.role === "user");
   if (!lastLocalUser) return null;
   const want = norm(lastLocalUser.text);
@@ -691,17 +718,166 @@ export function mergeServerTail<
   let tail: T[];
   if (localHasAnswer) {
     // Antwort ist da → nur NEUE Server-Turns anhängen (sonst doppelt).
-    if (srvUsers <= localUsers) return null;
+    if (srvUsers <= localUsers) return older.length ? [...older, ...localMsgs] : null;
     const lastSrvUser = srv.map((m) => m.role).lastIndexOf("user");
-    if (lastSrvUser <= anchor) return null;
+    if (lastSrvUser <= anchor) return older.length ? [...older, ...localMsgs] : null;
     tail = srv.slice(lastSrvUser + 1).map(toLocal);
   } else {
     tail = srv.slice(anchor + 1).map(toLocal);
   }
   const seen = new Set(localMsgs.map((m) => String(m.id || "")).filter(Boolean));
   const add = tail.filter((m) => worthKeeping(m) && !seen.has(String((m as { id?: string }).id || "")));
-  if (!add.length) return null;
-  return [...localMsgs, ...add];
+  if (!add.length) return older.length ? [...older, ...localMsgs] : null;
+  const head = older.filter((m) => !seen.has(String((m as { id?: string }).id || "")));
+  return [...head, ...localMsgs, ...add];
+}
+
+/**
+ * Fehlende ÄLTERE Server-Nachrichten vor dem ersten lokal bekannten Treffer.
+ * Ohne ID-Treffer wird nichts vorne angefügt (kein Raten → keine Dubletten).
+ */
+function olderServerHead<T>(
+  localMsgs: T[],
+  srv: { id?: string; role?: string; text?: string; images?: unknown[] }[],
+  toLocal: (m: { id?: string; role?: string; text?: string; images?: unknown[] }, i: number) => T,
+  worthKeeping: (m: T) => boolean,
+  maxPrepend: number,
+): T[] {
+  if (!srv.length || !localMsgs.length) return [];
+  const idxById = new Map<string, number>();
+  srv.forEach((m, i) => {
+    const id = String(m.id || "");
+    if (id) idxById.set(id, i);
+  });
+  let firstIdx = -1;
+  for (const m of localMsgs) {
+    const id = String((m as { id?: string }).id || "");
+    if (!id) continue;
+    const i = idxById.get(id);
+    if (i !== undefined) { firstIdx = i; break; }
+  }
+  if (firstIdx <= 0) return [];
+  const localIds = new Set(localMsgs.map((m) => String((m as { id?: string }).id || "")).filter(Boolean));
+  const head: T[] = [];
+  const start = Math.max(0, firstIdx - Math.max(0, maxPrepend));
+  for (let i = start; i < firstIdx; i++) {
+    const id = String(srv[i].id || "");
+    if (id && localIds.has(id)) continue;
+    const m = toLocal(srv[i], i);
+    if (worthKeeping(m)) head.push(m);
+  }
+  return head;
+}
+
+/** Endet der Text auf dem lokalen Speicher-Kürzungsmarker? */
+export function hasLocalTruncation(text: string): boolean {
+  return String(text ?? "").trimEnd().endsWith(LOCAL_TRUNC_MARKER.trim());
+}
+
+/** Lokal gekappten Text ohne Marker (nur der gespeicherte Kopf). */
+export function stripLocalTruncation(text: string): string {
+  const t = String(text ?? "");
+  const i = t.lastIndexOf(LOCAL_TRUNC_MARKER.trim());
+  return i >= 0 ? t.slice(0, i) : t;
+}
+
+/**
+ * Lokal gekürzte Texte durch den Server-Volltext ersetzen.
+ *
+ * Bis 23.11.2026 blieb der Kürzungsmarker `… (gekürzt gespeichert …)` dauerhaft in der
+ * Blase: `compactChatsForStorage` kappte bei 12 000 Zeichen, `mergeServerTail` hat aber
+ * nur NEUE Nachrichten nachgezogen bzw. die letzte Antwort — nie eine schon vorhandene,
+ * gekappte Blase repariert. Ergebnis: langer Text blieb nach dem Öffnen für immer
+ * abgeschnitten, obwohl der Volltext in `GET /api/session/:id` steht.
+ *
+ * Zuordnung: primär über die Message-ID, sonst über den Textanfang (Server speichert
+ * denselben Wortlaut). Nur ersetzen, wenn der Server-Text wirklich länger ist.
+ * Rückgabe `null` = nichts zu tun.
+ */
+export function healTruncatedMessages<
+  T extends { id?: string; role?: string; text?: string; images?: unknown[] },
+>(
+  local: T[],
+  server: { id?: string; role?: string; text?: string; images?: unknown[] }[],
+): T[] | null {
+  if (!Array.isArray(local) || !Array.isArray(server) || !local.length || !server.length) return null;
+  const byId = new Map<string, { id?: string; role?: string; text?: string; images?: unknown[] }>();
+  for (const m of server) {
+    const id = String(m?.id || "");
+    if (id) byId.set(id, m);
+  }
+  const norm = (v?: string) => String(v || "").replace(/\s+/g, " ").trim();
+  let changed = 0;
+  const out = local.map((m) => {
+    const text = typeof m.text === "string" ? m.text : "";
+    if (!hasLocalTruncation(text)) return m;
+    const head = stripLocalTruncation(text);
+    let hit = byId.get(String(m.id || ""));
+    if (!hit) {
+      const want = norm(head).slice(0, 200);
+      if (want) hit = server.find((s) => s.role === m.role && norm(s.text).startsWith(want));
+    }
+    const full = String(hit?.text || "");
+    if (full.length <= head.length) return m; // Server kennt keinen längeren Text
+    changed++;
+    return { ...m, text: full, images: (m.images as unknown) ?? (hit?.images as unknown) } as T;
+  });
+  return changed ? out : null;
+}
+
+// ── Aufgeklappte Blasen merken (pro Chat + Message-ID, überlebt App-Neustart) ──
+/** AsyncStorage-kompatibler Minimal-Store (in Tests: In-Memory). */
+export type OpenedStore = {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<unknown>;
+};
+export const OPENED_KEY_PREFIX = "pi.opened.v1";
+export function openedKey(chatId: string): string {
+  return `${OPENED_KEY_PREFIX}.${chatId || "default"}`;
+}
+/** Kaputtes/leeres JSON → leere Liste (nie werfen). */
+export function parseOpenedIds(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Merkt sich, welche Blasen der Nutzer aufgeklappt hat.
+ * Ohne Persistenz war `forceOpen` nach jedem App-Start weg → dieselbe Riesennachricht
+ * stand wieder zugeklappt da, obwohl der Nutzer sie schon geöffnet hatte.
+ */
+export function createOpenedRegistry(store: OpenedStore, maxIds = 300) {
+  return {
+    async load(chatId: string): Promise<string[]> {
+      try {
+        return parseOpenedIds(await store.getItem(openedKey(chatId)));
+      } catch {
+        return [];
+      }
+    },
+    async isOpen(chatId: string, msgId: string): Promise<boolean> {
+      const ids = await this.load(chatId);
+      return ids.includes(String(msgId || ""));
+    },
+    /** Merken (idempotent), älteste Einträge fallen weg. Rückgabe = neue Liste. */
+    async remember(chatId: string, msgId: string): Promise<string[]> {
+      const id = String(msgId || "");
+      const ids = await this.load(chatId);
+      if (!id) return ids;
+      const next = [...ids.filter((x) => x !== id), id].slice(-Math.max(1, maxIds));
+      try {
+        await store.setItem(openedKey(chatId), JSON.stringify(next));
+      } catch {
+        // Speichern darf die UI nie blockieren.
+      }
+      return next;
+    },
+  };
 }
 
 /** Chat-Titel aus der ersten Nutzernachricht ableiten (gekürzt, an Wortgrenze). */

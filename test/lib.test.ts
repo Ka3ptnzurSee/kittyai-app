@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
+import { isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -270,7 +270,7 @@ test("tooTall: Schwelle greift, Müll-Werte crashen nicht", () => {
   assert.strictEqual(tooTall(Infinity), false);
   assert.strictEqual(tooTall(-1), false);
   assert.strictEqual(tooTall("4999" as unknown as number), false);
-  assert.strictEqual(tooTall("9000" as unknown as number), true);
+  assert.strictEqual(tooTall("13000" as unknown as number), true);
   assert.ok(BUBBLE_PREVIEW_PT < MAX_BUBBLE_PT);
 });
 
@@ -433,6 +433,91 @@ test("mergeServerTail ignoriert einen Server, der hinterherhängt (Frage nie ang
   assert.strictEqual(mergeServerTail(local, server), null);
 });
 
+// ── Lange Antworten: nicht mehr abschneiden (Anzeige-Schwelle) ──────────────
+test("Text 9000 Zeichen → wird vollständig gerendert (kein Auto-Collapse)", () => {
+  const text = ("Zeile mit Inhalt\n".repeat(600) + "x".repeat(9000)).slice(0, 9000);
+  assert.strictEqual(text.length, 9000);
+  assert.strictEqual(shouldCollapseBubble(text), false, "9000 Z darf NICHT eingeklappt werden");
+  // und die lokale Speicherung kappt 9000 Z ebenfalls nicht (kein Verlust)
+  const chats = [{ id: "c1", messages: [{ id: "m1", role: "assistant", text }] }];
+  const out = compactChatsForStorage(chats);
+  const stored = String((out[0].messages[0] as { text: string }).text);
+  assert.strictEqual(stored.length, 9000);
+  assert.strictEqual(hasLocalTruncation(stored), false);
+});
+
+test("Text > 12k → Hinweiszeile vorhanden (kein kommentarloser Schnitt)", () => {
+  const text = "x".repeat(MAX_INLINE_TEXT_CHARS + 1);
+  assert.strictEqual(shouldCollapseBubble(text), true);
+  assert.match(COLLAPSED_HINT, /gek\u00fcrzt/);
+  assert.match(COLLAPSED_HINT, /volle Antwort/);
+  // gespeicherter Text trägt den Kürzungsmarker (Volltext lädt nach)
+  const chats = [{ id: "c2", messages: [{ id: "m2", role: "assistant", text: "y".repeat(50000) }] }];
+  const out = compactChatsForStorage(chats);
+  const stored = String((out[0].messages[0] as { text: string }).text);
+  assert.ok(stored.length < 50000);
+  assert.strictEqual(hasLocalTruncation(stored), true, "Marker fehlt: " + stored.slice(-80));
+});
+
+test("lokaler Text mit Kürzungsmarker → wird durch Server-Volltext ersetzt", () => {
+  const full = "A".repeat(30000) + " ENDE";
+  const local = [
+    { id: "u1", role: "user", text: "lange Antwort bitte" },
+    { id: "a1", role: "assistant", text: "A".repeat(12000) + LOCAL_TRUNC_MARKER },
+  ];
+  const server = [
+    { id: "s1", role: "user", text: "lange Antwort bitte" },
+    { id: "s2", role: "assistant", text: full },
+  ];
+  const out = healTruncatedMessages(local, server);
+  assert.ok(out, "gekappter Text muss geheilt werden");
+  assert.strictEqual(out![1].text, full);
+  assert.strictEqual(hasLocalTruncation(out![1].text), false);
+  // unveränderter Verlauf → null (kein Re-Render/Endlos-Patch)
+  assert.strictEqual(healTruncatedMessages([{ id: "a1", role: "assistant", text: full }], server), null);
+});
+
+test("forceOpen bleibt nach Remount erhalten (pro Chat + Message-ID)", async () => {
+  const mem = new Map<string, string>();
+  const store = {
+    getItem: async (k: string) => mem.get(k) ?? null,
+    setItem: async (k: string, v: string) => { mem.set(k, v); },
+  };
+  const first = createOpenedRegistry(store);
+  await first.remember("chat-1", "m-42");
+  // "Remount": neue Instanz, derselbe Storage
+  const second = createOpenedRegistry(store);
+  const ids = await second.load("chat-1");
+  assert.deepStrictEqual(ids, ["m-42"]);
+  assert.strictEqual(await second.isOpen("chat-1", "m-42"), true);
+  // anderer Chat bleibt unberührt; Mehrfach-Merken erzeugt keine Dublette
+  assert.strictEqual(await second.isOpen("chat-2", "m-42"), false);
+  await second.remember("chat-1", "m-42");
+  assert.deepStrictEqual(await second.load("chat-1"), ["m-42"]);
+  // kaputter Storage-Inhalt crasht nicht
+  mem.set("pi.opened.v1.chat-3", "{nicht json");
+  assert.deepStrictEqual(await second.load("chat-3"), []);
+});
+
+test("Server hat 300 msgs, lokal 240 → älteste 60 werden nachgezogen", () => {
+  const server = Array.from({ length: 300 }, (_, i) => ({
+    id: "s" + i,
+    role: i % 2 === 0 ? "user" : "assistant",
+    text: "Nachricht " + i,
+  }));
+  const local = server.slice(60).map((m) => ({ ...m }));
+  const out = mergeServerTail(local, server);
+  assert.ok(out, "ältere Nachrichten müssen nachgezogen werden");
+  assert.strictEqual(out!.length, 300);
+  assert.strictEqual(out![0].id, "s0");
+  assert.strictEqual(out![59].id, "s59");
+  assert.strictEqual(out![60].id, "s60");
+  // der letzte lokale Eintrag bleibt an derselben Stelle (keine Verschiebung)
+  assert.strictEqual(out![299].id, "s299");
+  // bereits vollständig lokal → nichts tun (kein doppelter Verlauf)
+  assert.strictEqual(mergeServerTail(server, server), null);
+});
+
 // ── sanitizeLoadedMessages: persistierte Fehlerkarten beim Start verwerfen ──
 test("sanitizeLoadedMessages entfernt gespeicherte Fehlerkarten (Chat wird nicht dauerhaft rot)", () => {
   const messages = [
@@ -557,7 +642,7 @@ test("Speicher-Deckel bleibt klein (Performance: AES-GCM im JS-Thread)", () => {
   // Regression: 8 MB Bestand kostete 331-664 ms AES-GCM pro Speichern (gemessen) und
   // blockierte die UI. Der Deckel muss deutlich darunter bleiben.
   assert.ok(MAX_STORAGE_CHARS <= 1_000_000, "MAX_STORAGE_CHARS zu gross: " + MAX_STORAGE_CHARS);
-  assert.ok(MAX_STORED_MESSAGES <= 250, "MAX_STORED_MESSAGES zu gross: " + MAX_STORED_MESSAGES);
+  assert.ok(MAX_STORED_MESSAGES <= 500, "MAX_STORED_MESSAGES zu gross: " + MAX_STORED_MESSAGES);
   const big = Array.from({ length: 40 }, (_, c) => ({
     id: "c" + c,
     updatedAt: c,

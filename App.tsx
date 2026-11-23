@@ -41,7 +41,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilRichText } from "./Dil";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
 import { haptic, CharacterCounter, Pressable, PullToRefresh, RotatingShimmerText, SearchField, ShimmerText, TabsHeader } from "./components";
@@ -399,8 +399,17 @@ function MessageImage({ uri }: { uri: string }) {
   return <Image source={{ uri }} style={styles.msgImage} resizeMode="cover" onError={() => setFailed(true)} />;
 }
 
+/** Aufgeklappte Blasen (pro Chat + Message-ID) — überlebt App-Neustart. */
+const openedRegistry = createOpenedRegistry(AsyncStorage);
+
+/** 12345 -> "12.345" (Zeichenzahl im Kürzungs-Hinweis lesbar). */
+function fmtChars(n: number): string {
+  return String(Math.max(0, Math.round(Number(n) || 0))).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
 function MessageBubble({
   item,
+  chatId,
   isLast,
   isBusy,
   onReply,
@@ -410,6 +419,8 @@ function MessageBubble({
   onTooBig,
 }: {
   item: Msg;
+  /** Nur für die Persistenz des Aufklapp-Zustands (pro Chat + Message-ID). */
+  chatId?: string;
   isLast: boolean;
   isBusy: boolean;
   onReply: (m: Msg) => void;
@@ -427,7 +438,27 @@ function MessageBubble({
   const rawHRef = useRef(0);
   const [bigH, setBigH] = useState(0); // 0 = normal; > 0 = gemessene Riesenhöhe
   const [forceOpen, setForceOpen] = useState(false);
-  const tooBig = bigH > 0 && !forceOpen;
+  // Eingeklappt wird erst oberhalb von MAX_INLINE_TEXT_CHARS (12 000 Z ≈ 250 Zeilen) bzw.
+  // wenn ein Datenblock das Höhen-Sicherheitsnetz sprengt. Darunter wird IMMER alles
+  // gerendert — vorher kappte der 6000-pt/1200-pt-Deckel auch normale lange Antworten.
+  const tooBig = !forceOpen && shouldCollapseBubble(item.text || "", bigH);
+  // Aufgeklappte Blasen überleben den App-Neustart (AsyncStorage, pro Chat+Message-ID).
+  useEffect(() => {
+    let alive = true;
+    openedRegistry
+      .load(chatId || "")
+      .then((ids) => {
+        if (alive && ids.includes(String(item.id || ""))) setForceOpen(true);
+      })
+      .catch(() => { /* Persistenz ist optional */ });
+    return () => { alive = false; };
+    // Nur beim ersten Render dieser Nachricht lesen (Streaming ersetzt das Objekt ständig).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId, item.id]);
+  const openFull = () => {
+    setForceOpen(true);
+    openedRegistry.remember(chatId || "", String(item.id || "")).catch(() => {});
+  };
   const activity = !isUser ? item.activity || [] : [];
   // Kopieren/Teilen: iOS-Textauswahl ist bei uns nur absatzweise möglich, weil
   // Markdown jeden Absatz als eigenes <Text selectable> rendert — eine ganze
@@ -475,7 +506,7 @@ function MessageBubble({
   return (
     <>
     <View
-      style={[styles.bubble, bubbleStyle, tooBig && { height: BUBBLE_PREVIEW_PT, overflow: "hidden" }]}
+      style={[styles.bubble, bubbleStyle, tooBig && { maxHeight: BUBBLE_PREVIEW_PT, overflow: "hidden" }]}
       {...panResponder.panHandlers}
       onLayout={(e) => {
         const h = e.nativeEvent.layout.height;
@@ -577,10 +608,10 @@ function MessageBubble({
       </View>
     ) : null}
     {tooBig ? (
-      <Pressable onPress={() => setForceOpen(true)} style={styles.tooBigRow} hitSlop={8} accessibilityRole="button" accessibilityLabel="Volle Antwort anzeigen">
+      <Pressable onPress={openFull} style={styles.tooBigRow} hitSlop={8} accessibilityRole="button" accessibilityLabel="Volle Antwort anzeigen">
         <Ionicons name="chevron-down" size={14} color={colors.accent} />
         <Text style={styles.tooBigText}>
-          Nachricht ist ungewöhnlich groß ({Math.round(bigH)} pt) und wurde eingeklappt — antippen zum Aufklappen
+          {COLLAPSED_HINT} ({fmtChars((item.text || "").length)} Zeichen{bigH > 0 ? `, ${Math.round(bigH)} pt` : ""})
         </Text>
       </Pressable>
     ) : null}
@@ -1231,6 +1262,14 @@ export default function App() {
       const serverUserCount = serverMsgs.filter((m) => m.role === "user").length;
       const chat = chatsRef.current.find((c) => c.id === chatId);
       if (!chat) return false;
+      // (B) Lokal gekappte Blasen ("… (gekürzt gespeichert …)") durch den Server-Volltext
+      // ersetzen — sonst blieb die Anzeige dauerhaft abgeschnitten, obwohl der Server
+      // den ganzen Text hat. Kein zusätzlicher Request: nutzt den laufenden Session-Sync.
+      const healed = healTruncatedMessages(chat.messages, serverMsgs);
+      if (healed) {
+        patchChat(chatId, (c) => ({ ...c, messages: healed, updatedAt: Date.now() }));
+        return true;
+      }
       const localUserCount = chat.messages.filter((m) => m.role === "user").length;
       // 0) Turn hat den Server nie erreicht → ALLES Server-seitige (Antwort + lastError)
       // ist stale und darf NICHT auf diesen Turn angewandt werden.
@@ -1811,13 +1850,19 @@ export default function App() {
         setChats((cs) =>
           cs.map((c) => {
             if (c.id !== activeChatId) return c;
+            // (B) Lokal gekappte Blasen zuerst durch den Server-Volltext ersetzen.
+            const healed = healTruncatedMessages(c.messages, data.messages);
+            const base = healed || c.messages;
             // Fehlt der lokale Verlauf (Auto-Compact) oder wurde die App mitten im Turn
             // beendet (Frage/Antwort nie gespeichert), die fehlenden Server-Nachrichten
             // anhängen — sonst bliebe die fertige Antwort für immer unsichtbar.
-            const tail = mergeServerTail(c.messages, data.messages, {
+            // (C) `mergeServerTail` zieht jetzt auch ÄLTERE Nachrichten vorne nach, wenn der
+            // Server mehr Verlauf hat als der lokale Speicher (Deckel 500).
+            const tail = mergeServerTail(base, data.messages, {
               resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
             });
             if (tail) return { ...c, messages: tail, bodyCompacted: false, updatedAt: Date.now() };
+            if (healed) return { ...c, messages: healed, updatedAt: Date.now() };
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
             const serverLast = [...data.messages].reverse().find((m) => m.role === "assistant" && String(m.text || "").trim());
             // Server-Session ist die Wahrheit: eine (Resume-)Fehler-Karte auffüllen, wenn der
@@ -3691,6 +3736,7 @@ export default function App() {
     return (
       <MessageBubble
         item={item}
+        chatId={activeChat?.id}
         isLast={isLast}
         isBusy={isThisChatBusy}
         onReply={setReplyingTo}
