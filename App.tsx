@@ -700,6 +700,12 @@ export default function App() {
     installGlobalErrorHandlers(() => serverUrl);
   }, [serverUrl]);
   const [apiToken, setApiToken] = useState("");
+  // Geräte-Kopplung: ohne gültiges Geräte-Token gibt der Server 401 zurück.
+  const [pairGate, setPairGate] = useState(false);
+  const [pairCode, setPairCode] = useState("");
+  const [pairName, setPairName] = useState(Platform.OS === "ios" ? "iPhone/iPad" : "Android");
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairErr, setPairErr] = useState("");
   const [cwd, setCwd] = useState("");
   const [taskList, setTaskList] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
@@ -1020,6 +1026,41 @@ export default function App() {
     const secure = serverUrl.startsWith("https://");
     return { "Content-Type": "application/json", ...(apiToken && secure ? { "X-API-Token": apiToken } : {}) };
   }, [serverUrl, apiToken]);
+
+  // Kopplung: Code (per SSH auf dem Server erzeugt) gegen Geräte-Token tauschen.
+  // Kein Geheimnis im App-Bundle — jedes Gerät bekommt ein eigenes Token, das
+  // serverseitig einzeln widerrufen werden kann.
+  const submitPairCode = useCallback(async () => {
+    const code = pairCode.replace(/\D/g, "");
+    if (code.length !== 6) {
+      setPairErr("Bitte den 6-stelligen Code eingeben");
+      return;
+    }
+    setPairBusy(true);
+    setPairErr("");
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(base + "/api/pair/claim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, name: pairName.trim() || "Geraet", platform: Platform.OS }),
+      });
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.token) {
+        setPairErr(data?.error || `Kopplung fehlgeschlagen (${res.status})`);
+        return;
+      }
+      setApiToken(String(data.token));
+      setPairGate(false);
+      setPairCode("");
+      SecureStore.setItemAsync(TOKEN_KEY, String(data.token), { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY }).catch(() => {});
+      AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+    } catch (e: any) {
+      setPairErr("Netzwerkfehler: " + (e?.message || String(e)));
+    } finally {
+      setPairBusy(false);
+    }
+  }, [pairCode, pairName, serverUrl]);
 
   // Verbrauch + Guthaben vom Server holen. chatId null = nur Gesamt/Guthaben (Hauptmenü).
   // fresh=true umgeht die Server-Caches (Guthaben 60 s): Tippen auf die Anzeige erneuert sie.
@@ -1527,6 +1568,9 @@ export default function App() {
             .catch(() => {}); // Klartext behalten — nächster Start migriert erneut
         }
       }
+      // Ohne Geräte-Token: Kopplungs-Schirm zeigen (Server verlangt Token,
+      // sobald AUTH_REQUIRED=1 gesetzt ist).
+      if (!savedToken) setPairGate(true);
       try {
         const savedCwd = await AsyncStorage.getItem(CWD_KEY);
         if (savedCwd) {
@@ -4580,6 +4624,39 @@ export default function App() {
           </Pressable>
         </Pressable>
       </Modal>
+      {/* Geräte-Kopplung — erscheint ohne gültiges Geräte-Token */}
+      <Modal visible={pairGate} transparent animationType="fade" onRequestClose={() => { /* erst nach Kopplung */ }}>
+        <View style={styles.pairBackdrop}>
+          <View style={styles.pairCard}>
+            <Text style={styles.pairTitle}>Mit Server koppeln</Text>
+            <Text style={styles.pairHint}>
+              Auf dem Server einen Code erzeugen und hier eingeben. Danach merkt sich dieses Gerät sein eigenes Token.
+            </Text>
+            <TextInput
+              style={styles.pairInput}
+              value={pairName}
+              onChangeText={setPairName}
+              placeholder="Name des Geräts"
+              placeholderTextColor="#7c8698"
+              maxLength={40}
+            />
+            <TextInput
+              style={styles.pairCodeInput}
+              value={pairCode}
+              onChangeText={(t) => setPairCode(t.replace(/\D/g, "").slice(0, 6))}
+              placeholder="000000"
+              placeholderTextColor="#7c8698"
+              keyboardType="number-pad"
+              maxLength={6}
+              autoFocus
+            />
+            {pairErr ? <Text style={styles.pairError}>{pairErr}</Text> : null}
+            <Pressable style={styles.pairButton} onPress={submitPairCode} disabled={pairBusy} accessibilityRole="button" accessibilityLabel="Koppeln">
+              <Text style={styles.pairButtonText}>{pairBusy ? "Koppeln …" : "Koppeln"}</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -4960,4 +5037,14 @@ const styles = StyleSheet.create({
   modelMenuItemTextActive: { color: colors.accent, fontWeight: "700" },
   // deaktiviert (z. B. Robotron via Laptop-Tunnel): sichtbar, aber ausgegraut
   modelMenuItemTextDeactivated: { color: colors.muted, opacity: 0.7 },
+  // Geräte-Kopplung
+  pairBackdrop: { flex: 1, backgroundColor: "rgba(6,8,12,0.92)", alignItems: "center", justifyContent: "center", paddingHorizontal: 22 },
+  pairCard: { width: "100%", maxWidth: 420, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 18, padding: 20, gap: 10 },
+  pairTitle: { fontSize: 19, fontWeight: "700", color: colors.text },
+  pairHint: { fontSize: 13, color: colors.muted, lineHeight: 19 },
+  pairInput: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, color: colors.text, fontSize: 15 },
+  pairCodeInput: { backgroundColor: colors.surface2, borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, color: colors.text, fontSize: 24, letterSpacing: 8, textAlign: "center" },
+  pairError: { fontSize: 13, color: "#ff8a8a" },
+  pairButton: { backgroundColor: colors.accent, borderRadius: 12, paddingVertical: 13, alignItems: "center", marginTop: 4 },
+  pairButtonText: { color: "#ffffff", fontWeight: "700", fontSize: 15 },
 });
