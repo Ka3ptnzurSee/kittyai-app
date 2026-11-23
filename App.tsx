@@ -1127,6 +1127,7 @@ export default function App() {
   // prueft es gegen Apples JWKS und gibt ein Geraete-Token aus. Der Code-Weg
   // oben bleibt als Notausgang, falls Apple nicht erreichbar ist.
   const submitAppleLogin = useCallback(async () => {
+    if (pairBusy) return; // Doppeltipp: zwei parallele Logins würden sich überschreiben
     if (!serverUrl.startsWith("https://")) {
       setPairErr("Apple-Anmeldung nur über HTTPS möglich");
       return;
@@ -1163,16 +1164,22 @@ export default function App() {
           setPairErr(data?.error || `Apple-Anmeldung fehlgeschlagen (${res.status})`);
           return;
         }
-        setApiToken(String(data.token));
-        setPairGate(false);
-        const saved = await SecureStore.setItemAsync(TOKEN_KEY, String(data.token), {
+        // Kein Klartext-Fallback: das Geräte-Token ist ein Bearer-Token und hat
+        // in AsyncStorage (lesbare Plist/SQLite, Backups) nichts zu suchen.
+        // Schlägt der Keychain fehl, brechen wir ab statt unsicher zu speichern.
+        const token = String(data.token);
+        const saved = await SecureStore.setItemAsync(TOKEN_KEY, token, {
           keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
         }).then(() => true).catch(() => false);
-        if (saved) {
-          AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
-        } else {
-          AsyncStorage.setItem(TOKEN_KEY, String(data.token)).catch(() => {});
+        if (!saved) {
+          setPairErr("Keychain nicht verfügbar — Anmeldung abgebrochen");
+          return;
         }
+        // Alten Klartext-Rest (aus früheren Versionen) entfernen.
+        AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
+        // Erst nach bestätigter Speicherung als angemeldet gelten.
+        setApiToken(token);
+        setPairGate(false);
       } finally {
         clearTimeout(timer);
       }
@@ -1180,6 +1187,8 @@ export default function App() {
       // Nutzer hat den Apple-Dialog abgebrochen: keine Fehlermeldung noetig.
       if (e?.code === "ERR_REQUEST_CANCELED" || e?.code === "ERR_CANCELED") {
         setPairErr("");
+      } else if (e?.name === "AbortError") {
+        setPairErr("Zeitüberschreitung — Server nicht erreichbar");
       } else {
         setPairErr("Apple-Anmeldung: " + (e?.message || String(e)));
       }
