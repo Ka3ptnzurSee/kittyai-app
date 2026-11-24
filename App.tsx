@@ -2391,15 +2391,28 @@ export default function App() {
 
   // Plugins → Connectoren: Meta inkl. Plattform-Status laden. Der Plattform-Doctor
   // läuft serverseitig asynchron (TTL-Cache), deshalb pollen bis Daten da sind.
+  // Review-Fix (25.11.): Abbruch im Interval-Callback prüfen (vorher lief das
+  // Intervall nach dem ersten Laden endlos weiter, weil `meta` nicht in den Deps
+  // stand) und nach MAX_POLLS aufhören, damit ein leerer/alter Server nicht dauerhaft
+  // alle 8 s angefragt wird.
   useEffect(() => {
     if (tab !== "plugins" || pluginsTab !== "connectors") return;
+    let cancelled = false;
+    let polls = 0;
+    const MAX_POLLS = 15; // 2 Minuten
     loadMeta();
-    const pending = meta.connectors.some((c) => c.status === "unknown");
-    if (meta.platforms.length > 0 && !pending) return;
     const t = setInterval(() => {
+      if (cancelled || polls >= MAX_POLLS) {
+        clearInterval(t);
+        return;
+      }
+      polls += 1;
       loadMeta();
     }, 8000);
-    return () => clearInterval(t);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
   }, [tab, pluginsTab, serverUrl, apiToken]);
 
   async function registerPush(url: string, tok?: string) {
@@ -4315,7 +4328,7 @@ export default function App() {
     }
     if (c.status === "disabled") return "deaktiviert (mcp.json)";
     if (c.status === "timeout") return `keine Antwort${c.detail ? `: ${c.detail}` : ""}`;
-    if (c.status === "unknown") return "Verbindung wird geprüft …";
+    if (c.status === "unknown" || c.status === undefined) return "Status unbekannt";
     return `nicht verbunden${c.detail ? `: ${c.detail}` : ""}`;
   }
 
@@ -4324,6 +4337,20 @@ export default function App() {
     if (c.status === "error") return colors.danger;
     if (c.status === "timeout") return colors.warning;
     return colors.muted;
+  }
+
+  function platformStatusLabel(p: ConnectedPlatform): string {
+    if (p.status === "ok") return "verbunden";
+    if (p.status === "warning") return "teilweise verbunden";
+    if (p.status === "unknown" || p.status === undefined) return "ungeprüft";
+    return "nicht verbunden";
+  }
+
+  function platformDotColor(p: ConnectedPlatform): string {
+    if (p.status === "ok") return colors.success;
+    if (p.status === "warning") return colors.warning;
+    if (p.status === "unknown" || p.status === undefined) return colors.muted;
+    return colors.danger;
   }
 
   function renderConnectors() {
@@ -4339,9 +4366,9 @@ export default function App() {
               <View key={p.id} style={styles.metaCard}>
                 <View style={styles.metaCardHeader}>
                   <Text style={styles.metaName}>{p.name}</Text>
-                  <View style={[styles.metaDot, { backgroundColor: p.status === "ok" ? colors.success : p.status === "warning" ? colors.warning : p.status === "unknown" ? colors.muted : colors.danger }]} />
+                  <View style={[styles.metaDot, { backgroundColor: platformDotColor(p) }]} />
                 </View>
-                <Text style={styles.metaStatus}>{p.status === "ok" ? "verbunden" : p.status === "warning" ? "teilweise verbunden" : p.status === "unknown" ? "ungeprüft" : "nicht verbunden"}</Text>
+                <Text style={styles.metaStatus}>{platformStatusLabel(p)}</Text>
                 {p.detail ? <Text style={styles.metaDesc} numberOfLines={2}>{p.detail}</Text> : null}
               </View>
             ))}
