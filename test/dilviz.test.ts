@@ -7,6 +7,7 @@ import {
   classifyDiff,
   splitMathSegments,
   escapeInlineMathMeta,
+  formatiereZahl,
 } from "../dilviz.ts";
 
 // ── normalizeChart ──
@@ -206,4 +207,23 @@ test("classifyDiff: große Eingaben (5000 Zeilen) crashen nicht und sind begrenz
   const lines = classifyDiff(big, big + "\nextra");
   assert.ok(lines.length <= 2000);
   assert.ok(lines.length > 0);
+});
+
+test("formatiereZahl: Punkt ist Tausendertrenner NUR bei Gruppierung", () => {
+  // Fehlerfall 23.11.2026: 14.4 wurde als 144 gezeigt
+  assert.strictEqual(formatiereZahl("14.4"), "14,4");
+  assert.strictEqual(formatiereZahl("7.6"), "7,6");
+  assert.strictEqual(formatiereZahl("1.234"), "1.234");
+  assert.strictEqual(formatiereZahl("1.234,5"), "1.234,5");
+  assert.strictEqual(formatiereZahl("1234,5"), "1.234,5");
+  assert.strictEqual(formatiereZahl("1234"), "1.234");
+  assert.strictEqual(formatiereZahl("-36.5"), "-36,5");
+  assert.strictEqual(formatiereZahl("16288.95"), "16,3k");
+  assert.strictEqual(formatiereZahl("1234567"), "1,23 Mio");
+  assert.strictEqual(formatiereZahl("2500000000"), "2,5 Mrd");
+  assert.strictEqual(formatiereZahl("0.375"), "0,38");
+  assert.strictEqual(formatiereZahl("k. A."), "k. A.");
+  assert.strictEqual(formatiereZahl(""), "—");
+  assert.strictEqual(formatiereZahl("7.6", "raw"), "7.6");
+  assert.strictEqual(formatiereZahl("12.5", "percent"), "12,5 %");
 });

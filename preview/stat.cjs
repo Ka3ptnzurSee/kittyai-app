@@ -1,0 +1,26 @@
+const { chromium } = require("/opt/kitty/preview-tool/node_modules/playwright-core");
+(async () => {
+  const b = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox", "--disable-gpu"] });
+  const p = await b.newPage({ viewport: { width: 460, height: 1700 } });
+  const fehler = [];
+  p.on("pageerror", (e) => fehler.push(String(e).split("\n")[0]));
+  await p.goto("http://127.0.0.1:8099/index.html");
+  await p.waitForTimeout(900);
+  const txt = async () => (await p.locator("body").innerText()).replace(/\s+/g, " ");
+  const cut = (t) => t.slice(t.indexOf("BIER/WOCHE"), t.indexOf("BIER/WOCHE") + 110);
+  const vor = await txt();
+  const s = p.locator('[aria-label^="Menge (App-Pfad)"]').first();
+  const box = await s.boundingBox();
+  await p.mouse.move(box.x + box.width * 0.05, box.y + box.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(box.x + box.width * 0.95, box.y + box.height / 2, { steps: 10 });
+  await p.mouse.up();
+  await p.waitForTimeout(500);
+  const nach = await txt();
+  console.log("KACHELN vor :", cut(vor));
+  console.log("KACHELN nach:", cut(nach));
+  console.log("STAT REAGIERT:", cut(vor) !== cut(nach) ? "JA" : "NEIN");
+  console.log("FEHLER:", fehler.length ? fehler.join(" | ") : "keine");
+  await p.screenshot({ path: "stat.png", fullPage: true });
+  await b.close();
+})();

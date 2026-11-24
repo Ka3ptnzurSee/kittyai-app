@@ -1,0 +1,27 @@
+const { chromium } = require("/opt/kitty/preview-tool/node_modules/playwright-core");
+(async () => {
+  const b = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox", "--disable-gpu"] });
+  const p = await b.newPage({ viewport: { width: 460, height: 2000 } });
+  const err = [];
+  p.on("pageerror", (e) => err.push(String(e).split("\n")[0]));
+  await p.goto("http://127.0.0.1:8099/index.html");
+  await p.waitForTimeout(1000);
+  const knoten = p.locator('div[role="button"][aria-label]');
+  const labels = (await knoten.evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")))).filter((l) => l && !/Diagramm/.test(l));
+  console.log("Knotenflaechen:", labels.length, "→", labels.slice(0, 5).join(" | "));
+  const vorher = await p.locator("body").innerText();
+  console.log("Detailkarte vor Tippen:", /Schritt \d/.test(vorher) ? "sichtbar" : "nein");
+  await p.locator('[aria-label="Token erzeugen"]').first().click();
+  await p.waitForTimeout(400);
+  const nachher = await p.locator("body").innerText();
+  const m = nachher.match(/Schritt \d+[\s\S]{0,80}/);
+  console.log("nach Tippen:", m ? m[0].replace(/\s+/g, " ").slice(0, 70) : "(keine Karte)");
+  const rahmen = await p.locator('[aria-label="Token erzeugen"]').first().evaluate((e) => getComputedStyle(e).borderWidth + " " + getComputedStyle(e).borderColor);
+  console.log("Hervorhebung:", rahmen);
+  await p.locator('[aria-label="Diagramm vergrößern"]').first().click();
+  await p.waitForTimeout(500);
+  console.log("Vollbild offen:", /zoomen mit zwei Fingern/.test(await p.locator("body").innerText()) ? "JA" : "NEIN");
+  await p.screenshot({ path: "uml-interaktiv.png" });
+  console.log("Page-Errors:", err.length ? err.join(" | ") : "keine");
+  await b.close();
+})();

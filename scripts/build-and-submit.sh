@@ -6,7 +6,7 @@
 # Voraussetzungen: eas-cli global installiert, keys.json vorhanden.
 
 set -u
-APP_DIR="${APP_DIR:-/opt/pi-app/app}"
+APP_DIR="${APP_DIR:-/opt/kitty/app}"
 cd "$APP_DIR" || { echo "FEHLER: $APP_DIR nicht gefunden"; exit 1; }
 
 echo "=== [1/3] Build starten ==="

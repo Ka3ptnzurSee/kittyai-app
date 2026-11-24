@@ -77,8 +77,8 @@ type Chat = {
   bodyCompacted?: boolean;
 };
 type Folder = { id: string; name: string; description: string; parentId: string | null; order: number };
-type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string };
-type ConnectedPlatform = { id: string; name: string; status: "ok" | "error" | "warning"; detail: string };
+type Connector = { id: string; name: string; agent: string; description: string; createdAt?: string; enabled?: boolean; command?: string; status?: "ok" | "error" | "timeout" | "unknown" | "disabled"; detail?: string; tools?: number; server?: string; checkedAt?: number };
+type ConnectedPlatform = { id: string; name: string; status: "ok" | "error" | "warning" | "unknown"; detail: string };
 type SkillMeta = { id: string; name: string; description: string };
 type AgentMeta = { id: string; name: string; description: string };
 type WorkflowMeta = { id: string; name: string; cron?: string };
@@ -212,8 +212,7 @@ const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[
   { key: "pro", label: "PRO" },
   { key: "flash", label: "FLASH" },
   // --goeran-options:start--
-  { key: "inkling", label: "INKLING" },
-  { key: "qwen38", label: "QWEN38" },
+  { key: "muse", label: "MUSE" },
   // --goeran-options:end--
   // Robotron-Modelle auch offline/ohne /api/models anbieten (Laptop-Tunnel :18444).
   // deactivated: hängen am Laptop-Tunnel → im UI als INAKTIV markiert, nicht wählbar.
@@ -2395,7 +2394,8 @@ export default function App() {
   useEffect(() => {
     if (tab !== "plugins" || pluginsTab !== "connectors") return;
     loadMeta();
-    if (meta.platforms.length > 0) return;
+    const pending = meta.connectors.some((c) => c.status === "unknown");
+    if (meta.platforms.length > 0 && !pending) return;
     const t = setInterval(() => {
       loadMeta();
     }, 8000);
@@ -4046,7 +4046,7 @@ export default function App() {
   }
 
   // Selbst-Diagnose: eine Blase, die die Höhengrenze reißt, wird EINMAL an den
-  // Server gemeldet (Log: /opt/pi-app/logs/app-diag.log). Damit ist ohne Screenshot
+  // Server gemeldet (Log: /opt/kitty/logs/app-diag.log). Damit ist ohne Screenshot
   // nachweisbar, WELCHE Nachricht den weißen Riesenblock erzeugt.
   const diagSentRef = useRef<Set<string>>(new Set());
   function reportTooBig(m: Msg, height: number) {
@@ -4307,10 +4307,29 @@ export default function App() {
     );
   }
 
+  // Grün darf nur eins heißen: der Connector hat auf initialize + tools/list geantwortet.
+  function connectorStatusLabel(c: Connector): string {
+    if (c.status === "ok") {
+      const tools = typeof c.tools === "number" ? ` · ${c.tools} Tools` : "";
+      return `verbunden${tools}${c.server ? ` · ${c.server}` : ""}`;
+    }
+    if (c.status === "disabled") return "deaktiviert (mcp.json)";
+    if (c.status === "timeout") return `keine Antwort${c.detail ? `: ${c.detail}` : ""}`;
+    if (c.status === "unknown") return "Verbindung wird geprüft …";
+    return `nicht verbunden${c.detail ? `: ${c.detail}` : ""}`;
+  }
+
+  function connectorDotColor(c: Connector): string {
+    if (c.status === "ok") return colors.success;
+    if (c.status === "error") return colors.danger;
+    if (c.status === "timeout") return colors.warning;
+    return colors.muted;
+  }
+
   function renderConnectors() {
     return (
       <View style={styles.connectorsWrap}>
-        <Text style={styles.pluginsHint}>Verbundene Apps & Connectoren. Neue Connectoren mit einem spezialisierten Agenten verbinden.</Text>
+        <Text style={styles.pluginsHint}>Verbundene Apps & Connectoren. Grün = geprüfter Handshake (initialize + tools/list), nicht bloß ein Eintrag in der Konfiguration.</Text>
         <Text style={styles.pluginsSectionTitle}>Verbundene Plattformen</Text>
         {meta.platforms.length === 0 ? (
           <Text style={styles.pluginsEmpty}>Status wird geladen …</Text>
@@ -4320,8 +4339,9 @@ export default function App() {
               <View key={p.id} style={styles.metaCard}>
                 <View style={styles.metaCardHeader}>
                   <Text style={styles.metaName}>{p.name}</Text>
-                  <View style={[styles.metaDot, { backgroundColor: p.status === "ok" ? colors.success : p.status === "warning" ? colors.warning : colors.danger }]} />
+                  <View style={[styles.metaDot, { backgroundColor: p.status === "ok" ? colors.success : p.status === "warning" ? colors.warning : p.status === "unknown" ? colors.muted : colors.danger }]} />
                 </View>
+                <Text style={styles.metaStatus}>{p.status === "ok" ? "verbunden" : p.status === "warning" ? "teilweise verbunden" : p.status === "unknown" ? "ungeprüft" : "nicht verbunden"}</Text>
                 {p.detail ? <Text style={styles.metaDesc} numberOfLines={2}>{p.detail}</Text> : null}
               </View>
             ))}
@@ -4336,8 +4356,9 @@ export default function App() {
               <View key={c.id} style={styles.metaCard}>
                 <View style={styles.metaCardHeader}>
                   <Text style={styles.metaName}>{c.name}</Text>
-                  <View style={[styles.metaDot, { backgroundColor: c.enabled === false ? colors.muted : colors.success }]} />
+                  <View style={[styles.metaDot, { backgroundColor: connectorDotColor(c) }]} />
                 </View>
+                <Text style={styles.metaStatus}>{connectorStatusLabel(c)}</Text>
                 {c.description ? <Text style={styles.metaDesc} numberOfLines={3}>{c.description}</Text> : null}
               </View>
             ))}
@@ -5518,6 +5539,7 @@ const styles = StyleSheet.create({
   metaCardHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   metaName: { fontSize: 15, fontWeight: "700", color: colors.text, flex: 1 },
   metaDesc: { fontSize: 13, color: colors.muted, lineHeight: 18 },
+  metaStatus: { fontSize: 12, color: colors.muted, marginTop: 2, lineHeight: 16 },
   metaCron: { fontSize: 12, color: colors.accent, fontWeight: "700" },
   metaAgent: { fontSize: 12, color: colors.accent },
   metaDot: { width: 9, height: 9, borderRadius: 5 },

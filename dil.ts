@@ -67,6 +67,17 @@ export const WIDGET_PROPS: Record<string, string[]> = {
   YouTubeEmbed: ["aspectRatio", "maxWidth", "onPlayerError", "showThumbnail", "title", "videoId", "width"],
   Textarea: ["autoResize", "autoSelect", "defaultValue", "disabled", "invalid", "maxRows", "name", "onChange", "placeholder", "required", "rows", "size", "value", "variant"],
   Table: ["columnSizing", "columns", "dividers", "emptyLabel", "rows", "stickyHeader"],
+  // Statistik-Anzeiger (KPI-Kacheln). `value`/`delta` duerfen als `$value`-CEL gebunden sein.
+  Stat: ["label", "value", "delta", "unit", "hint", "format", "align", "columns", "items", "stats", "data", "onSelectAction"],
+  StatGrid: ["label", "value", "delta", "unit", "hint", "format", "align", "columns", "items", "stats", "data", "onSelectAction"],
+  // PlantUML/UML: der Server rendert den Code beim Settle zu einem PNG
+  // (/generated/puml/<hash>.png) und schickt stattdessen ein Image-Widget.
+  // Bleibt der Block ungerendert (alte Nachricht, Server ohne java), zeigt der
+  // Client den Code — nie eine weiße Fläche.
+  PlantUml: ["code", "source", "puml", "caption", "title", "theme"],
+  Puml: ["code", "source", "puml", "caption", "title", "theme"],
+  Uml: ["code", "source", "puml", "caption", "title", "theme"],
+  Stats: ["label", "value", "delta", "unit", "hint", "format", "align", "columns", "items", "stats", "data", "onSelectAction"],
   TableHeader: ["header", "label", "labelColSpan"],
   TableCell: ["align", "colSpan", "header", "padding", "rowSpan", "vAlign", "width"],
   Spacer: ["minSize"],
@@ -209,6 +220,15 @@ function tokenize(src: string): Tok[] {
     if (c >= "0" && c <= "9") {
       let j = i;
       while (j < n && ((src[j] >= "0" && src[j] <= "9") || src[j] === ".")) j++;
+      // Wissenschaftliche Schreibweise (1e6, 2.5E-3) — Modelle nutzen sie für Millionenwerte.
+      if (j < n && (src[j] === "e" || src[j] === "E")) {
+        let k = j + 1;
+        if (k < n && (src[k] === "+" || src[k] === "-")) k++;
+        if (k < n && src[k] >= "0" && src[k] <= "9") {
+          while (k < n && src[k] >= "0" && src[k] <= "9") k++;
+          j = k;
+        }
+      }
       const raw = src.slice(i, j);
       const v = Number(raw);
       if (!Number.isFinite(v)) throw new DilCelError(src, `ungültige Zahl "${raw}"`);
@@ -260,7 +280,7 @@ function tokenize(src: string): Tok[] {
       i += 2;
       continue;
     }
-    if ("+-*/%<>!?:.()[]".includes(c)) {
+    if ("+-*/%<>!?:.()[],^".includes(c)) {
       toks.push({ t: "op", v: c });
       i++;
       continue;
@@ -269,6 +289,52 @@ function tokenize(src: string): Tok[] {
   }
   toks.push({ t: "eof", v: "" });
   return toks;
+}
+
+// ── Funktionen in Ausdruecken (bewusste Whitelist, kein eval) ──
+// Modelle schreiben `max(a,b)`, `round(x,2)`, `abs(x)`; ohne diese Liste war jeder
+// solche Ausdruck ein Parserfehler und die Kachel blieb leer (Befund 23.11.2026).
+type ZahlFn = (args: number[]) => number;
+const ZAHL_FUNKTIONEN: Record<string, { min: number; max: number; fn: ZahlFn }> = {
+  abs: { min: 1, max: 1, fn: ([x]) => Math.abs(x) },
+  round: { min: 1, max: 2, fn: ([x, d]) => { const f = Math.pow(10, Math.trunc(d ?? 0)); return Math.round(x * f) / f; } },
+  floor: { min: 1, max: 1, fn: ([x]) => Math.floor(x) },
+  ceil: { min: 1, max: 1, fn: ([x]) => Math.ceil(x) },
+  sqrt: { min: 1, max: 1, fn: ([x]) => Math.sqrt(x) },
+  sign: { min: 1, max: 1, fn: ([x]) => Math.sign(x) },
+  min: { min: 1, max: 8, fn: (a) => Math.min(...a) },
+  max: { min: 1, max: 8, fn: (a) => Math.max(...a) },
+  pow: { min: 2, max: 2, fn: ([a, b]) => Math.pow(a, b) },
+  clamp: { min: 3, max: 3, fn: ([x, lo, hi]) => Math.min(Math.max(x, lo), hi) },
+};
+
+function rufeFunktion(src: string, name: string, args: unknown[]): unknown {
+  const klein = name.toLowerCase();
+  if (klein === "len" || klein === "length") {
+    if (!args.length) throw new DilCelError(src, `"${name}" braucht ein Argument`);
+    const a = args[0];
+    if (typeof a === "string") return a.length;
+    if (Array.isArray(a)) return a.length;
+    if (a == null) return 0;
+    return Object.keys(a as object).length;
+  }
+  if (klein === "contains") {
+    const [a, b] = args;
+    if (typeof a === "string") return a.includes(String(b));
+    if (Array.isArray(a)) return a.includes(b);
+    return false;
+  }
+  const def = ZAHL_FUNKTIONEN[klein];
+  if (!def) throw new DilCelError(src, `unbekannte Funktion "${name}"`);
+  if (args.length < def.min || args.length > def.max) {
+    throw new DilCelError(src, `"${name}" erwartet ${def.min}${def.max > def.min ? `-${def.max}` : ""} Argument(e), bekam ${args.length}`);
+  }
+  const zahlen = args.map((a) => {
+    const n = typeof a === "number" ? a : Number(a);
+    if (!Number.isFinite(n)) throw new DilCelError(src, `"${name}" braucht Zahlen`);
+    return n;
+  });
+  return def.fn(zahlen);
 }
 
 class CelParser {
@@ -355,11 +421,20 @@ class CelParser {
     return left;
   }
 
+  parsePow(): unknown {
+    const left = this.parseUnary();
+    if (this.peek().t === "op" && this.peek().v === "^") {
+      this.pos++;
+      return Math.pow(Number(left), Number(this.parsePow())); // rechtsassoziativ: 2^3^2 = 512
+    }
+    return left;
+  }
+
   parseMul(): unknown {
-    let left = this.parseUnary();
+    let left = this.parsePow();
     while (this.peek().t === "op" && ["*", "/", "%"].includes(this.peek().v as string)) {
       const op = this.next().v;
-      const right = this.parseUnary();
+      const right = this.parsePow();
       if (op === "*") left = (left as number) * (right as number);
       else if (op === "/") left = (left as number) / (right as number);
       else left = (left as number) % (right as number);
@@ -392,6 +467,25 @@ class CelParser {
       return v;
     }
     if (t.t === "ident") {
+      // Funktionsaufruf: ident gefolgt von "(" — Whitelist statt eval.
+      const naechster = this.toks[this.pos + 1];
+      if (naechster && naechster.t === "op" && naechster.v === "(") {
+        const name = String(t.v);
+        this.pos += 2;
+        const args: unknown[] = [];
+        this.depth++;
+        if (this.depth > 64) throw new DilCelError(this.src, "zu tief verschachtelt (max 64)");
+        if (!(this.peek().t === "op" && this.peek().v === ")")) {
+          for (;;) {
+            args.push(this.parseTernary());
+            if (this.peek().t === "op" && this.peek().v === ",") { this.pos++; continue; }
+            break;
+          }
+        }
+        this.expectOp(")");
+        this.depth--;
+        return rufeFunktion(this.src, name, args);
+      }
       return this.parsePath();
     }
     throw new DilCelError(this.src, "unerwartetes Token");
@@ -462,7 +556,11 @@ export function evalCel(expression: string, scope: Record<string, unknown> = {})
   // sonst würden String-Literale wie 'a===b' verfälscht).
   const parser = new CelParser(expression);
   parser.scope = scope;
-  return parser.parse();
+  const wert = parser.parse();
+  // Nicht-endliche Zahlen (1/0, sqrt(-1)) dürfen nie bis in den Renderer laufen:
+  // "Infinity"/"NaN" in einer Kachel ist schlimmer als ein leerer Wert (Befund 23.11.2026).
+  if (typeof wert === "number" && !Number.isFinite(wert)) return null;
+  return wert;
 }
 
 const DEEP_MAX_DEPTH = 8;

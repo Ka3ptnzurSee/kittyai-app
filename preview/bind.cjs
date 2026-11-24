@@ -1,0 +1,25 @@
+const { chromium } = require("/opt/kitty/preview-tool/node_modules/playwright-core");
+(async () => {
+  const b = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--no-sandbox", "--disable-gpu"] });
+  const p = await b.newPage({ viewport: { width: 460, height: 1500 } });
+  const fehler = [];
+  p.on("pageerror", (e) => fehler.push(String(e).split("\n")[0]));
+  await p.goto("http://127.0.0.1:8099/index.html");
+  await p.waitForTimeout(900);
+  const txt = async () => (await p.locator("body").innerText()).replace(/\s+/g, " ");
+  const vor = await txt();
+  const slider = p.locator('[aria-label^="Menge (App-Pfad)"]').first();
+  const box = await slider.boundingBox();
+  await p.mouse.move(box.x + box.width * 0.05, box.y + box.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(box.x + box.width * 0.95, box.y + box.height / 2, { steps: 10 });
+  await p.mouse.up();
+  await p.waitForTimeout(500);
+  const nach = await txt();
+  console.log("SLIDER:", await slider.getAttribute("aria-valuenow"));
+  console.log("TEXT vor  (Ausschnitt):", vor.slice(vor.indexOf("Menge (App-Pfad)"), vor.indexOf("Menge (App-Pfad)") + 120));
+  console.log("TEXT nach (Ausschnitt):", nach.slice(nach.indexOf("Menge (App-Pfad)"), nach.indexOf("Menge (App-Pfad)") + 120));
+  console.log("VERAENDERT:", vor !== nach ? "JA" : "NEIN");
+  console.log("FEHLER:", fehler.length ? fehler.join(" | ") : "keine");
+  await b.close();
+})();

@@ -1,7 +1,7 @@
 import * as Font from "expo-font";
 
 // Echte Claude-Fonts aus der reverse-engineerten iOS-App (ClaudeFonts_ClaudeFonts.bundle).
-// Extrahiert 2026-10-27 aus /opt/ios-re/claude/ → /opt/pi-app/app/assets/fonts/.
+// Extrahiert 2026-10-27 aus /opt/ios-re/claude/ → /opt/kitty/app/assets/fonts/.
 // PostScript-Name == fontFamily-Key (siehe theme.ts).
 const FONTS = {
   AnthropicSerifMobileVariable_TextRegular: require("./assets/fonts/AnthropicSerifMobileVariable-TextRegular.ttf"),

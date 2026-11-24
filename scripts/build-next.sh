@@ -14,7 +14,7 @@ umask 077                    # app.json.tmp, Lock, Temp-Dateien nicht world-read
 export HOME=/root            # eas/git-Credentials liegen unter /root
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-APP_DIR="${APP_DIR:-/opt/pi-app/app}"
+APP_DIR="${APP_DIR:-/opt/kitty/app}"
 APP_DIR=$(realpath -e -- "$APP_DIR" 2>/dev/null) || { echo "FEHLER: APP_DIR existiert nicht."; exit 1; }
 cd "$APP_DIR" || { echo "FEHLER: $APP_DIR nicht wechselbar"; exit 1; }
 

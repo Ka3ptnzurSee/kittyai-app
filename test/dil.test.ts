@@ -17,6 +17,7 @@ import {
   cellWert,
 } from "../dil.ts";
 import { absoluteImageUri } from "../lib.ts";
+import { applyAction, createRuntime } from "../dilstate.ts";
 
 test("parseDil erkennt Text-Knoten", () => {
   assert.strictEqual(parseDil("hallo"), "hallo");
@@ -276,6 +277,42 @@ test("Widget-Katalog enthält die Kern-Widgets und Kontrollfluss", () => {
   assert.ok(Array.isArray(WIDGET_PROPS.Chart) && WIDGET_PROPS.Chart.length > 5);
   assert.ok(CONTROL_FLOW_WIDGETS.has("Scope"));
   assert.ok(WIDGET_PROPS.Button.includes("variant"));
+  // Statistik-Anzeiger (KPI-Kacheln): eigene Typen + gebundene Werte
+  assert.ok(isKnownWidget("Stat"));
+  assert.ok(isKnownWidget("StatGrid"));
+  assert.ok(isKnownWidget("Stats"));
+  assert.ok(WIDGET_PROPS.StatGrid.includes("items"));
+});
+
+test("StatGrid: $value-Kacheln folgen dem State", () => {
+  const knoten = {
+    type: "StatGrid",
+    props: {
+      columns: 2,
+      items: [
+        { label: "Basis", $value: "state.menge" },
+        { label: "Pro Jahr", $value: "state.menge * 52" },
+        { label: "Kosten", $value: "state.menge * 52 * 3.5" },
+      ],
+    },
+  };
+  const bei = (menge: number) => {
+    const n = resolveDilRoot(knoten, { state: { menge } }) as any[];
+    const kacheln = n[0].props.items as Array<Record<string, unknown>>;
+    return kacheln.map((k) => k.value);
+  };
+  assert.deepStrictEqual(bei(2), [2, 104, 364]);
+  assert.deepStrictEqual(bei(9), [9, 468, 1638]);
+  // kaputter Ausdruck darf den Block nicht killen
+  const defekt = resolveDilRoot({ type: "StatGrid", props: { items: [{ label: "x", $value: "state.a +" }] } }, { state: {} }) as any[];
+  assert.ok(Array.isArray(defekt) && defekt.length === 1);
+});
+
+test("fireControl: Wert landet im State (id-Pfad)", () => {
+  // Slider/StatGrid schreiben über `state.<id> = value` - hier der Vertrag, den die UI nutzt.
+  const rt = createRuntime({}, {});
+  const res = applyAction(rt, "state.menge = 9", evalCel, { value: 9 });
+  assert.strictEqual((res.rt.state as Record<string, unknown>).menge, 9);
 });
 
 test("isDilV2 erkennt code/compiledDil, sonst false", () => {
@@ -366,4 +403,37 @@ test("cellWert liest Knoten ohne props direkt", () => {
   assert.strictEqual(cellWert({ value: 5 }), "5");
   assert.strictEqual(cellWert({ label: "x", value: 10400 }), "10400");
   assert.strictEqual(cellWert("roh"), "roh");
+});
+
+test("CEL: Funktionen + Potenz (Zinseszins-Bedarf)", () => {
+  const scope = { state: { bier: 5, preis: 3.5, liste: [3, 7], name: "Per" } };
+  assert.strictEqual(evalCel("max(state.bier, 9)", scope), 9);
+  assert.strictEqual(evalCel("min(4, 2, 9)", scope), 2);
+  assert.strictEqual(evalCel("abs(0 - 7)", scope), 7);
+  assert.strictEqual(evalCel("round(2.3456, 2)", scope), 2.35);
+  assert.strictEqual(evalCel("floor(2.9)", scope), 2);
+  assert.strictEqual(evalCel("ceil(2.1)", scope), 3);
+  assert.strictEqual(evalCel("sqrt(81)", scope), 9);
+  assert.strictEqual(evalCel("clamp(15, 0, 10)", scope), 10);
+  assert.strictEqual(evalCel("len(state.name)", scope), 3);
+  assert.strictEqual(evalCel("len(state.liste)", scope), 2);
+  assert.strictEqual(evalCel("state.bier ^ 2", scope), 25);
+  assert.strictEqual(evalCel("2 ^ 3 ^ 2", scope), 512); // rechtsassoziativ
+  assert.strictEqual(evalCel("pow(2, 10)", scope), 1024);
+  assert.strictEqual(evalCel("1e6", scope), 1000000);
+  assert.strictEqual(evalCel("2.5E-3 * 1000", scope), 2.5);
+  // Zinseszins: 10.000 € zu 5 % über 10 Jahre
+  assert.strictEqual(Math.round(Number(evalCel("round(10000 * (1 + 5/100) ^ 10, 0)", scope))), 16289);
+});
+
+test("CEL: Fehler bleiben Fehler, nichts crasht", () => {
+  const scope = { state: { x: 1 } };
+  assert.throws(() => evalCel("unbekanntFn(1)", scope), DilCelError);
+  assert.throws(() => evalCel("max()", scope), DilCelError);
+  assert.throws(() => evalCel("len()", scope), DilCelError);
+  assert.throws(() => evalCel("round(", scope), DilCelError);
+  assert.throws(() => evalCel("'offen", scope), DilCelError);
+  assert.throws(() => evalCel("(((((((((((1", scope), DilCelError);
+  assert.throws(() => evalCel("state.x; alert(1)", scope), DilCelError);
+  assert.strictEqual(evalCel("1 / 0", scope), null);
 });

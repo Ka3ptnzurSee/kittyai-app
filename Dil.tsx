@@ -3,8 +3,10 @@ import type { ReactNode } from "react";
 import {
   Animated,
   Image,
+  Modal,
   PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -18,7 +20,8 @@ import { Markdown } from "./Markdown";
 import { MathView } from "./MathView";
 import Svg, { Path, Polyline, Circle, Line as SvgLine, Text as SvgText, Defs, LinearGradient, Stop } from "react-native-svg";
 import * as Haptics from "expo-haptics";
-import { normalizeChart, computePieSlices, classifyDiff } from "./dilviz";
+import * as Clipboard from "expo-clipboard";
+import { computePieSlices, classifyDiff, formatiereZahl, normalizeChart } from "./dilviz";
 import type { ChartPoint } from "./dilviz";
 import { aiFontFamily, colors, monoFontFamily, oaicolors } from "./theme";
 import { breakUnbreakable } from "./lib";
@@ -83,11 +86,11 @@ function actionsOf(props: Props): string[] {
  * Wertänderung eines Formular-Widgets in die Runtime geben:
  * erst echte Actions, sonst Fallback `state.<id> = value` (wenn das Widget ein `id`/`name` hat).
  */
-function fireControl(dispatch: DilDispatch | null, props: Props, value: unknown): void {
+function fireControl(dispatch: DilDispatch | null, props: Props, value: unknown, ctx?: DilActionContext): void {
   if (!dispatch) return;
   const actions = actionsOf(props);
   if (actions.length) {
-    for (const a of actions) dispatch(a, { value });
+    for (const a of actions) dispatch(a, { ...ctx, value });
     return;
   }
   const id = str(props.id, str(props.name, ""));
@@ -440,6 +443,193 @@ function SliderWidget({ min, max, wert, dispatch, props }: { min: number; max: n
   );
 }
 
+// ── Statistik-Anzeiger: KPI-Kacheln (Stat / StatGrid / Stats) ──
+// Props: items/stats/data = [{label, value, delta, unit, hint}] oder Einzelwerte
+// (label+value). `$value`/`$delta` sind CEL-gebunden und folgen Slider/Select live.
+type StatKachel = { label: string; value: string; delta: number | null; hint: string; unit: string };
+
+/**
+ * Fallback für PlantUML-Blöcke, die der Server nicht gerendert hat.
+ * Normalerweise kommt gar kein PlantUml-Block an: server/puml.js ersetzt ihn
+ * durch ein Image mit /generated/puml/<hash>.png (Java-Render, 0,5 s, gecacht).
+ */
+/**
+ * UML-Bild, das man im Chat benutzen kann: zoomen, Knoten antippen, Schritt waehlen.
+ * Die Knotenflaechen kommen vom Server (server/puml.js: svgHotspots) in
+ * Prozentkoordinaten — dadurch passen sie bei jeder Anzeigebreite.
+ */
+function UmlBildWidget({ props, knots }: { props: Props; knots: unknown[] }) {
+  const roh = str(getProp(props, "src"), str(getProp(props, "url"), ""));
+  const b = Math.max(1, num(getProp(props, "width"), 1));
+  const h = Math.max(1, num(getProp(props, "height"), 1));
+  const seiten = b / h;
+  const [gewaehlt, setGewaehlt] = useState<number | null>(null);
+  const [offen, setOffen] = useState(false);
+  const schritte = (Array.isArray(getProp(props, "steps")) ? (getProp(props, "steps") as unknown[]) : []).map((t) => String(t)).slice(0, 40);
+  const src = /^\/generated\//i.test(roh) ? absoluteImageUri(roh, getImageBaseUrl()) || "" : roh;
+  if (!src || !isSafeImageSrc(src)) return null;
+  const flaechen = knots
+    .map((k) => (k && typeof k === "object" ? (k as Record<string, unknown>) : null))
+    .filter((k): k is Record<string, unknown> => !!k && Number.isFinite(Number(k.x)) && Number.isFinite(Number(k.y)))
+    .slice(0, 120);
+  const text = gewaehlt != null ? str(flaechen[gewaehlt]?.text, "") : "";
+  const bild = (zoombar: boolean) => (
+    <View style={{ width: "100%", aspectRatio: seiten, position: "relative" }}>
+      <Image source={{ uri: src }} resizeMode="contain" style={{ width: "100%", height: "100%" }} accessibilityLabel={str(getProp(props, "alt"), "Diagramm")} />
+      {flaechen.map((k, i) => (
+        <Pressable
+          key={i}
+          accessibilityRole="button"
+          accessibilityLabel={str(k.text, "Knoten " + (i + 1))}
+          onPress={() => setGewaehlt(i === gewaehlt ? null : i)}
+          style={{
+            position: "absolute",
+            left: `${Math.max(0, Math.min(100, Number(k.x)))}%`,
+            top: `${Math.max(0, Math.min(100, Number(k.y)))}%`,
+            width: `${Math.max(4, Math.min(100, Number(k.w)))}%`,
+            height: `${Math.max(3, Math.min(100, Number(k.h)))}%`,
+            borderRadius: 6,
+            borderWidth: i === gewaehlt ? 2 : 0,
+            borderColor: colors.accent,
+            backgroundColor: i === gewaehlt ? colors.accent + "22" : "transparent",
+          }}
+        />
+      ))}
+    </View>
+  );
+  return (
+    <View style={{ gap: 8 }}>
+      <Pressable onPress={() => setOffen(true)} accessibilityRole="imagebutton" accessibilityLabel="Diagramm vergrößern">
+        {bild(false)}
+      </Pressable>
+      {!!text && (
+        <View style={[styles.statKachel, { gap: 4 }]}>
+          <Text style={{ fontSize: 11, color: colors.muted }}>Schritt {gewaehlt != null ? gewaehlt + 1 : ""}</Text>
+          <Text style={{ fontSize: 13, color: colors.text }} selectable>{text}</Text>
+        </View>
+      )}
+      <View style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+        <Pressable onPress={() => setOffen(true)} style={{ paddingVertical: 4, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}>
+          <Text style={{ fontSize: 11, color: colors.muted }}>Vergrößern</Text>
+        </Pressable>
+        <Text style={{ fontSize: 11, color: colors.muted }}>
+          {flaechen.length} Knoten antippbar{schritte.length ? ` · ${schritte.length} Schritte` : ""}
+        </Text>
+      </View>
+      <Modal visible={offen} transparent animationType="fade" statusBarTranslucent onRequestClose={() => setOffen(false)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.94)" }}>
+          <ScrollView
+            maximumZoomScale={5}
+            minimumZoomScale={1}
+            centerContent
+            contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: 8 }}
+          >
+            {bild(true)}
+          </ScrollView>
+          <Pressable onPress={() => setOffen(false)} style={{ padding: 14, alignItems: "center" }} accessibilityRole="button" accessibilityLabel="Schließen">
+            <Text style={{ color: "#fff", fontSize: 13 }}>Zum Schließen tippen · zoomen mit zwei Fingern</Text>
+          </Pressable>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+function PlantUmlWidget({ props }: { props: Props }) {
+  const code = String(getProp(props, "code") ?? getProp(props, "source") ?? getProp(props, "puml") ?? "").trim();
+  const caption = String(getProp(props, "caption") ?? getProp(props, "title") ?? "");
+  const [kopiertHinweis, setKopiertHinweis] = useState("");
+  const kopieren = useCallback(() => {
+    Clipboard.setStringAsync(code)
+      .then(() => setKopiertHinweis("kopiert"))
+      .catch(() => setKopiertHinweis("Kopieren fehlgeschlagen"));
+    setTimeout(() => setKopiertHinweis(""), 2000);
+  }, [code]);
+  return (
+    <View style={[styles.card, { gap: 6 }]}>
+      <Text style={{ color: colors.text, fontSize: 13, fontWeight: "600" }}>
+        {caption || "UML-Diagramm"}{code ? " · Quelle" : ""}
+      </Text>
+      {code ? (
+        <>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 260 }}>
+            <Text selectable style={[styles.fallbackRaw, { fontSize: 11, lineHeight: 16 }]}>
+              {code}
+            </Text>
+          </ScrollView>
+          <Pressable
+            onPress={kopieren}
+            style={{ alignSelf: "flex-start", paddingVertical: 4, paddingHorizontal: 10, borderRadius: 8, borderWidth: 1, borderColor: colors.border }}
+          >
+            <Text style={{ fontSize: 11, color: colors.muted }}>{kopiertHinweis || "Code kopieren"}</Text>
+          </Pressable>
+        </>
+      ) : (
+        <Text style={{ fontSize: 12, color: colors.muted }}>Kein Diagramm-Code übergeben.</Text>
+      )}
+    </View>
+  );
+}
+
+function StatGridWidget({ props }: { props: Props }) {
+  const dispatch = useDilDispatch();
+  const aktion = ["onSelectAction", "onClickAction", "onTapAction"]
+    .map((k) => getProp(props, k))
+    .find((a) => typeof a === "string" && a.trim()) as string | undefined;
+  const format = str(getProp(props, "format"), "auto").toLowerCase();
+  const spalten = Math.max(1, Math.min(4, Math.round(num(getProp(props, "columns"), 2))));
+
+  const roh = getProp(props, "items") ?? getProp(props, "stats") ?? getProp(props, "data");
+  const kacheln: StatKachel[] = Array.isArray(roh)
+    ? roh.slice(0, 12).map((e, i) => {
+        const o = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+        const label = str(o.label ?? o.name ?? o.title, "Wert " + (i + 1));
+        const wert = o.value ?? o.amount ?? o.count ?? getProp(props, "value");
+        const deltaRoh = o.delta ?? o.change;
+        const delta = typeof deltaRoh === "number" ? deltaRoh : Number.isFinite(Number(deltaRoh)) && deltaRoh != null && deltaRoh !== "" ? Number(deltaRoh) : null;
+        return {
+          label,
+          value: formatiereZahl(typeof wert === "number" ? String(wert) : str(wert, "—"), format),
+          delta,
+          hint: str(o.hint ?? o.description ?? o.sub, ""),
+          unit: str(o.unit ?? "", ""),
+        };
+      })
+    : // Einzelkachel: <Stat label="…" value="…"/>
+      [{ label: str(getProp(props, "label"), ""), value: formatiereZahl(String(getProp(props, "value") ?? "—"), format), delta: null, hint: str(getProp(props, "hint"), ""), unit: str(getProp(props, "unit"), "") }];
+
+  if (!kacheln.length || (kacheln.length === 1 && !kacheln[0].label && kacheln[0].value === "—")) return null;
+
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+      {kacheln.map((k, i) => (
+        <View
+          key={i}
+          accessibilityRole={aktion ? "button" : "summary"}
+          accessibilityLabel={`${k.label}: ${k.value}${k.unit ? " " + k.unit : ""}${k.delta != null ? ", " + (k.delta >= 0 ? "plus" : "minus") + Math.abs(k.delta) : ""}`}
+          style={[styles.statKachel, { width: spalten >= 3 ? "31%" : spalten === 2 ? "48%" : "100%" }]}
+          {...(aktion
+            ? { onStartShouldSetResponder: () => true, onResponderRelease: () => fireControl(dispatch, props, k.value, { event: { label: k.label, value: k.value, index: i } }) }
+            : {})}
+        >
+          <Text style={styles.statLabel} numberOfLines={2}>{k.label}</Text>
+          <View style={{ flexDirection: "row", alignItems: "baseline", gap: 4 }}>
+            <Text style={styles.statWert} numberOfLines={1}>{k.value}</Text>
+            {k.unit ? <Text style={styles.statEinheit}>{k.unit}</Text> : null}
+          </View>
+          {k.delta != null ? (
+            <Text style={[styles.statDelta, { color: k.delta >= 0 ? "#22c55e" : "#ef4444" }]}>
+              {k.delta >= 0 ? "▲" : "▼"} {formatiereZahl(String(Math.abs(k.delta)), format)}
+            </Text>
+          ) : k.hint ? (
+            <Text style={styles.statHint} numberOfLines={2}>{k.hint}</Text>
+          ) : null}
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function PulseIndicatorWidget({ props }: { props: Props }) {
   const pulse = useRef(new Animated.Value(1)).current;
   useEffect(() => {
@@ -591,6 +781,9 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
 
     // ── Inhalt ──
     case "Image": {
+      // UML/Diagramm mit Knotenflaechen: antippbar + zoombar statt toter Grafik.
+      const knoten = Array.isArray(getProp(props, "hotspots")) ? (getProp(props, "hotspots") as unknown[]) : [];
+      if (knoten.length) return <UmlBildWidget props={props} knots={knoten} />;
       const roh = str(getProp(props, "src"), str(getProp(props, "url"), ""));
       const w = Math.max(0, num(getProp(props, "width"), 0));
       const h = Math.max(0, num(getProp(props, "height"), 0));
@@ -738,6 +931,14 @@ function Widget({ type, props, children }: { type: string; props: Props; childre
       return <PieChartWidget props={props} />;
     case "Diff":
       return <DiffWidget props={props} />;
+    case "Stat":
+    case "StatGrid":
+    case "Stats":
+      return <StatGridWidget props={props} />;
+    case "PlantUml":
+    case "Puml":
+    case "Uml":
+      return <PlantUmlWidget props={props} />;
 
     // ── Erweiterter Katalog (Radio/Icon/Loading/Grid/Form/Video/Svg/…) ──
     case "RadioGroup":
@@ -1214,13 +1415,21 @@ function DilAllein({ json, onAction }: { json: unknown; onAction?: (text: string
 
 /** Gemeinsamer Runtime/State für alle DIL-Blöcke einer Antwort. */
 export function DilBereich({ jsons, onAction, children }: { jsons: unknown[]; onAction?: (text: string, name: string) => void; children: ReactNode }) {
+  // Liegt schon ein Provider darüber (verschachtelter Bereich in einer Antwort), wird
+  // dessen State benutzt — sonst hätte jeder Block wieder einen eigenen Store (Slider in
+  // Block 1 bewegte den Chart in Block 2 nicht, Befund 23.11.2026). Der Early-Return steht
+  // VOR den Hooks: die innere Komponente wird dann gar nicht gemountet (keine sinnlos
+  // laufende State-Maschine, keine bedingte Hook-Reihenfolge).
+  const aussen = useContext(DilRuntimeCtx);
+  if (aussen) return <>{children}</>;
+  return <DilBereichAussen jsons={jsons} onAction={onAction}>{children}</DilBereichAussen>;
+}
+
+function DilBereichAussen({ jsons, onAction, children }: { jsons: unknown[]; onAction?: (text: string, name: string) => void; children: ReactNode }) {
   // Objektidentitaet stabil halten: useRuntime startet bei neuem `json` neu — ein bei jedem
   // Render frisch gebautes Objekt erzeugte eine Endlos-Render-Schleife (Befund 23.11.2026).
-  const aussen = useContext(DilRuntimeCtx);
   const seedJson = useMemo(() => ({ children: jsons }), [jsons]);
   const { rt, dispatch } = useRuntime(seedJson, onAction);
-  // Verschachtelte Bereiche teilen den äußeren State (sonst zwei getrennte Stores).
-  if (aussen) return <>{children}</>;
   return <DilRuntimeCtx.Provider value={{ rt, dispatch }}>{children}</DilRuntimeCtx.Provider>;
 }
 
@@ -1363,6 +1572,12 @@ const styles = StyleSheet.create({
   select: { borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 10, gap: 4, backgroundColor: colors.surface },
   selectItem: { color: colors.text, fontSize: 14, paddingVertical: 2 },
   sliderLabel: { color: colors.text, fontSize: 13, fontWeight: "600", flexShrink: 1 },
+  statKachel: { backgroundColor: colors.surface, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12, gap: 2 },
+  statLabel: { color: colors.muted, fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.4 },
+  statWert: { color: colors.text, fontSize: 22, fontWeight: "700", fontFamily: monoFontFamily },
+  statEinheit: { color: colors.muted, fontSize: 12, fontWeight: "600" },
+  statDelta: { fontSize: 12, fontWeight: "700", fontFamily: monoFontFamily },
+  statHint: { color: colors.muted, fontSize: 11 },
   sliderWert: { color: colors.accent, fontSize: 14, fontWeight: "700", fontFamily: monoFontFamily },
   sliderTick: { position: "absolute", top: -3, width: 2, height: 14, borderRadius: 1, backgroundColor: colors.border },
   sliderBubble: {

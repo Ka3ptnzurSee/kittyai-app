@@ -260,3 +260,41 @@ export function escapeInlineMathMeta(text: string): string {
   }
   return out;
 }
+
+// ───────────────────────────── Zahlen-Formatierung (KPI-Kacheln) ─────────────────────────────
+/**
+ * Modell-Zahlen → deutsche Anzeige. Verträgt beide Schreibweisen:
+ * `1.234,5` (deutsch), `1234.5` (englisch/JSON), `1234` und Text ("k. A." bleibt Text).
+ * `format`: "auto" | "raw" | "percent".
+ * Fehlerfall 23.11.2026: `14.4` wurde als `144` gezeigt, weil jeder Punkt als
+ * Tausendertrenner entfernt wurde — deshalb die Gruppierungs-Prüfung hier.
+ */
+export function formatiereZahl(v: string, format = "auto"): string {
+  const roh = String(v ?? "").trim();
+  if (!roh) return "—";
+  if (format === "raw") return roh;
+  let norm = roh.replace(/\s|\u00a0/g, "");
+  // Gruppierung nur, wenn die fuehrende Gruppe nicht "0" ist: "1.234" = 1234, "0.375" = 0,375.
+  if (/^-?[1-9]\d{0,2}(\.\d{3})+(,\d+)?$/.test(norm)) norm = norm.replace(/\./g, "").replace(",", "."); // 1.234,5
+  else if (/^-?\d+(,\d+)?$/.test(norm)) norm = norm.replace(",", "."); // 1234,5
+  else if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(norm)) norm = norm.replace(/,/g, ""); // 1,234.5 (US-Gruppierung)
+  const n = Number(norm);
+  if (!Number.isFinite(n)) return roh;
+  const abs = Math.abs(n);
+  const vz = n < 0 ? "-" : "";
+  // Tausendertrenner auch bei Dezimalen: 1234.5 → "1.234,5" (nicht "1234,5").
+  const runden = (x: number, d = 0): string => {
+    const vorzeichen = x < 0 ? "-" : "";
+    const a = Math.abs(x);
+    if (!d) return vorzeichen + Math.round(a).toLocaleString("de-DE");
+    const [i, f] = a.toFixed(d).split(".");
+    const f2 = f.replace(/0+$/, ""); // "2,50 Mrd" → "2,5 Mrd"
+    return vorzeichen + Number(i).toLocaleString("de-DE") + (f2 ? "," + f2 : "");
+  };
+  if (format === "percent") return runden(n, 1) + " %"; // 12.5 → "12,5 %"
+  if (abs >= 1e9) return vz + runden(abs / 1e9, 2) + " Mrd";
+  if (abs >= 1e6) return vz + runden(abs / 1e6, 2) + " Mio";
+  if (abs >= 1e4) return vz + runden(abs / 1e3, 1) + "k";
+  if (Number.isInteger(n)) return vz + abs.toLocaleString("de-DE");
+  return vz + runden(abs, abs < 1 ? 2 : 1);
+}

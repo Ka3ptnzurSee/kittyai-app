@@ -5,7 +5,7 @@
 # Nutzung:  BUILD_ID=<uuid> bash monitor-build.sh
 set -u
 BUILD_ID="${BUILD_ID:-}"
-APP_DIR="${APP_DIR:-/opt/pi-app/app}"
+APP_DIR="${APP_DIR:-/opt/kitty/app}"
 LOG="$APP_DIR/build-monitor.log"
 cd "$APP_DIR" || exit 1
 

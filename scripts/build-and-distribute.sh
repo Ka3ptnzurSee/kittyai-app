@@ -7,7 +7,7 @@
 set -uo pipefail
 BUILD_ID="${BUILD_ID:-}"
 BUILD_VER="${BUILD_VER:-}"
-APP_DIR="${APP_DIR:-/opt/pi-app/app}"
+APP_DIR="${APP_DIR:-/opt/kitty/app}"
 LOG="$APP_DIR/build-distribute.log"
 cd "$APP_DIR" || exit 1
 
