@@ -66,6 +66,20 @@ function req(method, path) {
   });
 }
 
+/**
+ * Nächste Nummer aus den beiden Quellen. Eine Quelle allein ist unzuverlässig:
+ * am 23.11. lieferte `preReleaseVersions/{id}/builds` 27 Builds (max 134), während
+ * `/v1/builds?filter[app]=…` den 135er schon kannte. Zusätzlich darf die committete
+ * Zahl nie unterschritten werden — sonst entsteht wieder eine Doppelnummer, die Apple
+ * beim Upload still verwirft (EAS meldet trotzdem "success").
+ * @param {{ascMax:number, committed:number}} x
+ * @returns {number}
+ */
+export function nextFrom({ ascMax, committed }) {
+  const base = Number.isFinite(ascMax) && ascMax > 0 ? ascMax + 1 : 1;
+  return Math.max(base, Number.isFinite(committed) ? committed : 1);
+}
+
 async function main() {
   // app.json: expo.version (z. B. "0.2.0"), expo.ios.buildNumber (z. B. "106")
   const appJson = JSON.parse(fs.readFileSync("app.json", "utf8"));
@@ -93,14 +107,35 @@ async function main() {
       return;
     }
 
-    // 2) Alle Builds dieser Version holen und höchste Nummer bestimmen.
-    const builds = await req("GET", `/v1/preReleaseVersions/${prv.id}/builds?limit=200&fields[builds]=version`);
-    const nums = (builds.data || [])
-      .map((b) => parseInt(b.attributes?.version, 10))
-      .filter((n) => !Number.isNaN(n));
+    // 2) Zwei unabhängige ASC-Abfragen, Maximum gewinnt (siehe nextFrom()).
+    const numOf = (arr) =>
+      (arr || []).map((b) => parseInt(b?.attributes?.version, 10)).filter((n) => !Number.isNaN(n));
+    const maxima = [];
 
-    const next = nums.length ? Math.max(...nums) + 1 : committed;
-    console.error(`ASC: ${nums.length} Builds für ${version}, max ${nums.length ? Math.max(...nums) : "-"} → nächste ${next}`);
+    try {
+      const builds = await req("GET", `/v1/preReleaseVersions/${prv.id}/builds?limit=200&fields[builds]=version`);
+      const nums = numOf(builds.data);
+      if (nums.length) maxima.push({ quelle: "preReleaseVersion", max: Math.max(...nums), n: nums.length });
+    } catch (e) {
+      console.error(`ASC-Abfrage (preReleaseVersion) fehlgeschlagen: ${e.message}`);
+    }
+
+    try {
+      // App-weit: kennt frisch hochgeladene Builds früher als die Versions-Relation.
+      const q =
+        `/v1/builds?filter[app]=${APP_ID}&filter[preReleaseVersion.version]=${encodeURIComponent(version)}` +
+        `&sort=-uploadedDate&limit=200&fields[builds]=version`;
+      const builds = await req("GET", q);
+      const nums = numOf(builds.data);
+      if (nums.length) maxima.push({ quelle: "builds?filter[app]", max: Math.max(...nums), n: nums.length });
+    } catch (e) {
+      console.error(`ASC-Abfrage (builds) fehlgeschlagen: ${e.message}`);
+    }
+
+    const ascMax = maxima.length ? Math.max(...maxima.map((m) => m.max)) : 0;
+    const next = nextFrom({ ascMax, committed });
+    for (const m of maxima) console.error(`ASC ${m.quelle}: ${m.n} Builds, max ${m.max}`);
+    console.error(`ASC max ${ascMax || "-"}, committet ${committed} → nächste ${next}`);
     console.log(next);
   } catch (e) {
     // ASC nicht erreichbar → committete buildNumber (kein harter Abbruch des CI-Laufs).
