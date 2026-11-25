@@ -850,9 +850,8 @@ test("chatScrollPlan: Stick-Modus nach dem Öffnen klebt am Ende, egal was onScr
 
 test("chatScrollPlan: programmatischer Sprung klingt nach (onScroll darf nicht kippen)", () => {
   const p = chatScrollPlan({ now: 1500, autoScrollUntil: 1700, sticking: false, nearBottom: true });
-  assert.strictEqual(p.measure, false, "Messwerte während des Sprungs sind Zwischenstände");
-  assert.strictEqual(p.pin, false);
-  assert.strictEqual(p.debounce, true, "Höhenänderung darf trotzdem ans Ende ziehen");
+  assert.deepStrictEqual(p, { measure: false, pin: false, debounce: false },
+    "auch debounce bleibt stumm: ein non-animated Sprung würde die laufende Animation abbrechen");
 });
 
 test("chatScrollPlan: nach dem Sprung misst onScroll wieder (Nutzer scrollt hoch → kein Auto-Scroll)", () => {
@@ -864,6 +863,19 @@ test("chatScrollPlan: nach dem Sprung misst onScroll wieder (Nutzer scrollt hoch
 test("chatScrollPlan: unten stehend → debounce springt ans Ende", () => {
   const p = chatScrollPlan({ now: 5000, autoScrollUntil: 0, sticking: false, nearBottom: true });
   assert.deepStrictEqual(p, { measure: true, pin: false, debounce: true });
+});
+
+test("chatScrollPlan: pin und measure sind nie gleichzeitig wahr (alle 8 Kombinationen)", () => {
+  for (const sticking of [true, false]) {
+    for (const nearBottom of [true, false]) {
+      for (const [now, until] of [[1000, 0], [1500, 1700], [1700, 1700]]) {
+        const p = chatScrollPlan({ now, autoScrollUntil: until, sticking, nearBottom });
+        assert.ok(!(p.pin && p.measure), `pin+measure gleichzeitig bei ${sticking}/${nearBottom}/${now}/${until}`);
+        assert.strictEqual(p.pin, sticking, "pin spiegelt exakt den Stick-Modus");
+        assert.strictEqual(p.debounce, !sticking && nearBottom && now >= until);
+      }
+    }
+  }
 });
 
 test("chatScrollPlan: Grenze exakt am Sprung-Ende misst wieder (now === autoScrollUntil)", () => {

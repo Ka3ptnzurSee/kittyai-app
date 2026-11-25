@@ -1319,8 +1319,11 @@ export function chatScrollPlan(s: {
   const measure = s.now >= s.autoScrollUntil && !s.sticking;
   return {
     measure,
+    // pin und measure schließen sich per Definition aus (pin ⟺ sticking, measure ⟹ !sticking).
     pin: s.sticking,
-    // Auch mit Stick-Modus darf debounced werden? Nein: pin hat Vorrang (kein Doppel-Sprung).
-    debounce: !s.sticking && s.nearBottom,
+    // `debounce` muss das Sprung-Fenster respektieren: sonst feuerte 40 ms nach dem
+    // ANIMIERTEN scrollToEnd aus send() ein non-animated scrollToEnd und brach die
+    // Animation sichtbar ab (Review-Fund Runde 1). pin hat Vorrang (kein Doppel-Sprung).
+    debounce: !s.sticking && s.nearBottom && s.now >= s.autoScrollUntil,
   };
 }

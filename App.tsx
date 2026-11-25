@@ -908,9 +908,43 @@ export default function App() {
     if (v) stickBottomRef.current.add(chatId);
     else stickBottomRef.current.delete(chatId);
   };
+  // Geplante Sprünge (Timer + rAF) sammeln, damit eine echte Finger-Geste sie SOFORT
+  // abbrechen kann. Vorher zog ein 500-ms-Timer den Nutzer nach dem Hochscrollen zurück.
+  const jumpTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const jumpRafRef = useRef<number | null>(null);
+  const cancelJumpTimers = () => {
+    for (const t of jumpTimersRef.current) clearTimeout(t);
+    jumpTimersRef.current = [];
+    for (const [id, t] of contentSizeDebounceRef.current) {
+      if (t) clearTimeout(t);
+      contentSizeDebounceRef.current.set(id, null);
+    }
+    if (jumpRafRef.current != null) {
+      cancelAnimationFrame(jumpRafRef.current);
+      jumpRafRef.current = null;
+    }
+  };
+  const scheduleJump = (chatId: string, delay: number) => {
+    const id = setTimeout(() => {
+      // gefeuerte ID aus der Liste nehmen (sonst wächst das Array bei jedem Chat-Öffnen)
+      jumpTimersRef.current = jumpTimersRef.current.filter((x) => x !== id);
+      jumpToBottom(chatId);
+    }, delay);
+    jumpTimersRef.current.push(id);
+  };
+  /** Sprung im nächsten Frame, abbrechbar (eine Geste/Chat-Wechsel kann ihn canceln). */
+  const scheduleJumpFrame = (chatId: string) => {
+    if (jumpRafRef.current != null) cancelAnimationFrame(jumpRafRef.current);
+    jumpRafRef.current = requestAnimationFrame(() => {
+      jumpRafRef.current = null;
+      jumpToBottom(chatId);
+    });
+  };
   /** Springt ans Listenende und blendet onScroll-Messwerte für den nächsten Frame aus. */
   const jumpToBottom = (chatId: string) => {
-    autoScrollUntilRef.current = Date.now() + 250;
+    // 120 ms statt 250: deckt die onScroll-Events des Sprungs (1-2 Frames) ab, hält aber
+    // das Auto-Follow beim Streamen reaktionsschnell (Review-Fund Runde 2).
+    autoScrollUntilRef.current = Date.now() + 120;
     setNearBottom(chatId, true);
     listRef.current?.scrollToEnd({ animated: false });
   };
@@ -1057,19 +1091,23 @@ export default function App() {
     const chatId = activeChatId;
     setNearBottom(chatId, true); // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
     setSticking(chatId, true); // Kern des Fixes: nach dem Öffnen am Ende KLEBEN, nicht nur 3x springen
+    cancelJumpTimers();
     // Erste Sprünge für Mount + erste Messung; alles Weitere erledigt onContentSizeChange,
     // solange der Stick-Modus läuft (auch wenn der Server-Verlauf erst nach 1–2 s kommt).
-    const t1 = setTimeout(() => jumpToBottom(chatId), 0);
-    const t2 = setTimeout(() => jumpToBottom(chatId), 120);
-    const t3 = setTimeout(() => jumpToBottom(chatId), 500);
+    scheduleJump(chatId, 0);
+    scheduleJump(chatId, 120);
+    scheduleJump(chatId, 500);
     // Notanker: ohne echte Geste endet der Stick-Modus spätestens nach 8 s (ein dauerhaft
     // nachmessendes Element — z. B. KaTeX-WebView — soll nicht ewig nachziehen).
     const t4 = setTimeout(() => setSticking(chatId, false), 8000);
     return () => {
-      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
+      cancelJumpTimers();
+      clearTimeout(t4);
       setSticking(chatId, false);
     };
-  }, [activeChatId]);
+    // `tab`: beim Wechsel auf Reha/Plugins wird die FlatList unmountet (gleiche Chat-ID).
+    // Ohne tab in den Deps kam man ohne Stick-Modus und ohne Sprung zurück → Fehler wieder da.
+  }, [activeChatId, tab]);
 
   // pro Chat einstellbares Modell (Default: "flash"). Deaktivierte Modelle
   // (Robotron via Laptop-Tunnel :18444) dürfen nie als aktiv gelten — sonst
@@ -4627,8 +4665,10 @@ export default function App() {
                 setNearBottom(activeChat.id, dist < 80);
               }}
               onScrollBeginDrag={() => {
-                // Echte Geste = der Nutzer übernimmt. Erst DANN darf der Stick-Modus enden,
-                // damit man auch sofort nach dem Öffnen hochscrollen kann.
+                // Echte Geste = der Nutzer übernimmt: Stick-Modus aus UND alle geplanten
+                // Sprünge (120/500 ms, rAF) abbrechen — sonst riss ein noch offener Timer
+                // die Ansicht zurück, obwohl der Nutzer schon hochscrollte.
+                cancelJumpTimers();
                 setSticking(activeChat.id, false);
               }}
               onContentSizeChange={() => {
@@ -4643,17 +4683,23 @@ export default function App() {
                   // Höhe hat sich geändert (Batch nachgerendert, Server-Verlauf eingetroffen,
                   // Bild/DIL-Block gemessen) → im nächsten Frame wieder ans Ende.
                   // Kein Timer-Debounce nötig: der Sprung selbst ändert keine Höhe.
-                  requestAnimationFrame(() => jumpToBottom(chatId));
+                  // Handle merken: beim Chat-Wechsel abbrechen, damit der Sprung nicht die
+                  // bereits ausgetauschte Liste trifft.
+                  scheduleJumpFrame(chatId);
                   return;
                 }
                 if (!plan.debounce) return;
                 const prev = contentSizeDebounceRef.current.get(chatId);
                 if (prev) clearTimeout(prev);
                 const t = setTimeout(() => {
-                  requestAnimationFrame(() => jumpToBottom(chatId));
                   contentSizeDebounceRef.current.set(chatId, null);
+                  jumpTimersRef.current = jumpTimersRef.current.filter((x) => x !== t);
+                  scheduleJumpFrame(chatId);
                 }, 40);
                 contentSizeDebounceRef.current.set(chatId, t);
+                // Auch dieser Timer muss eine Geste abbrechen können (sonst reißt er beim
+                // Streamen fast permanent zurück — Review-Fund Runde 2).
+                jumpTimersRef.current.push(t);
               }}
               scrollEventThrottle={32}
               ListEmptyComponent={
