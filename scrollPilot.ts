@@ -271,6 +271,9 @@ export class ScrollPilot {
   }
 
   private scheduleFrame(chatId: string): void {
+    // Single-Flight: drei Höhenänderungen im selben Tick dürfen nicht drei scrollToEnd
+    // auslösen (Review-Runde 4) — ein offener Frame reicht, er springt ohnehin ans Ende.
+    if (this.frames.size > 0) return;
     const id = this.deps.frame(() => {
       this.frames.delete(id);
       this.jump(chatId);
@@ -281,6 +284,10 @@ export class ScrollPilot {
   private jump(chatId: string): void {
     this.autoScrollUntil = this.deps.now() + MEASURE_SUPPRESS_MS;
     this.near.set(chatId, true);
+    // Geometrie nachführen: nach dem Sprung steht die Liste unten. Ohne das meldete
+    // distanceToBottom() weiter den alten Abstand (Telemetrie-Fehldiagnose, Review-Runde 4).
+    const g = this.geo.get(chatId);
+    if (g) this.geo.set(chatId, { ...g, offsetY: Math.max(0, g.height - g.viewport) });
     this.deps.scrollToEnd();
   }
 

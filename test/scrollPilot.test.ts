@@ -288,3 +288,24 @@ test("chatScrollPlan: pin und measure nie gleichzeitig, debounce exakt definiert
     }
   }
 });
+
+test("ScrollPilot.jump: Geometrie wird nachgeführt (distanceToBottom 0 statt altem Abstand)", () => {
+  const { clock, pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", { offsetY: 3000, height: 5000, viewport: 800 }); // Abstand 1200
+  assert.strictEqual(pilot.distanceToBottom("c1"), 1200);
+  clock.advance(500); // letzter Settle-Jump
+  assert.strictEqual(pilot.distanceToBottom("c1"), 0, "nach dem Sprung steht die Liste unten");
+});
+
+test("ScrollPilot: mehrere Höhenänderungen im selben Tick = EIN Sprung (Single-Flight)", () => {
+  const { clock, pilot, ends } = makePilot();
+  pilot.open("c1");
+  clock.advance(1000); // Stick-Modus aktiv, keine Timer mehr offen
+  const before = ends();
+  pilot.onContentSizeChange("c1", 1000);
+  pilot.onContentSizeChange("c1", 1100);
+  pilot.onContentSizeChange("c1", 1200);
+  clock.advance(16);
+  assert.strictEqual(ends() - before, 1, "drei Änderungen, aber nur ein scrollToEnd");
+});
