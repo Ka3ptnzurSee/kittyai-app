@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
+import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, chatScrollPlan, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -839,4 +839,34 @@ test("unvollständiger Turn wird markiert (incomplete:true) und bleibt EINE Blas
     { id: "a2", role: "assistant", text: "", turnId: "u1", error: { type: "aborted" } },
   ]);
   assert.strictEqual(withErr, null, "Blasen mit Fehlerkarte werden nicht verschmolzen");
+});
+
+// --- chatScrollPlan: Chat öffnet sich immer unten (Befund 26.11.2026) ---------
+test("chatScrollPlan: Stick-Modus nach dem Öffnen klebt am Ende, egal was onScroll meldet", () => {
+  const p = chatScrollPlan({ now: 1000, autoScrollUntil: 0, sticking: true, nearBottom: false });
+  assert.deepStrictEqual(p, { measure: false, pin: true, debounce: false },
+    "im Stick-Modus: pin, nie measure/debounce");
+});
+
+test("chatScrollPlan: programmatischer Sprung klingt nach (onScroll darf nicht kippen)", () => {
+  const p = chatScrollPlan({ now: 1500, autoScrollUntil: 1700, sticking: false, nearBottom: true });
+  assert.strictEqual(p.measure, false, "Messwerte während des Sprungs sind Zwischenstände");
+  assert.strictEqual(p.pin, false);
+  assert.strictEqual(p.debounce, true, "Höhenänderung darf trotzdem ans Ende ziehen");
+});
+
+test("chatScrollPlan: nach dem Sprung misst onScroll wieder (Nutzer scrollt hoch → kein Auto-Scroll)", () => {
+  const p = chatScrollPlan({ now: 2000, autoScrollUntil: 1700, sticking: false, nearBottom: false });
+  assert.deepStrictEqual(p, { measure: true, pin: false, debounce: false },
+    "oben gelesen: weder pin noch debounce, sonst reißt es den Nutzer nach unten");
+});
+
+test("chatScrollPlan: unten stehend → debounce springt ans Ende", () => {
+  const p = chatScrollPlan({ now: 5000, autoScrollUntil: 0, sticking: false, nearBottom: true });
+  assert.deepStrictEqual(p, { measure: true, pin: false, debounce: true });
+});
+
+test("chatScrollPlan: Grenze exakt am Sprung-Ende misst wieder (now === autoScrollUntil)", () => {
+  const p = chatScrollPlan({ now: 1700, autoScrollUntil: 1700, sticking: false, nearBottom: true });
+  assert.strictEqual(p.measure, true);
 });

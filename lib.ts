@@ -1291,3 +1291,36 @@ export function firstFrame(componentStack?: string): string {
   const m = (zeilen[0] || "").match(/in ([A-Za-z0-9_$.]+)/);
   return m ? m[1].slice(0, 40) : "";
 }
+
+/**
+ * Scroll-Plan für die Chat-Liste (bewusst pur — damit ohne React-Native-Laufzeit testbar).
+ *
+ * Hintergrund (Befund 26.11.2026): Die Ansicht blieb beim Öffnen eines Chats mitten im
+ * Verlauf stehen, weil drei feste Timer (80/300/800 ms) zu kurz waren. Danach ändert sich
+ * die Höhe noch mehrfach: die FlatList rendert in Batches nach, `/api/session` ersetzt den
+ * Verlauf, Bilder und DIL-Blöcke messen ihre Höhe erst im Layout. Die `onScroll`-Messwerte
+ * aus dieser Zeit sind Zwischenstände und dürfen den „am Ende"-Zustand nicht kippen.
+ *
+ * @param now             Date.now() im Ereignis
+ * @param autoScrollUntil Zeitstempel, bis zu dem ein programmatischer Sprung nachklingt
+ * @param sticking        Chat klebt nach dem Öffnen am Listenende
+ * @param nearBottom      Nutzer stand zuletzt am Ende (< 80 px)
+ * @returns measure   onScroll darf `nearBottom` neu berechnen
+ *          pin       Höhenänderung → sofort wieder ans Ende springen (Stick-Modus)
+ *          debounce  Höhenänderung → nach 40 ms ans Ende springen (Nutzer stand unten)
+ */
+export function chatScrollPlan(s: {
+  now: number;
+  autoScrollUntil: number;
+  sticking: boolean;
+  nearBottom: boolean;
+}): { measure: boolean; pin: boolean; debounce: boolean } {
+  // Während eines laufenden Sprungs oder im Stick-Modus sind Messwerte Zwischenstände.
+  const measure = s.now >= s.autoScrollUntil && !s.sticking;
+  return {
+    measure,
+    pin: s.sticking,
+    // Auch mit Stick-Modus darf debounced werden? Nein: pin hat Vorrang (kein Doppel-Sprung).
+    debounce: !s.sticking && s.nearBottom,
+  };
+}

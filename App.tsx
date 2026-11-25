@@ -42,7 +42,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, chatScrollPlan, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilBereich, DilRichText } from "./Dil";
 import { SichererBlock } from "./SichererBlock";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
@@ -883,9 +883,10 @@ export default function App() {
   const lastSessionFetchRef = useRef<Map<string, number>>(new Map());
   /** Laufender Throttle-Timer fürs Speichern des Chat-Stores (siehe writeChatStore). */
   const storeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // true, solange ein programmatischer scrollToEnd (animated) läuft: onScroll darf
-  // währenddessen nearBottom nicht auf false setzen (Animations-Zwischenwerte).
-  const isAutoScrollingRef = useRef(false);
+  // Programmatische Scrolls: Zeitstempel statt Boolean. Die onScroll-Events eines
+  // scrollToEnd treffen NACH dem Frame ein — ein Boolean wäre dann schon wieder false
+  // und würde nearBottom fälschlich auf false kippen (Ansicht blieb mitten im Verlauf).
+  const autoScrollUntilRef = useRef(0);
   const contentSizeDebounceRef = useRef<Map<string, number | null>>(new Map());
   // pro Chat: ob der Nutzer am Listenende ist (für Auto-Scroll). Map statt eines
   // einzelnen Booleans, damit beim Chat-Wechsel nicht der false-Wert des vorherigen
@@ -893,6 +894,26 @@ export default function App() {
   const nearBottomRef = useRef<Map<string, boolean>>(new Map());
   const isNearBottom = (chatId: string) => nearBottomRef.current.get(chatId) ?? true;
   const setNearBottom = (chatId: string, v: boolean) => nearBottomRef.current.set(chatId, v);
+  // Chats, die beim Öffnen noch am Listenende „kleben": JEDE Höhenänderung zieht die
+  // Ansicht wieder nach unten (FlatList rendert in Batches nach, /api/session ersetzt
+  // den Verlauf, Bilder und DIL-Blöcke messen ihre Höhe erst beim Layout).
+  // Befund 26.11.2026: die alten festen Timer (80/300/800 ms) waren zu kurz — danach
+  // kam der Server-Verlauf und die Ansicht blieb mitten im Chat stehen.
+  // Gelöst wird der Stick-Modus NUR durch eine echte Finger-Geste (onScrollBeginDrag),
+  // einen Chat-Wechsel oder den Notanker nach 8 s — nie durch onScroll-Messwerte, denn
+  // die sind während des Nachrenderns Zwischenstände.
+  const stickBottomRef = useRef<Set<string>>(new Set());
+  const isSticking = (chatId: string) => stickBottomRef.current.has(chatId);
+  const setSticking = (chatId: string, v: boolean) => {
+    if (v) stickBottomRef.current.add(chatId);
+    else stickBottomRef.current.delete(chatId);
+  };
+  /** Springt ans Listenende und blendet onScroll-Messwerte für den nächsten Frame aus. */
+  const jumpToBottom = (chatId: string) => {
+    autoScrollUntilRef.current = Date.now() + 250;
+    setNearBottom(chatId, true);
+    listRef.current?.scrollToEnd({ animated: false });
+  };
 
   // App-Vordergrund/-Hintergrund: iOS beendet die Socket-Verbindung, sobald die App
   // in den Hintergrund geht. Retries deshalb erst im Vordergrund starten (siehe send()).
@@ -1033,23 +1054,20 @@ export default function App() {
         return next.length === c.messages.length ? c : { ...c, messages: next };
       });
     }
-    setNearBottom(activeChatId, true); // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
-    // Während der programmatischen Initial-Scrolls onScroll unterdrücken (isAutoScrollingRef),
-    // sonst setzt der Zwischenwert nearBottom wieder auf false und Auto-Scroll klemmt.
-    isAutoScrollingRef.current = true;
-    const t1 = setTimeout(() => {
-      listRef.current?.scrollToEnd({ animated: false });
-      requestAnimationFrame(() => listRef.current?.scrollToEnd({ animated: false }));
-    }, 80);
-    const t2 = setTimeout(() => listRef.current?.scrollToEnd({ animated: false }), 300);
-    const t3 = setTimeout(() => {
-      listRef.current?.scrollToEnd({ animated: false });
-      setNearBottom(activeChatId, true);
-      isAutoScrollingRef.current = false;
-    }, 800);
+    const chatId = activeChatId;
+    setNearBottom(chatId, true); // neuer Chat = am Ende starten (sonst veralteter false-Wert aus vorherigem Chat)
+    setSticking(chatId, true); // Kern des Fixes: nach dem Öffnen am Ende KLEBEN, nicht nur 3x springen
+    // Erste Sprünge für Mount + erste Messung; alles Weitere erledigt onContentSizeChange,
+    // solange der Stick-Modus läuft (auch wenn der Server-Verlauf erst nach 1–2 s kommt).
+    const t1 = setTimeout(() => jumpToBottom(chatId), 0);
+    const t2 = setTimeout(() => jumpToBottom(chatId), 120);
+    const t3 = setTimeout(() => jumpToBottom(chatId), 500);
+    // Notanker: ohne echte Geste endet der Stick-Modus spätestens nach 8 s (ein dauerhaft
+    // nachmessendes Element — z. B. KaTeX-WebView — soll nicht ewig nachziehen).
+    const t4 = setTimeout(() => setSticking(chatId, false), 8000);
     return () => {
-      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
-      isAutoScrollingRef.current = false;
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
+      setSticking(chatId, false);
     };
   }, [activeChatId]);
 
@@ -3200,11 +3218,11 @@ export default function App() {
     markBusy(chatId, true);
     // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
     setTimeout(() => {
-      isAutoScrollingRef.current = true;
-      listRef.current?.scrollToEnd({ animated: true });
-      // nach Animationsende Flag zurücksetzen, damit Nutzer-Scrolls wieder erkannt werden
-      setTimeout(() => { isAutoScrollingRef.current = false; }, 800);
+      // animated:true läuft ~300 ms; onScroll-Messwerte in dieser Zeit ausblenden
+      // (Zeitstempel statt Boolean, siehe jumpToBottom).
+      autoScrollUntilRef.current = Date.now() + 800;
       setNearBottom(chatId, true);
+      listRef.current?.scrollToEnd({ animated: true });
     }, 60);
 
     try {
@@ -4249,8 +4267,9 @@ export default function App() {
   useEffect(() => {
     const sub = Keyboard.addListener("keyboardDidShow", () => {
       if (!activeChatId) return;
-      if (!isNearBottom(activeChatId)) return;
-      listRef.current?.scrollToEnd({ animated: false });
+      // Beim Öffnen (Stick-Modus) immer ans Ende — sonst nur, wenn man schon unten stand.
+      if (!isSticking(activeChatId) && !isNearBottom(activeChatId)) return;
+      jumpToBottom(activeChatId);
     });
     return () => sub.remove();
   }, [activeChatId]);
@@ -4566,7 +4585,9 @@ export default function App() {
       ) : tab === "chats" ? (
         activeChat ? (
           <>
-            <FlatList ref={listRef} maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+            {/* Kein maintainVisibleContentPosition mehr: es hielt den Offset beim Nachrendern
+                fest und arbeitete damit gegen das „ans Ende springen" (Befund 26.11.2026). */}
+            <FlatList ref={listRef}
               data={activeChat.messages}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
@@ -4588,27 +4609,48 @@ export default function App() {
               windowSize={11}
               style={styles.list}
               contentContainerStyle={styles.listContent}
+              // Cleaner Look (wie ChatGPT/Claude): der Balken blitzte bei jedem Öffnen auf,
+              // weil der Initial-Sprung ihn einblendet — in der Unterhaltung stört er nur.
+              showsVerticalScrollIndicator={false}
               onScroll={(e) => {
-                if (isAutoScrollingRef.current) return;
+                // Messwerte verwerfen, solange ein programmatischer Sprung nachklingt oder
+                // der Chat beim Öffnen noch am Ende klebt (Zwischenstände beim Nachrendern).
+                const plan = chatScrollPlan({
+                  now: Date.now(),
+                  autoScrollUntil: autoScrollUntilRef.current,
+                  sticking: isSticking(activeChat.id),
+                  nearBottom: isNearBottom(activeChat.id),
+                });
+                if (!plan.measure) return;
                 const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
                 const dist = contentSize.height - (contentOffset.y + layoutMeasurement.height);
                 setNearBottom(activeChat.id, dist < 80);
               }}
-              onMomentumScrollEnd={() => {
-                isAutoScrollingRef.current = false;
+              onScrollBeginDrag={() => {
+                // Echte Geste = der Nutzer übernimmt. Erst DANN darf der Stick-Modus enden,
+                // damit man auch sofort nach dem Öffnen hochscrollen kann.
+                setSticking(activeChat.id, false);
               }}
               onContentSizeChange={() => {
-                if (!isNearBottom(activeChat.id)) return;
                 const chatId = activeChat.id;
+                const plan = chatScrollPlan({
+                  now: Date.now(),
+                  autoScrollUntil: autoScrollUntilRef.current,
+                  sticking: isSticking(chatId),
+                  nearBottom: isNearBottom(chatId),
+                });
+                if (plan.pin) {
+                  // Höhe hat sich geändert (Batch nachgerendert, Server-Verlauf eingetroffen,
+                  // Bild/DIL-Block gemessen) → im nächsten Frame wieder ans Ende.
+                  // Kein Timer-Debounce nötig: der Sprung selbst ändert keine Höhe.
+                  requestAnimationFrame(() => jumpToBottom(chatId));
+                  return;
+                }
+                if (!plan.debounce) return;
                 const prev = contentSizeDebounceRef.current.get(chatId);
                 if (prev) clearTimeout(prev);
                 const t = setTimeout(() => {
-                  isAutoScrollingRef.current = true;
-                  requestAnimationFrame(() => {
-                    listRef.current?.scrollToEnd({ animated: false });
-                    setNearBottom(chatId, true);
-                    isAutoScrollingRef.current = false;
-                  });
+                  requestAnimationFrame(() => jumpToBottom(chatId));
                   contentSizeDebounceRef.current.set(chatId, null);
                 }, 40);
                 contentSizeDebounceRef.current.set(chatId, t);
