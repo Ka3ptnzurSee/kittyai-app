@@ -922,10 +922,16 @@ export default function App() {
 
   // Scroll-Güte auf dem echten Gerät (nur Zahlen: Abstand in pt, Dauer, Nachrichtenzahl).
   // Ohne diese Messung wäre „Chat öffnet sich unten" nur auf einem Testgerät behauptbar.
+  const scrollReportedRef = useRef<Set<string>>(new Set());
   function reportScrollSettle(chatId: string, dist: number, ms: number, messages: number) {
     try {
       const base = serverUrl.replace(/\/+$/, "");
       if (!base) return;
+      // Nur EINMAL pro Chat je App-Lauf (Tab-Wechsel feuert den Effekt erneut) und ohne
+      // chatId — die Messung braucht keine Zuordnung zu einer Unterhaltung.
+      if (scrollReportedRef.current.has(chatId)) return;
+      scrollReportedRef.current.add(chatId);
+      if (scrollReportedRef.current.size > 500) scrollReportedRef.current.clear();
       fetch(`${base}/api/client-error`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -933,7 +939,6 @@ export default function App() {
           kind: "scroll_settle",
           source: "chat",
           phase: "scroll",
-          chatId,
           appVersion: APP_VERSION,
           detail: `dist=${Math.min(99999, Math.max(0, Math.round(dist)))};ms=${Math.min(9999, Math.max(0, Math.round(ms)))};n=${Math.min(9999, Math.max(0, messages))}`,
         }),
@@ -1497,9 +1502,6 @@ export default function App() {
       // (B) Lokal gekappte Blasen ("… (gekürzt gespeichert …)") durch den Server-Volltext
       // ersetzen — sonst blieb die Anzeige dauerhaft abgeschnitten, obwohl der Server
       // den ganzen Text hat. Kein zusätzlicher Request: nutzt den laufenden Session-Sync.
-      // Kann ältere Nachrichten VORNE anhängen (mergeServerTail): Pilot merkt sich die
-      // Geometrie, damit der Offset danach korrigiert wird (kein Sprung im Lesetext).
-      pilot.beginPrepend(chatId);
       const healed = healTruncatedMessages(chat.messages, serverMsgs);
       if (healed) {
         patchChat(chatId, (c) => ({ ...c, messages: healed, updatedAt: Date.now() }));
@@ -1518,6 +1520,10 @@ export default function App() {
         // gespeichert, oder der Körper wurde beim Auto-Compact abgelegt): Antwort vom
         // Server ANHÄNGEN statt aufzugeben. Vorher ging sie hier verloren.
         if (!lastAi) {
+          // mergeServerTail kann ÄLTERE Nachrichten vorne anhängen → Pilot merkt sich die
+          // Geometrie, damit der Offset korrigiert wird statt den Lesetext zu verschieben.
+          // Nur bei echtem Zuwachs, sonst würde ein späterer Höhensprung falsch gedeutet.
+          if (serverMsgs.length > chat.messages.length) pilot.beginPrepend(chatId);
           const tail = mergeServerTail(chat.messages, serverMsgs, {
             resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
           });
@@ -2144,7 +2150,8 @@ export default function App() {
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (!Array.isArray(data.messages) || data.messages.length === 0) return;
-        pilot.beginPrepend(activeChatId);
+        const localCount = chatsRef.current.find((c) => c.id === activeChatId)?.messages.length ?? 0;
+        if (data.messages.length > localCount) pilot.beginPrepend(activeChatId);
         setChats((cs) =>
           cs.map((c) => {
             if (c.id !== activeChatId) return c;

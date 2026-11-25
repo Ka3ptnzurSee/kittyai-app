@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { ScrollPilot, chatScrollPlan, SETTLE_JUMP_DELAYS_MS, STICK_MAX_MS, MEASURE_SUPPRESS_MS, CONTENT_DEBOUNCE_MS } from "../scrollPilot.ts";
+import { ScrollPilot, chatScrollPlan, SETTLE_JUMP_DELAYS_MS, STICK_MAX_MS, MEASURE_SUPPRESS_MS, CONTENT_DEBOUNCE_MS, PREPEND_TTL_MS, BOTTOM_TOLERANCE_PX } from "../scrollPilot.ts";
 
 /** Deterministische Uhr: Timer und Frames laufen in echtem Zeitverhältnis, aber ohne Wall-Clock. */
 class FakeClock {
@@ -205,8 +205,54 @@ test("ScrollPilot.close: bricht alles ab (Tab-Wechsel verlässt den Chat)", () =
   pilot.close("c1");
   assert.deepStrictEqual(pilot.pending(), { timers: 0, frames: 0 });
   assert.strictEqual(pilot.isSticking("c1"), false);
-  // Debounce-Fenster beachtet (Review-Fund): 40 ms nach einem Sprung kein Doppel-Sprung
-  assert.ok(CONTENT_DEBOUNCE_MS >= 0);
+});
+
+test("ScrollPilot.beginPrepend: korrigiert auch bei offsetY === 0 (Text steht ganz oben)", () => {
+  const { clock, pilot, offsets } = makePilot();
+  pilot.open("c1");
+  clock.advance(STICK_MAX_MS + MEASURE_SUPPRESS_MS + 1);
+  pilot.onScroll("c1", GEO(0, 5000)); // ganz oben (offsetY 0)
+  pilot.beginPrepend("c1");
+  pilot.onContentSizeChange("c1", 8000); // +3000 vorne angehängt
+  assert.deepStrictEqual(offsets().map((o) => o.y), [3000], "auch bei offsetY 0 muss um das Delta korrigiert werden");
+});
+
+test("ScrollPilot.beginPrepend: veralteter Hinweis wird NICHT als Prepend gedeutet (TTL)", () => {
+  const { clock, pilot, offsets } = makePilot();
+  pilot.open("c1");
+  clock.advance(STICK_MAX_MS + MEASURE_SUPPRESS_MS + 1);
+  pilot.onScroll("c1", GEO(600, 5000));
+  pilot.beginPrepend("c1");
+  clock.advance(PREPEND_TTL_MS + 1); // kein Merge passiert → Hinweis verfällt
+  pilot.onContentSizeChange("c1", 8000);
+  assert.strictEqual(offsets().length, 0, "ohne echten Prepend darf der Offset nicht verschoben werden");
+});
+
+test("ScrollPilot.beginPrepend: eine Geste verwirft den vorbereiteten Hinweis", () => {
+  const { clock, pilot, offsets } = makePilot();
+  pilot.open("c1");
+  clock.advance(STICK_MAX_MS + MEASURE_SUPPRESS_MS + 1);
+  pilot.onScroll("c1", GEO(600, 5000));
+  pilot.beginPrepend("c1");
+  pilot.drag("c1"); // Nutzer scrollt selbst
+  pilot.onContentSizeChange("c1", 8000);
+  assert.strictEqual(offsets().length, 0);
+});
+
+test("ScrollPilot.close ohne Argument räumt den offenen Chat auf (kein Karten-Wachstum)", () => {
+  const { clock, pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(0, 1000));
+  clock.advance(0);
+  pilot.close();
+  assert.deepStrictEqual(pilot.pending(), { timers: 0, frames: 0 });
+  assert.strictEqual(pilot.isSticking("c1"), false);
+  assert.strictEqual(pilot.distanceToBottom("c1"), -1, "Geometrie wurde verworfen");
+});
+
+test("ScrollPilot: Konstanten sind plausibel (Toleranz < Sprung-Grenze, Debounce < Sprungfenster)", () => {
+  assert.ok(BOTTOM_TOLERANCE_PX > 0 && BOTTOM_TOLERANCE_PX < 200);
+  assert.ok(CONTENT_DEBOUNCE_MS > 0 && CONTENT_DEBOUNCE_MS < MEASURE_SUPPRESS_MS);
 });
 
 // --- chatScrollPlan (pure Entscheidungsfunktion, vom Pilot genutzt) -------------

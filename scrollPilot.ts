@@ -17,6 +17,9 @@
 //  - beginPrepend(): hängt der Server-Sync ÄLTERE Nachrichten vorne an, während der Nutzer
 //    oben liest, wird der Offset um die neue Höhe korrigiert (kein Sprung im Text).
 //  - Nach dem Sprungfenster (MEASURE_SUPPRESS_MS) misst onScroll wieder normal.
+/** So lange gilt ein beginPrepend()-Hinweis (danach ist er veraltet und wird verworfen). */
+export const PREPEND_TTL_MS = 1000;
+
 /** Abstand (pt) zum Listenende, ab dem „der Nutzer steht unten" gilt. */
 export const BOTTOM_TOLERANCE_PX = 80;
 
@@ -104,9 +107,8 @@ export class ScrollPilot {
   private frames = new Set<number>();
   /** je Chat: zuletzt gemessene Geometrie (für Prepend-Korrektur). */
   private geo = new Map<string, ScrollGeometry>();
-  /** je Chat: {height, offsetY} zum Zeitpunkt von beginPrepend(). */
-  private prepend = new Map<string, { height: number; offsetY: number }>();
-  private notanker: number | null = null;
+  /** je Chat: {height, offsetY, at} zum Zeitpunkt von beginPrepend(). */
+  private prepend = new Map<string, { height: number; offsetY: number; at: number }>();
   private openChat: string | null = null;
 
   constructor(deps: Partial<PilotDeps> = {}) {
@@ -167,18 +169,21 @@ export class ScrollPilot {
     for (const ms of SETTLE_JUMP_DELAYS_MS) this.scheduleJump(chatId, ms);
     const anchor = this.deps.timer(() => {
       this.timers.delete(anchor);
-      if (this.notanker === anchor) this.notanker = null;
       this.sticky.delete(chatId);
     }, STICK_MAX_MS);
-    this.notanker = anchor;
     this.timers.add(anchor);
   }
 
-  /** Chat verlassen/unmount: alles Offene abbrechen, Stick-Modus aus. */
+  /** Chat verlassen/unmount: alles Offene abbrechen, Stick-Modus aus, Karten aufräumen. */
   close(chatId?: string): void {
     this.cancelAll();
-    if (chatId) this.sticky.delete(chatId);
-    else if (this.openChat) this.sticky.delete(this.openChat);
+    const target = chatId || this.openChat;
+    if (target) {
+      this.sticky.delete(target);
+      this.geo.delete(target);
+      this.near.delete(target);
+      this.prepend.delete(target);
+    }
     this.openChat = null;
   }
 
@@ -186,6 +191,8 @@ export class ScrollPilot {
   drag(chatId: string): void {
     this.cancelAll();
     this.sticky.delete(chatId);
+    // Ein vorbereiteter Prepend-Hinweis darf eine spätere, echte Geste nicht verschieben.
+    this.prepend.delete(chatId);
   }
 
   /**
@@ -209,11 +216,15 @@ export class ScrollPilot {
     this.geo.set(chatId, g);
 
     // 1) Vorangestellte ältere Nachrichten: sichtbaren Text stehen lassen.
+    //    Auch bei offsetY === 0 korrigieren: dort steht der Text ganz oben und würde
+    //    sonst um das Delta nach unten geschoben (Review-Fund: Bedingung war > 0).
+    //    Ein Eintrag gilt nur PREPEND_TTL_MS — ein später zufälliger Höhensprung darf
+    //    nicht als Prepend missdeutet werden.
     const pending = this.prepend.get(chatId);
     if (pending && !this.sticky.has(chatId)) {
       this.prepend.delete(chatId);
       const delta = height - pending.height;
-      if (delta > 0 && pending.offsetY > 0) {
+      if (this.deps.now() - pending.at <= PREPEND_TTL_MS && delta > 0) {
         this.deps.scrollToOffset(pending.offsetY + delta);
         this.geo.set(chatId, { ...g, offsetY: pending.offsetY + delta });
         return; // Nutzer liest oben → NICHT ans Ende springen
@@ -237,7 +248,7 @@ export class ScrollPilot {
   beginPrepend(chatId: string): void {
     const g = this.geo.get(chatId);
     if (!g) return;
-    this.prepend.set(chatId, { height: g.height, offsetY: g.offsetY });
+    this.prepend.set(chatId, { height: g.height, offsetY: g.offsetY, at: this.deps.now() });
   }
 
   // --- intern --------------------------------------------------------------
@@ -254,7 +265,6 @@ export class ScrollPilot {
   private scheduleJump(chatId: string, delay: number): void {
     const id = this.deps.timer(() => {
       this.timers.delete(id);
-      if (this.notanker === id) this.notanker = null;
       this.jump(chatId);
     }, delay);
     this.timers.add(id);
@@ -279,6 +289,5 @@ export class ScrollPilot {
     this.timers.clear();
     for (const id of this.frames) this.deps.cancelFrame(id);
     this.frames.clear();
-    this.notanker = null;
   }
 }
