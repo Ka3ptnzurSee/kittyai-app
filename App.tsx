@@ -207,6 +207,16 @@ class BackgroundDetached extends Error {
   }
 }
 
+// Server meldet beim Resume reason=stale_failure: der Turn ist endgültig vorbei
+// (alte Fehlermeldung, z. B. „Server wurde neu gestartet" von gestern). Kein Fehler
+// anzeigen — die Session wird nachgeladen, damit die Teilantwort sichtbar ist.
+class StaleFailureDetached extends Error {
+  constructor() {
+    super("Turn ist beendet");
+    this.name = "StaleFailureDetached";
+  }
+}
+
 // Auswählbare Chat-Modelle (Key = Server-Slug, Label = kurze Anzeige).
 // Reihenfolge = Zyklus beim Tippen auf den Chip.
 const CHAT_MODEL_OPTIONS: { key: string; label: string; deactivated?: boolean }[] = [
@@ -3258,6 +3268,13 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
         return;
       }
+      if (e instanceof StaleFailureDetached) {
+        // Server: Turn ist endgültig vorbei (alte Fehlermeldung, z. B. Neustart von
+        // gestern). Keine Fehlerkarte — Session laden, Teilantwort anzeigen, fertig.
+        await reloadFromServer(chatId);
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+        return;
+      }
       if (e instanceof StreamInterrupted) {
         // Stream still beendet (EOF ohne done/error): gezielt mit Resume an der
         // Abbruchstelle fortsetzen statt eine „Netzwerk unterbrochen"-Karte zu zeigen.
@@ -3557,6 +3574,9 @@ export default function App() {
         delete streamStateRef.current[chatId];
         persistStreamState(chatId);
       } else if (t === "resume_unavailable") {
+        // Alter, endgültig gescheiterter Turn (Server: reason=stale_failure): das ist
+        // KEIN neuer Fehler — die Session laden (Teilantwort sichtbar), keine Fehlerkarte.
+        if (String((e as { reason?: unknown }).reason || "") === "stale_failure") throw new StaleFailureDetached();
         // Turn ist auf dem Server nicht mehr vorhanden → Voll-Replay erzwingen.
         throw new Error("resume_unavailable");
       } else if (t === "error") {
