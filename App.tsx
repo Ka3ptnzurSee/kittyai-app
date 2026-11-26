@@ -2498,7 +2498,7 @@ export default function App() {
         .map((c) => c.id)
         .filter((id) => id && !id.startsWith("file:"));
       // Query manuell bauen: URLSearchParams ist in Hermes unzuverlässig.
-      let qs = "limit=1000"; // Server deckelt selbst auf 1000 (544 Verläufe am 22.11.)
+      let qs = "limit=300"; // Server deckelt auf 300 (fair verteilt) — 1000 kostete 137 KB pro Start
       if (ids.length) qs += `&ids=${encodeURIComponent(ids.slice(0, 300).join(","))}`;
       const res = await fetch(`${base}/api/chats?${qs}`, { headers: authHeaders() });
       if (!res.ok) return;
@@ -3253,12 +3253,9 @@ export default function App() {
         // Der Server-Turn läuft weiter. KEIN Fehler, KEIN Retry-Sturm — beim
         // Zurückkehren lädt der Vordergrund-Sync die Antwort per REST nach.
         turnStillRunning = true;
-        setStatusByChat((prev) => ({
-          ...prev,
-          [chatId]: wentBackgroundRef.current
-            ? "App im Hintergrund — Antwort läuft auf dem Server weiter …"
-            : "Verbindung neu aufbauen — Antwort läuft auf dem Server weiter …",
-        }));
+        // Kein "Verbindung neu aufbauen"-Text mehr: der Nutzer sieht beim Zurückkehren
+        // nur noch einen ruhigen Ladehinweis, der verschwindet, sobald die Antwort da ist.
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
         return;
       }
       if (e instanceof StreamInterrupted) {
@@ -3355,7 +3352,7 @@ export default function App() {
         // das Session-Polling lädt die Antwort, sobald sie fertig ist (kein „Verbindung unterbrochen").
         if (await serverTurnStillRunning(chatId)) {
           turnStillRunning = true;
-          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird auf dem Server verarbeitet — wird automatisch geladen …" }));
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
           return;
         }
         const rawMsg = e2 instanceof Error ? e2.message : String(e2);
@@ -3373,7 +3370,7 @@ export default function App() {
             return;
           }
           turnStillRunning = true;
-          setStatusByChat((prev) => ({ ...prev, [chatId]: "Verbindung verloren — verbinde automatisch neu …" }));
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
           return;
         }
         // Echter Server-Fehler (kein Netzproblem) → Fehler-Karte statt Text-Suffix.
