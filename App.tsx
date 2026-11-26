@@ -3268,13 +3268,6 @@ export default function App() {
         setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
         return;
       }
-      if (e instanceof StaleFailureDetached) {
-        // Server: Turn ist endgültig vorbei (alte Fehlermeldung, z. B. Neustart von
-        // gestern). Keine Fehlerkarte — Session laden, Teilantwort anzeigen, fertig.
-        await reloadFromServer(chatId);
-        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
-        return;
-      }
       if (e instanceof StreamInterrupted) {
         // Stream still beendet (EOF ohne done/error): gezielt mit Resume an der
         // Abbruchstelle fortsetzen statt eine „Netzwerk unterbrochen"-Karte zu zeigen.
@@ -3723,8 +3716,11 @@ export default function App() {
       // auskommt — die inneren catch-Blöcke der Aufrufer schlucken die Klasse sonst
       // still und melden am Ende "Verbindung unterbrochen" (Review HIGH 26.11.).
       if (e instanceof StaleFailureDetached) {
-        await reloadFromServer(chatId);
-        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+        // Session laden: klappt das, ist die Teilantwort da und der Status verschwindet.
+        // Schlägt es fehl (offline), bleibt ein ruhiger Ladehinweis stehen statt einer
+        // leeren Bubble ohne Text — der Vordergrund-Sync holt die Antwort später.
+        const filled = await reloadFromServer(chatId);
+        setStatusByChat((prev) => ({ ...prev, [chatId]: filled ? "" : "Antwort wird geladen …" }));
         return;
       }
       // Netzwerk-/HTTP-Fehler: nicht verschlucken → sendChat-Retry + /chat-Fallback greifen.
