@@ -1085,6 +1085,21 @@ export default function App() {
     };
   }, [activeChatId, tab]);
 
+  // Nachladen beim Öffnen: bei Chats aus der Server-Liste ist `messages` beim ersten
+  // Layout noch LEER (die Session kommt erst per REST). Dann wächst die Liste, nachdem
+  // die Ansicht schon stand — und die Ansicht bleibt über der letzten Nachricht stehen.
+  // Messung auf dem Gerät (scroll_settle): dist=618 pt 1,5 s nach dem Öffnen, also
+  // „Chat lädt lange". Solange kein Stream läuft, nach jedem Nachrichten-Zuwachs im
+  // offenen Chat erneut ans Ende hängen (eine echte Scroll-Geste hebt den Stick auf).
+  const activeMsgCount = activeChatId
+    ? (chats.find((c) => c.id === activeChatId)?.messages.length ?? 0)
+    : 0;
+  useEffect(() => {
+    if (!activeChatId) return;
+    if (busyChatIds.has(activeChatId)) return; // während des Streams regelt das der Stick-Modus
+    pilot.setNearBottom(activeChatId, true);
+  }, [activeChatId, activeMsgCount]);
+
   // pro Chat einstellbares Modell (Default: "flash"). Deaktivierte Modelle
   // (Robotron via Laptop-Tunnel :18444) dürfen nie als aktiv gelten — sonst
   // zeigt der Chip ein Modell an, das der Server still auf flash umbiegt.
