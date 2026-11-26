@@ -605,9 +605,15 @@ export function compactChatsForStorage<
     }
     return undefined;
   };
+  // Leere KI-Blasen NICHT speichern (Befund 26.11.2026, Screenshot build 136): eine
+  // Fehlerkarte steckt im `error`-Objekt der Nachricht, `stripErrorFlags` entfernt sie
+  // beim Speichern — danach blieb eine Blase ohne jeden Inhalt übrig und stand nach
+  // jedem App-Start als „(keine Antwort)" im Verlauf. Im Speicher hat sie keinen Wert
+  // (der Resume-Anker liegt in STREAM_STATE_KEY, nicht im Chat-Store).
+  const ohneLeereKi = (m: unknown): boolean => !isBlankAiMessage(m as { role?: string; text?: string });
   let list: T[] = chats.map((c) => ({
     ...c,
-    messages: c.messages.slice(-maxMessages).map(capText),
+    messages: c.messages.slice(-maxMessages).map(capText).filter(ohneLeereKi),
   }));
   const size = (l: T[]) => JSON.stringify(l).length;
   const bodySize = (c: T) => JSON.stringify(c.messages).length;

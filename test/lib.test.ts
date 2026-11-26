@@ -342,6 +342,49 @@ test("compactChatsForStorage lässt kleine Verläufe unangetastet", () => {
   assert.deepStrictEqual(compactChatsForStorage(chats), chats);
 });
 
+test("compactChatsForStorage speichert keine leeren KI-Blasen (weiße Balken nach Neustart)", () => {
+  // Befund 26.11.2026 (build 136, Screenshot): Fehlerkarten stecken im error-Objekt und
+  // werden beim Speichern entfernt (stripErrorFlags) — die Blase blieb leer zurück und
+  // stand nach jedem App-Start als "(keine Antwort)" im Verlauf.
+  const chats = [
+    {
+      id: "c1",
+      updatedAt: 1,
+      messages: [
+        { id: "u1", role: "user", text: "hallo" },
+        { id: "a1", role: "assistant", text: "" },
+        { id: "u2", role: "user", text: "noch da?" },
+        { id: "a2", role: "assistant", text: "   " },
+      ],
+    },
+  ];
+  const out = compactChatsForStorage(chats as never);
+  assert.deepStrictEqual(
+    (out[0].messages as { id: string }[]).map((m) => m.id),
+    ["u1", "u2"],
+  );
+});
+
+test("compactChatsForStorage behält leere Blasen mit Inhalt (Widget/Bild/Aktivität) und Text", () => {
+  const chats = [
+    {
+      id: "c1",
+      updatedAt: 1,
+      messages: [
+        { id: "a1", role: "assistant", text: "", dil: [{ type: "Table" }] },
+        { id: "a2", role: "assistant", text: "", images: [{ uri: "file://x.jpg" }] },
+        { id: "a3", role: "assistant", text: "", activity: [{ tool: "bash" }] },
+        { id: "a4", role: "assistant", text: "echte Antwort" },
+      ],
+    },
+  ];
+  const out = compactChatsForStorage(chats as never);
+  assert.deepStrictEqual(
+    (out[0].messages as { id: string }[]).map((m) => m.id),
+    ["a1", "a2", "a3", "a4"],
+  );
+});
+
 test("compactChatsForStorage halbiert Nachrichten, wenn der Deckel greift (nie unter 8)", () => {
   const messages = Array.from({ length: 1000 }, (_, i) => ({ i }));
   const chats = [{ id: "a", updatedAt: 1, messages }];
