@@ -3718,6 +3718,15 @@ export default function App() {
         voiceHooks.error?.("Keine Antwort vom Server — bitte nochmal.");
         return;
       }
+      // Veralteter Turn (reason=stale_failure): zentral hier behandeln, damit JEDER
+      // Resume-Pfad (send, auto-resume, StreamInterrupted-Retry) ohne Fehlerkarte
+      // auskommt — die inneren catch-Blöcke der Aufrufer schlucken die Klasse sonst
+      // still und melden am Ende "Verbindung unterbrochen" (Review HIGH 26.11.).
+      if (e instanceof StaleFailureDetached) {
+        await reloadFromServer(chatId);
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+        return;
+      }
       // Netzwerk-/HTTP-Fehler: nicht verschlucken → sendChat-Retry + /chat-Fallback greifen.
       throw e;
     } finally {
