@@ -288,7 +288,18 @@ export class ScrollPilot {
     // distanceToBottom() weiter den alten Abstand (Telemetrie-Fehldiagnose, Review-Runde 4).
     const g = this.geo.get(chatId);
     if (g) this.geo.set(chatId, { ...g, offsetY: Math.max(0, g.height - g.viewport) });
-    this.deps.scrollToEnd();
+    // Restabstand-Fix (gemessen 26.11.2026, Build 136): RN 0.86 `scrollToEnd()` rechnet
+    // `letzte Zelle.offset + Zelle.length + FooterLength - viewport` (VirtualizedList.js:135)
+    // und ignoriert damit das `paddingBottom` des contentContainerStyle. Die Ansicht blieb
+    // bei JEDEM scrollbaren Chat exakt 16 pt (= paddingBottom aus styles.listContent) über
+    // dem Ende stehen — Geräte-Messung scroll_settle: 7× dist=16, nie 0. Sobald die echte
+    // Geometrie gemessen ist (onScroll), wird deshalb auf das Maximum gescrollt; `scrollToEnd`
+    // bleibt der Startpunkt, solange noch nichts gemessen wurde (Insets/Keyboard korrekt).
+    if (g && g.viewport > 0 && g.height > g.viewport) {
+      this.deps.scrollToOffset(g.height - g.viewport);
+    } else {
+      this.deps.scrollToEnd();
+    }
   }
 
   private cancelAll(): void {

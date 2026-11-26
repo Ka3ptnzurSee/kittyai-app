@@ -1536,7 +1536,14 @@ export default function App() {
       if (!res.ok) return null;
       const data = await res.json();
       const chats = (data && data.chats) || {};
-      return chats[chatId] || (Object.values(chats)[0] as { running: boolean; idleMs?: number }) || null;
+      // Der Server liefert die angefragte chatId als Key (26.11.2026 gefixt — vorher war der
+      // Key die gehashte ID, der Treffer gelang nie und der Rückfall unten lieferte den Status
+      // eines FREMDEN Chats: falsche „Nicht gesendet"-Karten, busy zu früh weg, Antwort ging
+      // verloren). Rückfall nur noch, wenn GENAU EIN Chat in der Antwort steht (alter Server).
+      const treffer = chats[chatId];
+      if (treffer) return treffer;
+      const werte = Object.values(chats) as { running: boolean; idleMs?: number }[];
+      return werte.length === 1 ? werte[0] : { running: false };
     } catch {
       return null;
     }
@@ -2108,8 +2115,18 @@ export default function App() {
               if (!aiMsg) {
                 // Keine LEERE KI-Bubble mehr (Bubble wurde geleert/entfernt oder hatte schon
                 // Teiltext): nicht erneut streamen (das würde doppelt senden), sondern den
-                // fertigen Server-Stand holen — sonst bliebe die Antwort dauerhaft weg.
-                void syncChatFromServer(chat.id);
+                // fertigen Server-Stand holen.
+                // Befund 26.11.2026 (build 136): der Einmal-Sync reichte nicht. War die App
+                // mitten im Turn gekillt worden, steht lokal ein TEILTEXT; die Antwort entstand
+                // serverseitig erst NACH dem Kill. Der Sync findet dann nichts anwendbar und
+                // ohne busy pollte niemand mehr — der abgeschnittene Text blieb für immer stehen
+                // („KI-Antwort nach App-Schließen fehlerhaft"). Deshalb busy setzen: der 3-s-Poller
+                // lädt die finale Antwort nach; ist serverseitig nichts mehr am Laufen, sofort frei.
+                markBusy(chat.id, true);
+                void (async () => {
+                  await syncChatFromServer(chat.id);
+                  if (!(await serverTurnStillRunning(chat.id))) markBusy(chat.id, false);
+                })();
                 continue;
               }
               markBusy(chat.id, true);
@@ -2405,7 +2422,11 @@ export default function App() {
     const delay = busyChatIds.size > 0 ? 6000 : 1200;
     storeTimerRef.current = setTimeout(() => {
       storeTimerRef.current = null;
-      void writeChatStore();
+      // Verschlüsseln (AES-GCM in JS) + Schreiben blockiert den JS-Thread — gemessen
+      // p50 464 ms für den ganzen Bestand; in dieser Zeit frieren Scroll und Animationen
+      // ein (Geräte-Messung: der 1,5-s-scroll_settle-Timer feuerte 2,3 s zu spät).
+      // Deshalb erst schreiben, wenn keine Interaktion/Animation mehr läuft.
+      InteractionManager.runAfterInteractions(() => { void writeChatStore(); });
     }, delay);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chats, busyChatIds]);
@@ -3292,10 +3313,11 @@ export default function App() {
     markBusy(chatId, true);
     // Nach dem Senden zur letzten Nachricht scrollen (einmalig, nicht bei jedem Stream-Zeichen).
     setTimeout(() => {
-      // animated:true läuft ~300 ms; onScroll-Messwerte in dieser Zeit ausblenden.
       pilot.suppressMeasure(800);
       pilot.setNearBottom(chatId, true);
-      listRef.current?.scrollToEnd({ animated: true });
+      // Nicht mehr scrollToEnd(): das ignoriert das paddingBottom des contentContainerStyle
+      // und ließ die Liste 16 pt über dem Ende stehen (gemessen 26.11.2026, build 136).
+      pilot.jumpNow(chatId);
     }, 60);
 
     try {

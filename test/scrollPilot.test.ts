@@ -50,7 +50,9 @@ function makePilot() {
   });
   const ends = () => calls.filter((c) => c.type === "end").length;
   const offsets = () => calls.filter((c) => c.type === "offset");
-  return { clock, pilot, calls, ends, offsets };
+  /** Jeder Sprung ist entweder scrollToEnd (noch keine Geometrie) ODER scrollToOffset. */
+  const jumps = () => calls.filter((c) => c.type === "end" || c.type === "offset").length;
+  return { clock, pilot, calls, ends, offsets, jumps };
 }
 
 const GEO = (offsetY: number, height: number, viewport = 800) => ({ offsetY, height, viewport });
@@ -155,16 +157,45 @@ test("ScrollPilot.onScroll: oben gelesen → keine automatischen Sprünge mehr",
 });
 
 test("ScrollPilot: Auto-Follow beim Streamen bleibt aktiv (unterste Position, Deltas alle 16 ms)", () => {
-  const { clock, pilot, ends } = makePilot();
+  const { clock, pilot, jumps } = makePilot();
   pilot.open("c1");
   clock.advance(STICK_MAX_MS + MEASURE_SUPPRESS_MS + 1);
   pilot.onScroll("c1", GEO(4200, 5000)); // exakt unten (dist 0)
-  const before = ends();
+  const before = jumps();
   for (let i = 0; i < 20; i++) {
     pilot.onContentSizeChange("c1", 5000 + 10 * (i + 1));
     clock.advance(16);
   }
-  assert.ok(ends() - before >= 5, `Follow muss greifen (war ${ends() - before} Sprünge), nicht jeder Delta einzeln`);
+  assert.ok(jumps() - before >= 5, `Follow muss greifen (war ${jumps() - before} Sprünge), nicht jeder Delta einzeln`);
+});
+
+test("ScrollPilot: kein Restabstand — Sprung geht auf das gemessene Maximum, nicht via scrollToEnd", () => {
+  const { clock, pilot, offsets, ends } = makePilot();
+  pilot.open("c1");
+  // Geometrie liegt vor (onScroll misst Höhe + Viewport)
+  pilot.onScroll("c1", GEO(1000, 6000, 800));
+  const endsBefore = ends();
+  clock.advance(120); // nächster geplanter Siedlungssprung
+  assert.strictEqual(ends(), endsBefore, "scrollToEnd (ignoriert paddingBottom) darf hier nicht mehr laufen");
+  const ys = offsets().map((o) => o.y);
+  assert.ok(ys.length >= 1 && ys.every((y) => y === 5200), `5200 = 6000 - 800 (absolutes Listenende), war ${JSON.stringify(ys)}`);
+  assert.strictEqual(pilot.distanceToBottom("c1"), 0, "Restabstand muss 0 sein");
+});
+
+test("ScrollPilot: ohne gemessene Geometrie bleibt scrollToEnd der Startpunkt", () => {
+  const { clock, pilot, ends, offsets } = makePilot();
+  pilot.open("c1");
+  clock.advance(0);
+  assert.strictEqual(ends(), 1, "erster Sprung ohne Messung → nativer Weg");
+  assert.strictEqual(offsets().length, 0);
+});
+
+test("ScrollPilot: kein Offset-Sprung, wenn der Inhalt kürzer als der Viewport ist", () => {
+  const { clock, pilot, offsets } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(0, 400, 800)); // Chat kürzer als der Schirm → nichts zu scrollen
+  clock.advance(120);
+  assert.deepStrictEqual(offsets().map((o) => o.y), [], "negatives/0-Maximum darf keinen Offset auslösen");
 });
 
 test("ScrollPilot.beginPrepend: ältere Nachrichten oben verändern die Leseposition nicht", () => {
