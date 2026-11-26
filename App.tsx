@@ -3287,7 +3287,7 @@ export default function App() {
         // die „wird nachgeliefert"-Karte zeigen (sonst bliebe die Bubble ewig leer).
         if (await serverTurnStillRunning(chatId)) {
           turnStillRunning = true;
-          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird auf dem Server verarbeitet …" }));
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
           return;
         }
         setErrorCard(chatId, aiId, "Verbindung unterbrochen – Antwort wird nachgeliefert.", true, "stream_interrupted");
@@ -3303,13 +3303,13 @@ export default function App() {
         // der App. Erst auf Vordergrund warten — der Server-Turn läuft unabhängig weiter
         // und wird über turnRegistry gepuffert; Resume knüpft dann nahtlos an.
         if (appStateRef.current !== "active") {
-          setStatusByChat((prev) => ({ ...prev, [chatId]: "App im Hintergrund — Antwort wird auf dem Server weiterverarbeitet …" }));
+          setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
         }
         for (let attempt = 1; attempt <= 3; attempt++) {
           await waitForForeground();
           if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
           try {
-            setStatusByChat((prev) => ({ ...prev, [chatId]: `Verbindung verloren — neuer Versuch ${attempt}/3…` }));
+            setStatusByChat((prev) => ({ ...prev, [chatId]: `Antwort wird geladen … (Versuch ${attempt}/3)` }));
             await new Promise((r) => setTimeout(r, 1200));
             if (abortedRef.current.has(chatId)) { setStatusByChat((prev) => ({ ...prev, [chatId]: "" })); return; }
             const st = streamStateRef.current[chatId];
