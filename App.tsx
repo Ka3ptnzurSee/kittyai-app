@@ -26,6 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -950,7 +951,30 @@ export default function App() {
           source: "chat",
           phase: "scroll",
           appVersion: APP_VERSION,
-          detail: `dist=${Math.min(99999, Math.max(0, Math.round(dist)))};ms=${Math.min(9999, Math.max(0, Math.round(ms)))};n=${Math.min(9999, Math.max(0, messages))}`,
+          // `ms` bewusst NICHT mehr melden: der Wert war der feste 1,5-s-Melder und wurde
+          // als Latenz fehlgedeutet (Messfehler 26.11.). Echte Öffnungsdauer = chat_paint.
+          detail: `dist=${Math.min(99999, Math.max(0, Math.round(dist)))};n=${Math.min(9999, Math.max(0, messages))}`,
+        }),
+      }).catch(() => { /* Messung darf nie stören */ });
+    } catch { /* ignorieren */ }
+  }
+
+  // Echte Öffnungs-Latenz eines Chats: Zeit vom Öffnen bis zum ersten Inhalts-Layout,
+  // dazu wie viele Nachrichten im Render-Fenster lagen (Fenster = letzte N, Rest lädt
+  // per Tippen). Nur Zahlen.
+  function reportChatPaint(ms: number, visible: number, hidden: number) {
+    try {
+      const base = serverUrl.replace(/\/+$/, "");
+      if (!base) return;
+      fetch(`${base}/api/client-error`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          kind: "chat_paint",
+          source: "chat",
+          phase: "open",
+          appVersion: APP_VERSION,
+          detail: `ms=${Math.min(99999, Math.max(0, Math.round(ms)))};n=${visible};hidden=${hidden}`,
         }),
       }).catch(() => { /* Messung darf nie stören */ });
     } catch { /* ignorieren */ }
@@ -1050,6 +1074,19 @@ export default function App() {
   }, [listening, micPulse]);
 
   const activeChat = chats.find((c) => c.id === activeChatId) || null;
+  // Render-Fenster: nur die letzten N Nachrichten gehen an die FlatList, ältere werden
+  // auf Tippen nachgeladen (CHAT_WINDOW_STEP). Grund (gemessen 26.11.): Verläufe mit
+  // 100+ Nachrichten + DIL-Blöcken brauchen beim Öffnen mehrere Sekunden Layout.
+  const [chatWindow, setChatWindow] = useState<number>(CHAT_WINDOW_INIT);
+  const visibleMessages = useMemo(
+    () => (activeChat ? chatWindowSlice(activeChat.messages, chatWindow) : []),
+    [activeChat, chatWindow],
+  );
+  const hiddenMessages = activeChat ? chatWindowHidden(activeChat.messages, chatWindow) : 0;
+  // Echtes Paint-Mass (Ersatz für das alte, konstante 1,5-s-Fenster): Zeit vom Öffnen
+  // bis zum ersten gemeldeten Inhalts-Layout des Chats — nur Zahlen, kein Inhalt.
+  const paintStartRef = useRef<number>(0);
+  const paintReportedRef = useRef<Set<string>>(new Set());
 
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
@@ -1067,6 +1104,8 @@ export default function App() {
       });
     }
     const chatId = activeChatId;
+    setChatWindow(CHAT_WINDOW_INIT);
+    paintStartRef.current = Date.now();
     // Stick-Modus: jede Höhenänderung zieht nach unten, bis eine echte Geste kommt
     // (oder der 8-s-Notanker greift). Ersetzt die drei festen Sprünge von vorher.
     pilot.open(chatId);
@@ -4634,11 +4673,25 @@ export default function App() {
             {/* Kein maintainVisibleContentPosition mehr: es hielt den Offset beim Nachrendern
                 fest und arbeitete damit gegen das „ans Ende springen" (Befund 26.11.2026). */}
             <FlatList ref={listRef}
-              data={activeChat.messages}
+              data={visibleMessages}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               refreshControl={<PullToRefresh refreshing={refreshingChat} onRefresh={() => { void refreshActiveChat(); }} />}
               keyExtractor={(m) => m.id}
+              ListHeaderComponent={
+                hiddenMessages > 0 ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${hiddenMessages} ältere Nachrichten laden`}
+                    onPress={() => setChatWindow((w) => w + CHAT_WINDOW_STEP)}
+                    style={styles.loadOlder}
+                  >
+                    <Text style={styles.loadOlderText}>
+                      {hiddenMessages} ältere Nachrichten laden
+                    </Text>
+                  </Pressable>
+                ) : null
+              }
               renderItem={(p) => (
                 <SichererBlock bereich="nachricht" kompakt resetKey={p.item.id}>
                   {renderMessage(p)}
@@ -4676,6 +4729,16 @@ export default function App() {
                 // Höhe geändert (Batch nachgerendert, Server-Verlauf, Bild/DIL-Layout):
                 // der Pilot entscheidet kleben / 40-ms-Sprung / Prepend-Offset / nichts.
                 pilot.onContentSizeChange(activeChat.id, h);
+                // Erstes Layout nach dem Öffnen = fertig gezeichnet: echte Millisekunden
+                // melden (das alte scroll_settle-ms war ein fester 1,5-s-Timer und damit
+                // als Latenz unbrauchbar).
+                if (paintStartRef.current > 0 && !paintReportedRef.current.has(activeChat.id)) {
+                  paintReportedRef.current.add(activeChat.id);
+                  if (paintReportedRef.current.size > 500) paintReportedRef.current.clear();
+                  const ms = Date.now() - paintStartRef.current;
+                  paintStartRef.current = 0;
+                  reportChatPaint(ms, visibleMessages.length, hiddenMessages);
+                }
               }}
               scrollEventThrottle={32}
               ListEmptyComponent={
@@ -5317,6 +5380,14 @@ const styles = StyleSheet.create({
   tabTextActive: { color: colors.accent, fontWeight: "700" },
   tabRow: { flexDirection: "row", alignItems: "center", gap: 6 },
   list: { flex: 1 },
+  loadOlder: {
+    alignSelf: "center",
+    marginVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+  },
+  loadOlderText: { fontSize: 13, color: colors.muted, textAlign: "center" },
   listContent: { padding: 12, paddingBottom: 16 },
   // overflow:hidden ist der letzte Schutz: ein Kind mit zu großer intrinsischer Breite
   // (langer unbrechbarer String in einem Widget) darf nicht mehr aus der Blase malen.

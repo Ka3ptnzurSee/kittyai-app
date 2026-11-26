@@ -1292,3 +1292,28 @@ export function firstFrame(componentStack?: string): string {
   return m ? m[1].slice(0, 40) : "";
 }
 
+
+/**
+ * Render-Fenster für lange Verläufe: die FlatList bekommt nur die letzten `window`
+ * Nachrichten. Alles darüber wird erst auf Anforderung nachgeladen (Kopfzeile
+ * „Ältere Nachrichten laden"), damit der erste Layout nicht den ganzen Verlauf
+ * aufbauen muss. Schlüssel sind Nachrichten-IDs, deshalb ist der Ausschnitt
+ * index-unabhängig (kein Springen/Verwechseln beim Nachladen).
+ */
+export const CHAT_WINDOW_INIT = 60;
+export const CHAT_WINDOW_STEP = 60;
+
+export function chatWindowSlice<T>(messages: T[], window: number): T[] {
+  if (!Array.isArray(messages)) return [];
+  const n = Number.isFinite(window) ? Math.floor(window) : CHAT_WINDOW_INIT;
+  if (n <= 0 || messages.length <= n) return messages;
+  return messages.slice(messages.length - n);
+}
+
+/** Wie viele Nachrichten liegen oberhalb des Render-Fensters? */
+export function chatWindowHidden<T>(messages: T[], window: number): number {
+  if (!Array.isArray(messages)) return 0;
+  const n = Number.isFinite(window) ? Math.floor(window) : CHAT_WINDOW_INIT;
+  if (n <= 0) return 0;
+  return Math.max(0, messages.length - chatWindowSlice(messages, n).length);
+}
