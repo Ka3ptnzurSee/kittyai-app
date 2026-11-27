@@ -939,9 +939,10 @@ export default function App() {
       const base = serverUrl.replace(/\/+$/, "");
       if (!base) return;
       // Nur EINMAL pro Chat je App-Lauf (Tab-Wechsel feuert den Effekt erneut) und ohne
-      // chatId — die Messung braucht keine Zuordnung zu einer Unterhaltung.
+      // chatId — die Messung braucht keine Zuordnung zu einer Unterhaltung. Der Stempel
+      // wird erst NACH dem erfolgreichen Senden gesetzt: bei großen Chats war die erste
+      // Messung ohne Geometrie, sperrte den Chat aber dauerhaft (Befund 27.11.).
       if (scrollReportedRef.current.has(chatId)) return;
-      scrollReportedRef.current.add(chatId);
       if (scrollReportedRef.current.size > 500) scrollReportedRef.current.clear();
       fetch(`${base}/api/client-error`, {
         method: "POST",
@@ -955,6 +956,8 @@ export default function App() {
           // als Latenz fehlgedeutet (Messfehler 26.11.). Echte Öffnungsdauer = chat_paint.
           detail: `dist=${Math.min(99999, Math.max(0, Math.round(dist)))};n=${Math.min(9999, Math.max(0, messages))}`,
         }),
+      }).then(() => {
+        scrollReportedRef.current.add(chatId);
       }).catch(() => { /* Messung darf nie stören */ });
     } catch { /* ignorieren */ }
   }
@@ -1114,17 +1117,26 @@ export default function App() {
     // Stick-Modus: jede Höhenänderung zieht nach unten, bis eine echte Geste kommt
     // (oder der 8-s-Notanker greift). Ersetzt die drei festen Sprünge von vorher.
     pilot.open(chatId);
-    // Geräte-Messung (nur Zahlen, keine Inhalte): steht die Ansicht 1,5 s nach dem Öffnen
+    // Geräte-Messung (nur Zahlen, keine Inhalte): steht die Ansicht nach dem Öffnen
     // wirklich unten? Damit wird der Fix auf dem echten iPhone belegt statt behauptet.
+    //
+    // Zwei Termine (Befund 27.11.): bei GROSSEN Chats war die erste Messung nach 1,5 s
+    // noch ohne Geometrie (der Server-Verlauf kommt per REST, die FlatList rendert
+    // virtuell) → `dist < 0` → keine Meldung, und der Dedup-Stempel sperrte den Chat
+    // für den ganzen App-Lauf. Ergebnis: keine einzige Messung über 66 Nachrichten.
+    // Jetzt wird erst nach einer erfolgreichen Meldung gesperrt, und 3,5 s später noch
+    // einmal gemessen (zeigt, ob die Liste nachzieht oder oben stehen bleibt).
     const openedAt = Date.now();
-    const tel = setTimeout(() => {
-      const dist = pilot.distanceToBottom(chatId);
-      if (dist < 0) return; // keine Scroll-Messung erfolgt → nichts melden
-      const c = chatsRef.current.find((x) => x.id === chatId);
-      reportScrollSettle(chatId, dist, Date.now() - openedAt, c?.messages.length ?? 0);
-    }, 1500);
+    const timers = [1500, 3500].map((delay) =>
+      setTimeout(() => {
+        const dist = pilot.distanceToBottom(chatId);
+        if (dist < 0) return; // immer noch keine Scroll-Messung → später erneut
+        const c = chatsRef.current.find((x) => x.id === chatId);
+        reportScrollSettle(chatId, dist, Date.now() - openedAt, c?.messages.length ?? 0);
+      }, delay),
+    );
     return () => {
-      clearTimeout(tel);
+      for (const t of timers) clearTimeout(t);
       pilot.close(chatId);
     };
   }, [activeChatId, tab]);
@@ -4734,8 +4746,11 @@ export default function App() {
               // 31 DIL-Blöcken und einer KaTeX-WebView ohne JS-Fehler — also nativ.
               // RN-Defaults rendern 10 + 10 pro Batch; hier bewusst kleiner, damit die
               // Charts/Formulare nicht alle gleichzeitig im Speicher landen.
-              initialNumToRender={8}
-              maxToRenderPerBatch={6}
+              // Bei virtuell gerenderten Listen kennt scrollToEnd nur die geschaetzten
+              // Hoehen der noch nicht gerenderten Bubbles und trifft das Ende nicht
+              // (Befund 27.11.: „grosse Chats landen nie unten"). Deshalb mehr sofort.
+              initialNumToRender={24}
+              maxToRenderPerBatch={16}
               updateCellsBatchingPeriod={60}
               windowSize={11}
               style={styles.list}

@@ -427,3 +427,26 @@ test("hasUserScrolled: Prepend waehrend der Geste verschiebt den Startwert mit",
   pilot.onScroll("c1", GEO(400 + 600 - 25, 4600));
   assert.strictEqual(pilot.hasUserScrolled("c1"), true);
 });
+
+test("grosser Chat: nach dem Notanker wird ohne Nutzer-Geste ein letztes Mal ans Ende gesprungen", () => {
+  // Befund 27.11.: bei langen Verlaufen liefen alle geplanten Sprunge ins Leere (FlatList
+  // rendert virtuell, Hoehen geschaetzt) — die Liste blieb oben stehen.
+  const { clock, pilot, ends } = makePilot();
+  pilot.open("big");
+  clock.advance(600); // alle geplanten Spruenge (0/120/500) sind durch
+  const before = ends();
+  clock.advance(STICK_MAX_MS); // Notanker laeuft ab
+  assert.strictEqual(ends(), before + 1, "letzter Schuss ans Ende");
+  assert.strictEqual(pilot.isSticking("big"), false, "Stick-Modus danach aus");
+});
+
+test("grosser Chat: hat der Nutzer selbst gescrollt, gibt es KEINEN letzten Sprung", () => {
+  const { clock, pilot, ends } = makePilot();
+  pilot.open("big");
+  pilot.onScroll("big", GEO(4000, 12000));
+  pilot.drag("big");
+  pilot.onScroll("big", GEO(3900, 12000)); // 100 pt nach oben = echter Scroll
+  const before = ends();
+  clock.advance(STICK_MAX_MS);
+  assert.strictEqual(ends(), before, "Nutzer-Position wird respektiert");
+});

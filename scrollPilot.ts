@@ -62,7 +62,7 @@ export function chatScrollPlan(s: {
 /** Sprungpunkte nach dem Öffnen (ms). 0 = sofort, der Rest fängt späte Layouts ab. */
 export const SETTLE_JUMP_DELAYS_MS: readonly number[] = [0, 120, 500];
 /** Notanker: ohne Finger-Geste endet der Stick-Modus spätestens hier. */
-export const STICK_MAX_MS = 8000;
+export const STICK_MAX_MS = 15000;
 /**
  * Ab dieser selbst gemessenen Aufwärtsbewegung (pt) gilt „der Nutzer scrollt zum Verlauf“.
  * Kleiner Wert = zu großzügig (Antippen lädt nach), größer = der erste echte Wisch fühlt
@@ -193,6 +193,11 @@ export class ScrollPilot {
     const anchor = this.deps.timer(() => {
       this.timers.delete(anchor);
       this.sticky.delete(chatId);
+      // Garantie (Befund 27.11.: „große Chats landen nie unten"): hat der Nutzer diesen
+      // Chat nie selbst gescrollt, MUSS er unten stehen — auch wenn das Layout so spät
+      // fertig wurde, dass alle geplanten Sprünge ins Leere liefen. Ohne diesen letzten
+      // Schuss blieb die Liste bei großen, virtuell gerenderten Verläufen oben stehen.
+      if (!this.dragged.has(chatId)) this.deps.scrollToEnd();
     }, STICK_MAX_MS);
     this.timers.add(anchor);
   }
