@@ -1323,3 +1323,32 @@ export function chatWindowHidden<T>(messages: T[], window: number): number {
   if (n <= 0) return 0;
   return Math.max(0, messages.length - chatWindowSlice(messages, n).length);
 }
+
+/** Ab diesem Abstand (pt) zum Listenanfang gilt „der Nutzer ist oben angekommen“. */
+export const AUTO_OLDER_TRIGGER_PX = 150;
+/** Mindestpause zwischen zwei automatischen Nachlade-Schritten (ms). */
+export const AUTO_OLDER_COOLDOWN_MS = 400;
+
+/**
+ * Soll beim Hochscrollen automatisch der nächste Verlaufsblock geladen werden?
+ *
+ * Bisher gab es nur einen Knopf „X ältere Nachrichten laden“ — beim Öffnen eines langen
+ * Chats sah man also die letzten 60 Nachrichten und musste für den Rest tippen
+ * (Rückmeldung 27.11.2026: „Nachrichten laden nach, die anderen egal“). Jetzt lädt die
+ * Liste nach, sobald man oben ankommt; die Höhen-Korrektur macht `ScrollPilot.beginPrepend`.
+ *
+ * Bewusst pur und ohne Timer: der Cooldown verhindert, dass ein einziger Wisch alle
+ * Stufen auf einmal zieht (die FlatList feuert `onScroll` mit 32 ms Drosselung).
+ */
+export function shouldAutoLoadOlder(s: {
+  offsetY: number;
+  hidden: number;
+  now: number;
+  last: number;
+}): boolean {
+  if (!Number.isFinite(s.offsetY) || s.offsetY >= AUTO_OLDER_TRIGGER_PX) return false;
+  if (!Number.isFinite(s.hidden) || s.hidden <= 0) return false;
+  const now = Number.isFinite(s.now) ? s.now : 0;
+  const last = Number.isFinite(s.last) ? s.last : 0;
+  return now - last >= AUTO_OLDER_COOLDOWN_MS;
+}

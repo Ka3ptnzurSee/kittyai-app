@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { CHAT_WINDOW_INIT, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice } from "./lib";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, shouldAutoLoadOlder } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -1087,6 +1087,8 @@ export default function App() {
   // bis zum ersten gemeldeten Inhalts-Layout des Chats — nur Zahlen, kein Inhalt.
   const paintStartRef = useRef<number>(0);
   const paintReportedRef = useRef<Set<string>>(new Set());
+  // Letzter automatischer Nachlade-Schritt (ms) — bremst das Nachziehen beim Hochscrollen.
+  const autoOlderRef = useRef<number>(0);
 
   // Beim Öffnen eines Chats immer ganz nach unten springen (Fokus letzte Nachricht),
   // statt erste Nachricht oder Mitte. Kleiner Timeout, damit die FlatList erst gemountet ist.
@@ -4741,6 +4743,15 @@ export default function App() {
                   height: contentSize.height,
                   viewport: layoutMeasurement.height,
                 });
+                // Oben angekommen? Dann den nächsten Verlaufsblock nachladen, statt auf den
+                // Knopf zu warten. beginPrepend merkt Höhe+Offset, damit der gelesene Text
+                // beim Einsetzen nicht springt (ScrollPilot.onContentSizeChange korrigiert).
+                const nowMs = Date.now();
+                if (shouldAutoLoadOlder({ offsetY: contentOffset.y, hidden: hiddenMessages, now: nowMs, last: autoOlderRef.current })) {
+                  autoOlderRef.current = nowMs;
+                  pilot.beginPrepend(activeChat.id);
+                  setChatWindow((w) => w + CHAT_WINDOW_STEP);
+                }
               }}
               onScrollBeginDrag={() => {
                 // Echte Geste = der Nutzer übernimmt: Stick-Modus aus und alle geplanten
