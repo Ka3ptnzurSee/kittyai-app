@@ -956,8 +956,10 @@ export default function App() {
           // als Latenz fehlgedeutet (Messfehler 26.11.). Echte Öffnungsdauer = chat_paint.
           detail: `dist=${Math.min(99999, Math.max(0, Math.round(dist)))};n=${Math.min(9999, Math.max(0, messages))}`,
         }),
-      }).then(() => {
-        scrollReportedRef.current.add(chatId);
+      }).then((res) => {
+        // Nur eine wirklich gespeicherte Meldung sperrt den Chat. Ein 500/502 heisst
+        // „nicht angekommen" — dann darf der nächste Termin es erneut versuchen.
+        if (res.ok) scrollReportedRef.current.add(chatId);
       }).catch(() => { /* Messung darf nie stören */ });
     } catch { /* ignorieren */ }
   }
@@ -1124,17 +1126,29 @@ export default function App() {
     // noch ohne Geometrie (der Server-Verlauf kommt per REST, die FlatList rendert
     // virtuell) → `dist < 0` → keine Meldung, und der Dedup-Stempel sperrte den Chat
     // für den ganzen App-Lauf. Ergebnis: keine einzige Messung über 66 Nachrichten.
-    // Jetzt wird erst nach einer erfolgreichen Meldung gesperrt, und 3,5 s später noch
-    // einmal gemessen (zeigt, ob die Liste nachzieht oder oben stehen bleibt).
+    // Gesperrt wird erst nach einer wirklich gespeicherten Meldung (res.ok).
     const openedAt = Date.now();
-    const timers = [1500, 3500].map((delay) =>
-      setTimeout(() => {
-        const dist = pilot.distanceToBottom(chatId);
-        if (dist < 0) return; // immer noch keine Scroll-Messung → später erneut
-        const c = chatsRef.current.find((x) => x.id === chatId);
-        reportScrollSettle(chatId, dist, Date.now() - openedAt, c?.messages.length ?? 0);
-      }, delay),
-    );
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    // Genau EINE Zeile pro Öffnung (sonst zählt der Report dieselbe Öffnung doppelt):
+    // reicht der Stand nach 1,5 s nicht, wird der spätere Termin nachgeholt und DANN
+    // gemeldet — der 3,5-s-Lauf ist also nur bei Bedarf aktiv, nicht parallel.
+    const messen = (delay: number, letzterVersuch: boolean) => {
+      timers.push(
+        setTimeout(() => {
+          const dist = pilot.distanceToBottom(chatId);
+          const c = chatsRef.current.find((x) => x.id === chatId);
+          const msgs = c?.messages.length ?? 0;
+          // Noch keine Scroll-Messung (grosser Chat, Verlauf laedt) oder weit weg vom Ende:
+          // spaeter erneut messen, statt eine falsche Zeile zu schreiben.
+          if (dist < 0 || (!letzterVersuch && dist > 80)) {
+            if (!letzterVersuch) messen(2000, true);
+            return;
+          }
+          reportScrollSettle(chatId, dist, Date.now() - openedAt, msgs);
+        }, delay),
+      );
+    };
+    messen(1500, false);
     return () => {
       for (const t of timers) clearTimeout(t);
       pilot.close(chatId);
@@ -4748,9 +4762,11 @@ export default function App() {
               // Charts/Formulare nicht alle gleichzeitig im Speicher landen.
               // Bei virtuell gerenderten Listen kennt scrollToEnd nur die geschaetzten
               // Hoehen der noch nicht gerenderten Bubbles und trifft das Ende nicht
-              // (Befund 27.11.: „grosse Chats landen nie unten"). Deshalb mehr sofort.
+              // (Befund 27.11.: „grosse Chats landen nie unten"). Deshalb mehr Bubbles
+              // sofort — aber der Batch bleibt klein: Build 132 starb an zu vielen
+              // gleichzeitig gerenderten DIL-WebViews, das ist nicht widerlegt.
               initialNumToRender={24}
-              maxToRenderPerBatch={16}
+              maxToRenderPerBatch={10}
               updateCellsBatchingPeriod={60}
               windowSize={11}
               style={styles.list}
