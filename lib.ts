@@ -1450,3 +1450,26 @@ export function preferServerAttachments<
     return { ...m, attachments: resolved };
   });
 }
+
+/**
+ * Entscheidung „Turn live fortsetzen statt pollen" (26.11.2026).
+ *
+ * Per: „bei rausklicken aus App immer Chat wird geladen … anstatt wirklich live
+ * verbunden". Live-Resume braucht einen Anker (turnId) und eine offene KI-Bubble;
+ * ohne Anker (fremder App-Lauf) bleibt nur das Session-Polling.
+ */
+export function shouldResumeLive(input: {
+  hasAnchorTurnId?: string;
+  hasActiveStream?: boolean;
+  hasAssistantBubble?: boolean;
+  hasUserMessage?: boolean;
+  alreadyResuming?: boolean;
+  readOnly?: boolean;
+}): boolean {
+  if (!input) return false;
+  if (input.alreadyResuming) return false;
+  if (input.hasActiveStream) return false;
+  if (input.readOnly) return false;
+  if (!String(input.hasAnchorTurnId || "").trim()) return false;
+  return !!input.hasAssistantBubble && !!input.hasUserMessage;
+}

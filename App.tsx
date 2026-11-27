@@ -44,7 +44,7 @@ import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
 import { ScrollPilot } from "./scrollPilot";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, preferServerAttachments, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, preferServerAttachments, shouldResumeLive, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilBereich, DilRichText } from "./Dil";
 import { SichererBlock } from "./SichererBlock";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
@@ -1084,6 +1084,9 @@ export default function App() {
   // Client "ich wurde selbst suspendiert" von "das Netz ist weg" unterscheiden — und
   // zeigt dann KEINE Fehlerkarte (so machen es ChatGPT und Claude auch).
   const wentBackgroundRef = useRef(false);
+  // Chats, deren Turn nach der Rückkehr in den Vordergrund LIVE fortgesetzt wird
+  // (SSE-Resume). Verhindert doppelte Streams bei schnellem App-Wechsel.
+  const liveResumeRef = useRef<Set<string>>(new Set());
   const [foregroundTick, setForegroundTick] = useState(0);
   useEffect(() => {
     const sub = AppState.addEventListener("change", (s) => {
@@ -1763,15 +1766,56 @@ export default function App() {
   // Session-Polling läuft nur für Chats, die in DIESEM Prozess als busy markiert sind
   // (nach einem Kaltstart ist das Set leer). Ergebnis: Teiltext oder leere Blase blieb
   // für immer stehen, obwohl die vollständige Antwort auf dem Server lag.
+  /**
+   * Laufenden Turn LIVE wieder verbinden statt zu pollen (26.11.2026).
+   *
+   * Befund: bei jeder Rückkehr aus dem Hintergrund setzte syncChatFromServer nur busy,
+   * danach pollte die App alle 3 s die Session und zeigte "Antwort wird geladen …" —
+   * der Chat wirkte wie neu geladen statt live verbunden. Mit dem Resume-Anker
+   * (turnId + lastSeq) setzt der SSE-Stream an der letzten Sequenznummer fort: Text,
+   * Werkzeug-Zeilen und Status kommen direkt, ohne Lade-Meldungen.
+   */
+  async function resumeLiveTurn(chatId: string): Promise<boolean> {
+    const st = streamStateRef.current[chatId];
+    const chat = chatsRef.current.find((c) => c.id === chatId);
+    if (!chat || chat.readOnly || chat.remote) return false;
+    const aiMsg = [...chat.messages].reverse().find((m) => m.role === "assistant" && m.turnId && !m.error);
+    const userMsg = [...chat.messages].reverse().find((m) => m.role === "user");
+    const erlaubt = shouldResumeLive({
+      hasAnchorTurnId: st?.turnId,
+      hasActiveStream: abortControllersRef.current.has(chatId),
+      hasAssistantBubble: !!aiMsg,
+      hasUserMessage: !!userMsg,
+      alreadyResuming: liveResumeRef.current.has(chatId),
+      readOnly: !!chat.readOnly,
+    });
+    if (!erlaubt || !st || !aiMsg || !userMsg) return false;
+    liveResumeRef.current.add(chatId);
+    setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
+    try {
+      await streamChat(userMsg.text, chatId, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId);
+      markBusy(chatId, false);
+      return true;
+    } catch {
+      // Turn serverseitig vorbei/aufgeräumt: nichts anzeigen, der Poller/Sync holt die
+      // Session. Eine Fehlerkarte wäre hier falsch (es ist kein echter Fehler).
+      return false;
+    } finally {
+      liveResumeRef.current.delete(chatId);
+    }
+  }
+
   async function syncChatFromServer(chatId: string): Promise<void> {
     if (abortControllersRef.current.has(chatId)) return; // eigener Stream läuft bereits
     if (abgleichGeprueftRef.current.has(chatId)) return; // in diesem Lauf schon geprüft
     abgleichGeprueftRef.current.add(chatId);
     const state = await fetchTurnState(chatId);
     if (state?.running) {
-      // Turn läuft noch → Busy setzen, das Session-Polling holt die Antwort, sobald fertig.
       abgleichGeprueftRef.current.delete(chatId); // nach dem Turn erneut prüfen dürfen
       markBusy(chatId, true);
+      // Erst LIVE fortsetzen (Resume-Anker vorhanden): kein Laden, kein Pollen.
+      if (await resumeLiveTurn(chatId)) return;
+      // Kein Anker (fremder App-Lauf) → das Session-Polling holt die Antwort, sobald fertig.
       return;
     }
     // Fertig: /api/session ist die Wahrheit (hängt die Antwort an, heilt gekappte Blasen,
@@ -2466,6 +2510,15 @@ export default function App() {
     timer = setTimeout(poll, 3000);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [activeChatId, busyChatIds, serverUrl, foregroundTick]);
+
+  // Rückkehr in den Vordergrund: laufende Turns LIVE fortsetzen (26.11.2026).
+  // Ohne das setzte nur syncChatFromServer busy und der 3-s-Poller zeigte
+  // "Antwort wird geladen …" — der Chat wirkte neu geladen statt live verbunden.
+  useEffect(() => {
+    if (!loadedRef.current || foregroundTick === 0) return;
+    for (const id of busyChatIds) void resumeLiveTurn(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [foregroundTick]);
 
   // Beim Öffnen eines lokal vorliegenden Chats UND bei jeder Rückkehr in den Vordergrund
   // einmal abgleichen: nur so kommt eine Antwort an, die fertig wurde, während der Chat
@@ -3452,9 +3505,10 @@ export default function App() {
         // Der Server-Turn läuft weiter. KEIN Fehler, KEIN Retry-Sturm — beim
         // Zurückkehren lädt der Vordergrund-Sync die Antwort per REST nach.
         turnStillRunning = true;
-        // Kein "Verbindung neu aufbauen"-Text mehr: der Nutzer sieht beim Zurückkehren
-        // nur noch einen ruhigen Ladehinweis, der verschwindet, sobald die Antwort da ist.
-        setStatusByChat((prev) => ({ ...prev, [chatId]: "Antwort wird geladen …" }));
+        // KEINE Lade-Meldung: beim Zurückkehren setzt resumeLiveTurn (SSE-Resume ab
+        // lastSeq) den Turn live fort — der Chat ist sofort wieder verbunden statt
+        // "Antwort wird geladen …" zu zeigen (Per, 26.11.2026).
+        setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
         return;
       }
       if (e instanceof StreamInterrupted) {
