@@ -341,15 +341,45 @@ test("ScrollPilot: mehrere Höhenänderungen im selben Tick = EIN Sprung (Single
   assert.strictEqual(ends() - before, 1, "drei Änderungen, aber nur ein scrollToEnd");
 });
 
-test("hasUserScrolled: beim Oeffnen false, nach einer Geste true, neuer Chat wieder false", () => {
+test("hasUserScrolled: erst gemessene Aufwaertsbewegung gibt frei, Beruehrung allein nicht", () => {
   const { pilot } = makePilot();
   pilot.open("c1");
-  // Kern des Fixes (27.11.): direkt nach dem Oeffnen darf NICHT nachgeladen werden,
-  // auch wenn der Stick-Modus durch die kleinste Beruehrung schon beendet wurde.
+  pilot.onScroll("c1", GEO(500, 4000));
+  pilot.drag("c1"); // onScrollBeginDrag feuert schon beim Antippen
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false, "blosse Beruehrung gibt NICHT frei");
+  // nach unten gewischt = kein Verlaufs-Interesse
+  pilot.onScroll("c1", GEO(560, 4000));
   assert.strictEqual(pilot.hasUserScrolled("c1"), false);
-  pilot.drag("c1");
+  // 20 pt nach oben (Start war 500): noch unter der Schwelle
+  pilot.onScroll("c1", GEO(480, 4000));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+  // 24 pt nach oben: frei
+  pilot.onScroll("c1", GEO(476, 4000));
   assert.strictEqual(pilot.hasUserScrolled("c1"), true);
+  // neuer Chat erbt das Flag nicht, alter wird vergessen
   pilot.open("c2");
-  assert.strictEqual(pilot.hasUserScrolled("c2"), false, "neuer Chat erbt das Flag nicht");
-  assert.strictEqual(pilot.hasUserScrolled("c1"), false, "alter Chat wird vergessen");
+  assert.strictEqual(pilot.hasUserScrolled("c2"), false);
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+});
+
+test("hasUserScrolled: am Listenanfang (offsetY=0) zaehlt der iOS-Ueberscroll als Aufwaertsbewegung", () => {
+  const { pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(0, 4000));
+  pilot.drag("c1");
+  pilot.onScroll("c1", GEO(-10, 4000)); // Bounce, noch unter der Schwelle
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+  pilot.onScroll("c1", GEO(-30, 4000));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), true);
+});
+
+test("hasUserScrolled: close() raeumt das Flag auf", () => {
+  const { pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(500, 4000));
+  pilot.drag("c1");
+  pilot.onScroll("c1", GEO(400, 4000));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), true);
+  pilot.close("c1");
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
 });

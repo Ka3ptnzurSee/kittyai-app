@@ -63,6 +63,12 @@ export function chatScrollPlan(s: {
 export const SETTLE_JUMP_DELAYS_MS: readonly number[] = [0, 120, 500];
 /** Notanker: ohne Finger-Geste endet der Stick-Modus spätestens hier. */
 export const STICK_MAX_MS = 8000;
+/**
+ * Ab dieser selbst gemessenen Aufwärtsbewegung (pt) gilt „der Nutzer scrollt zum Verlauf“.
+ * Kleiner Wert = zu großzügig (Antippen lädt nach), größer = der erste echte Wisch fühlt
+ * sich tot an. 24 pt liegt über dem iOS-Touch-Slop und unter einer halben Zeilenhöhe.
+ */
+export const SCROLL_INTENT_MIN_PX = 24;
 /** So lange gelten onScroll-Messwerte nach einem programmatischen Sprung als Zwischenstand. */
 export const MEASURE_SUPPRESS_MS = 120;
 /** Sammel-Fenster für Höhenänderungen beim Streamen (nicht bei jedem Delta springen). */
@@ -103,6 +109,8 @@ export class ScrollPilot {
   private sticky = new Set<string>();
   /** Chats, in denen der Nutzer seit dem Öffnen selbst gescrollt hat (nur die dürfen nachladen). */
   private dragged = new Set<string>();
+  /** Offset beim Beginn der laufenden Geste (nur für die Intent-Erkennung). */
+  private dragStart = new Map<string, number>();
   private near = new Map<string, boolean>();
   private autoScrollUntil = 0;
   private timers = new Set<number>();
@@ -167,6 +175,7 @@ export class ScrollPilot {
     this.sticky.clear();
     this.sticky.add(chatId);
     this.dragged.clear();
+    this.dragStart.clear();
     this.near.set(chatId, true);
     this.prepend.delete(chatId);
     for (const ms of SETTLE_JUMP_DELAYS_MS) this.scheduleJump(chatId, ms);
@@ -184,6 +193,7 @@ export class ScrollPilot {
     if (target) {
       this.sticky.delete(target);
       this.dragged.delete(target);
+      this.dragStart.delete(target);
       this.geo.delete(target);
       this.near.delete(target);
       this.prepend.delete(target);
@@ -197,17 +207,22 @@ export class ScrollPilot {
     this.sticky.delete(chatId);
     // Ein vorbereiteter Prepend-Hinweis darf eine spätere, echte Geste nicht verschieben.
     this.prepend.delete(chatId);
-    // Ab jetzt hat der Nutzer diesen Chat selbst bewegt (= darf nachladen).
-    this.dragged.add(chatId);
+    // Ausgangspunkt merken — „gescrollt“ entscheidet erst die GEMESSENE Bewegung
+    // (Review Runde 5: onScrollBeginDrag feuert schon bei der kleinsten Berührung).
+    const g = this.geo.get(chatId);
+    if (g) this.dragStart.set(chatId, g.offsetY);
+    else this.dragStart.delete(chatId);
   }
 
   /**
-   * Hat der Nutzer diesen Chat seit dem Öffnen selbst gescrollt?
+   * Hat der Nutzer diesen Chat seit dem Öffnen selbst nach oben gescrollt?
    *
    * Der automatische Nachlade-Pfad prüft das zusätzlich zum Stick-Modus (Befund 27.11.:
-   * „beim Klick lädt es nach“). Ohne diese Sperre genügte die kleinste Berührung, um den
-   * Stick-Modus zu beenden — danach stand die Liste bei offsetY≈0, `shouldAutoLoadOlder`
-   * griff und die App lud 60 ältere Nachrichten, obwohl der Nutzer nur tippen wollte.
+   * „beim Klick lädt es nach“). Eine blosse Berührung genügt NICHT: `onScrollBeginDrag`
+   * feuert auch beim Antippen und beendet den Stick-Modus — danach stand die Liste bei
+   * `offsetY≈0` und `shouldAutoLoadOlder` lud 60 ältere Nachrichten nach. Freigegeben wird
+   * deshalb erst bei einer gemessenen Bewegung von mindestens `SCROLL_INTENT_MIN_PX`
+   * nach oben (bei `offsetY === 0` fängt das den iOS-Überscroll/Bounce mit negativen Werten).
    */
   hasUserScrolled(chatId: string): boolean {
     return this.dragged.has(chatId);
@@ -219,6 +234,12 @@ export class ScrollPilot {
    */
   onScroll(chatId: string, g: ScrollGeometry): boolean {
     this.geo.set(chatId, g);
+    // Gemessene Aufwärtsbewegung = der Nutzer will ältere Nachrichten sehen.
+    const start = this.dragStart.get(chatId);
+    if (start !== undefined && g.offsetY <= start - SCROLL_INTENT_MIN_PX) {
+      this.dragged.add(chatId);
+      this.dragStart.delete(chatId);
+    }
     const plan = this.plan(chatId, g);
     if (!plan.measure) return false;
     const dist = g.height - (g.offsetY + g.viewport);
