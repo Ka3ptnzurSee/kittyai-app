@@ -1377,7 +1377,24 @@ export function shouldAutoLoadOlder(s: {
  * 360 Bubbles wären beim Hochscrollen verschwunden, ein harter Sprung im Verlauf.
  */
 export function nextAutoWindow(window: number): number {
-  const w = Number.isFinite(window) ? Math.max(0, Math.floor(window)) : CHAT_WINDOW_INIT;
+  const w = Number.isFinite(window) ? Math.floor(window) : CHAT_WINDOW_INIT;
+  // `window <= 0` heißt in chatWindowSlice/chatWindowHidden „alles rendern“ — nicht anfassen,
+  // sonst würde der Auto-Pfad dieses Fenster auf 60 „senken“ (Review Runde 3).
+  if (w <= 0) return w;
   if (w >= CHAT_WINDOW_MAX) return w;
   return Math.min(w + CHAT_WINDOW_STEP, CHAT_WINDOW_MAX);
+}
+
+/**
+ * Nächstes Fenster nach einem Tipp auf „ältere Nachrichten laden“.
+ *
+ * Wie nextAutoWindow ungedeckelt nach oben (der Nutzer entscheidet), aber nie über die
+ * tatsächliche Verlaufslänge hinaus (Review Runde 2/3) und nie kleiner als vorher.
+ */
+export function nextManualWindow(window: number, total: number): number {
+  const w = Number.isFinite(window) ? Math.floor(window) : CHAT_WINDOW_INIT;
+  const len = Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0;
+  if (len <= 0) return w;
+  if (w >= len) return w;
+  return Math.min(w + CHAT_WINDOW_STEP, len);
 }

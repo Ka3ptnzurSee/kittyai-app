@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, nextAutoWindow, shouldAutoLoadOlder } from "./lib";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, nextAutoWindow, nextManualWindow, shouldAutoLoadOlder } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -974,7 +974,7 @@ export default function App() {
           source: "chat",
           phase: "open",
           appVersion: APP_VERSION,
-          detail: `ms=${Math.min(99999, Math.max(0, Math.round(Number(ms) || 0)))};n=${Math.min(9999, Math.max(0, Math.round(Number(visible) || 0)))};hidden=${Math.min(9999, Math.max(0, Math.round(Number(hidden) || 0)))}`,
+          detail: `ms=${Math.min(999999, Math.max(0, Math.round(Number(ms) || 0)))};n=${Math.min(999999, Math.max(0, Math.round(Number(visible) || 0)))};hidden=${Math.min(999999, Math.max(0, Math.round(Number(hidden) || 0)))}`,
         }),
       }).catch(() => { /* Messung darf nie stören */ });
     } catch { /* ignorieren */ }
@@ -4710,7 +4710,12 @@ export default function App() {
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`${hiddenMessages} ältere Nachrichten laden`}
-                    onPress={() => setChatWindow((w) => Math.min(w + CHAT_WINDOW_STEP, activeChat.messages.length))}
+                    onPress={() => {
+                      // Wie der Auto-Pfad: Höhe+Offset merken, sonst springt der gelesene
+                      // Text um die Höhe der einsetzenden 60 Bubbles (Review Runde 3).
+                      pilot.beginPrepend(activeChat.id);
+                      setChatWindow((w) => nextManualWindow(w, activeChat.messages.length));
+                    }}
                     style={styles.loadOlder}
                   >
                     <Text style={styles.loadOlderText}>

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts, shouldAutoLoadOlder, nextAutoWindow, CHAT_WINDOW_MAX, CHAT_WINDOW_INIT } from "../lib.ts";
+import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts, shouldAutoLoadOlder, nextAutoWindow, nextManualWindow, CHAT_WINDOW_MAX, CHAT_WINDOW_INIT, chatWindowSlice, chatWindowHidden } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -916,7 +916,38 @@ test("nextAutoWindow: deckelt nach oben, senkt aber nie ein groesseres Fenster",
   // Review HIGH Runde 2: 600 (manuell geladen) darf NICHT auf 240 zurückfallen
   assert.strictEqual(nextAutoWindow(600), 600);
   assert.strictEqual(nextAutoWindow(1000), 1000);
-  // kaputte Werte: starten beim Initialfenster statt NaN zu produzieren
+  // kaputte Werte: NaN startet beim Initialfenster; <=0 heißt „alles rendern“ und bleibt
   assert.strictEqual(nextAutoWindow(NaN), CHAT_WINDOW_INIT + 60);
-  assert.strictEqual(nextAutoWindow(-5), 60);
+  assert.strictEqual(nextAutoWindow(0), 0);
+  assert.strictEqual(nextAutoWindow(-5), -5);
+});
+
+test("Auto-Loop konvergiert: wiederholtes nextAutoWindow endet bei MAX und bleibt dort", () => {
+  let w = CHAT_WINDOW_INIT;
+  for (let i = 0; i < 20; i++) w = nextAutoWindow(w);
+  assert.strictEqual(w, CHAT_WINDOW_MAX);
+  // Guard sperrt genau dann: kein Endlos-Armieren von beginPrepend am Deckel
+  const at = { offsetY: 0, hidden: 900, now: 60_000, last: 0 } as const;
+  assert.strictEqual(shouldAutoLoadOlder({ ...at, window: w }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ ...at, window: CHAT_WINDOW_MAX - 1 }), true);
+});
+
+test("nextManualWindow: nie ueber die Verlaufslaenge, nie kleiner, deckellos nach oben", () => {
+  assert.strictEqual(nextManualWindow(60, 1000), 120);
+  assert.strictEqual(nextManualWindow(240, 1000), 300);   // Knopf darf ueber MAX
+  assert.strictEqual(nextManualWindow(960, 1000), 1000);  // letzte Stufe genau auf len
+  assert.strictEqual(nextManualWindow(1000, 1000), 1000);  // nie ueber len
+  assert.strictEqual(nextManualWindow(600, 100), 600);     // nie kleiner (kein Sprung)
+  assert.strictEqual(nextManualWindow(60, 0), 60);         // leerer Verlauf: unveraendert
+  assert.strictEqual(nextManualWindow(NaN, 500), 120);
+  assert.strictEqual(nextManualWindow(60, NaN), 60);
+});
+
+test("chatWindowSlice/Hidden: window<=0 rendert alles, hidden gated das Nachladen", () => {
+  const msgs = Array.from({ length: 300 }, (_, i) => i);
+  assert.strictEqual(chatWindowSlice(msgs, 0).length, 300);
+  assert.strictEqual(chatWindowHidden(msgs, 0), 0);
+  assert.strictEqual(chatWindowSlice(msgs, 60).length, 60);
+  assert.strictEqual(chatWindowHidden(msgs, 60), 240);
+  assert.strictEqual(chatWindowHidden(msgs, 300), 0);
 });
