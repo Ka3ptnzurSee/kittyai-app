@@ -101,6 +101,8 @@ export type ScrollGeometry = { offsetY: number; height: number; viewport: number
 export class ScrollPilot {
   private deps: PilotDeps;
   private sticky = new Set<string>();
+  /** Chats, in denen der Nutzer seit dem Öffnen selbst gescrollt hat (nur die dürfen nachladen). */
+  private dragged = new Set<string>();
   private near = new Map<string, boolean>();
   private autoScrollUntil = 0;
   private timers = new Set<number>();
@@ -164,6 +166,7 @@ export class ScrollPilot {
     // bleiben Chat-IDs dauerhaft im Set (Leak) und ein späterer Chat-Wechsel erbt sie.
     this.sticky.clear();
     this.sticky.add(chatId);
+    this.dragged.clear();
     this.near.set(chatId, true);
     this.prepend.delete(chatId);
     for (const ms of SETTLE_JUMP_DELAYS_MS) this.scheduleJump(chatId, ms);
@@ -180,6 +183,7 @@ export class ScrollPilot {
     const target = chatId || this.openChat;
     if (target) {
       this.sticky.delete(target);
+      this.dragged.delete(target);
       this.geo.delete(target);
       this.near.delete(target);
       this.prepend.delete(target);
@@ -193,6 +197,20 @@ export class ScrollPilot {
     this.sticky.delete(chatId);
     // Ein vorbereiteter Prepend-Hinweis darf eine spätere, echte Geste nicht verschieben.
     this.prepend.delete(chatId);
+    // Ab jetzt hat der Nutzer diesen Chat selbst bewegt (= darf nachladen).
+    this.dragged.add(chatId);
+  }
+
+  /**
+   * Hat der Nutzer diesen Chat seit dem Öffnen selbst gescrollt?
+   *
+   * Der automatische Nachlade-Pfad prüft das zusätzlich zum Stick-Modus (Befund 27.11.:
+   * „beim Klick lädt es nach“). Ohne diese Sperre genügte die kleinste Berührung, um den
+   * Stick-Modus zu beenden — danach stand die Liste bei offsetY≈0, `shouldAutoLoadOlder`
+   * griff und die App lud 60 ältere Nachrichten, obwohl der Nutzer nur tippen wollte.
+   */
+  hasUserScrolled(chatId: string): boolean {
+    return this.dragged.has(chatId);
   }
 
   /**

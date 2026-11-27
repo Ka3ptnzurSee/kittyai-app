@@ -340,3 +340,16 @@ test("ScrollPilot: mehrere Höhenänderungen im selben Tick = EIN Sprung (Single
   clock.advance(16);
   assert.strictEqual(ends() - before, 1, "drei Änderungen, aber nur ein scrollToEnd");
 });
+
+test("hasUserScrolled: beim Oeffnen false, nach einer Geste true, neuer Chat wieder false", () => {
+  const { pilot } = makePilot();
+  pilot.open("c1");
+  // Kern des Fixes (27.11.): direkt nach dem Oeffnen darf NICHT nachgeladen werden,
+  // auch wenn der Stick-Modus durch die kleinste Beruehrung schon beendet wurde.
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+  pilot.drag("c1");
+  assert.strictEqual(pilot.hasUserScrolled("c1"), true);
+  pilot.open("c2");
+  assert.strictEqual(pilot.hasUserScrolled("c2"), false, "neuer Chat erbt das Flag nicht");
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false, "alter Chat wird vergessen");
+});

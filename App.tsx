@@ -4759,6 +4759,7 @@ export default function App() {
                 const nowMs = Date.now();
                 if (
                   !pilot.isSticking(activeChat.id) &&
+                  pilot.hasUserScrolled(activeChat.id) &&
                   shouldAutoLoadOlder({
                     offsetY: contentOffset.y,
                     hidden: hiddenMessages,
