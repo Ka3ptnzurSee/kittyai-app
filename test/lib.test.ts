@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
+import { isGeneratedFileHref, fileExtOf, isFallbackReply, mirrorOffset } from "../lib.ts";
 import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts, shouldAutoLoadOlder, nextAutoWindow, nextManualWindow, CHAT_WINDOW_MAX, CHAT_WINDOW_INIT, chatWindowSlice, chatWindowHidden } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
@@ -950,4 +950,24 @@ test("chatWindowSlice/Hidden: window<=0 rendert alles, hidden gated das Nachlade
   assert.strictEqual(chatWindowSlice(msgs, 60).length, 60);
   assert.strictEqual(chatWindowHidden(msgs, 60), 240);
   assert.strictEqual(chatWindowHidden(msgs, 300), 0);
+});
+
+test("mirrorOffset: bildet zwischen invertierter und normaler Liste ab und ist selbstinvers", () => {
+  assert.strictEqual(mirrorOffset(20000, 0), 20000, "invertiert: 0 = Ende → normal: max");
+  assert.strictEqual(mirrorOffset(20000, 20000), 0, "invertiert: max = oberer Rand → normal: 0");
+  assert.strictEqual(mirrorOffset(20000, 800), 19200);
+  for (const max of [0, 1, 733, 20000]) {
+    for (const y of [0, 1, 500, max]) {
+      assert.strictEqual(mirrorOffset(max, mirrorOffset(max, y)), Math.min(max, Math.max(0, y)), "zweimal spiegeln = Identitaet");
+      assert.ok(mirrorOffset(max, y) >= 0 && mirrorOffset(max, y) <= max, "bleibt im Bereich");
+    }
+  }
+});
+
+test("mirrorOffset: unplausible Werte klemmen statt NaN zu liefern", () => {
+  assert.strictEqual(mirrorOffset(Number.NaN, 5), 0);
+  assert.strictEqual(mirrorOffset(-100, 5), 0);
+  assert.strictEqual(mirrorOffset(1000, Number.NaN), 1000);
+  assert.strictEqual(mirrorOffset(1000, -50), 1000, "negativer Overscroll klemmt auf 0");
+  assert.strictEqual(mirrorOffset(1000, 99999), 0);
 });

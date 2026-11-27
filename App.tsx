@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, nextAutoWindow, nextManualWindow, shouldAutoLoadOlder } from "./lib";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, mirrorOffset, nextAutoWindow, nextManualWindow, shouldAutoLoadOlder } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -890,6 +890,12 @@ export default function App() {
   const streamStateRef = useRef<Record<string, { turnId: string; lastSeq: number; clientMessageId?: string }>>({});
   const tasksAbortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<Msg>>(null);
+  // Die Chatliste ist `inverted` (0 = neueste Nachricht unten). Der Pilot rechnet in
+  // normalen Listen-Koordinaten; diese Ref haelt den aktuellen Maximal-Offset, damit
+  // beide Welten uebersetzt werden koennen (mirrorOffset in lib.ts).
+  const maxScrollRef = useRef(0);
+  /** Zuletzt gemessene Hoehe des sichtbaren Ausschnitts (onLayout der Chatliste). */
+  const viewportRef = useRef(0);
   // Drossel fuer den Server-Session-Sync: ohne sie loeste jede busyChatIds-Aenderung
   // einen 21-26-KB-GET aus (gemessen: bis 53 Requests pro Minute von einem Geraet).
   const lastSessionFetchRef = useRef<Map<string, number>>(new Map());
@@ -900,8 +906,10 @@ export default function App() {
   const pilotRef = useRef<ScrollPilot | null>(null);
   if (!pilotRef.current) {
     pilotRef.current = new ScrollPilot({
-      scrollToEnd: () => listRef.current?.scrollToEnd({ animated: false }),
-      scrollToOffset: (y: number) => listRef.current?.scrollToOffset({ offset: y, animated: false }),
+      // Ende = Offset 0 (inverted). Kein scrollToEnd(): das rechnet mit geschaetzten
+      // Zellhoehen und verfehlt bei langen Verlaegen das Ende (Befund 27.11.2026).
+      scrollToEnd: () => listRef.current?.scrollToOffset({ offset: 0, animated: false }),
+      scrollToOffset: (y: number) => listRef.current?.scrollToOffset({ offset: mirrorOffset(maxScrollRef.current, y), animated: false }),
     });
   }
   const pilot = pilotRef.current;
@@ -1088,6 +1096,8 @@ export default function App() {
     [activeChat, chatWindow],
   );
   const hiddenMessages = activeChat ? chatWindowHidden(activeChat.messages, chatWindow) : 0;
+  // inverted-Liste: neueste Nachricht ist Index 0 → steht ohne Scrollen unten.
+  const listData = useMemo(() => visibleMessages.slice().reverse(), [visibleMessages]);
   // Echtes Paint-Mass (Ersatz für das alte, konstante 1,5-s-Fenster): Zeit vom Öffnen
   // bis zum ersten gemeldeten Inhalts-Layout des Chats — nur Zahlen, kein Inhalt.
   const paintStartRef = useRef<number>(0);
@@ -4726,13 +4736,18 @@ export default function App() {
             {/* Kein maintainVisibleContentPosition mehr: es hielt den Offset beim Nachrendern
                 fest und arbeitete damit gegen das „ans Ende springen" (Befund 26.11.2026). */}
             <FlatList ref={listRef}
-              onLayout={(e) => pilot.setViewport(activeChat.id, e.nativeEvent.layout.height)}
-              data={visibleMessages}
+              onLayout={(e) => {
+                const vp = e.nativeEvent.layout.height;
+                viewportRef.current = vp;
+                pilot.setViewport(activeChat.id, vp);
+              }}
+              data={listData}
+              inverted
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               refreshControl={<PullToRefresh refreshing={refreshingChat} onRefresh={() => { void refreshActiveChat(); }} />}
               keyExtractor={(m) => m.id}
-              ListHeaderComponent={
+              ListFooterComponent={
                 hiddenMessages > 0 ? (
                   <Pressable
                     accessibilityRole="button"
@@ -4761,25 +4776,30 @@ export default function App() {
               // 31 DIL-Blöcken und einer KaTeX-WebView ohne JS-Fehler — also nativ.
               // RN-Defaults rendern 10 + 10 pro Batch; hier bewusst kleiner, damit die
               // Charts/Formulare nicht alle gleichzeitig im Speicher landen.
-              // Bei virtuell gerenderten Listen kennt scrollToEnd nur die geschaetzten
-              // Hoehen der noch nicht gerenderten Bubbles und trifft das Ende nicht
-              // (Befund 27.11.: „grosse Chats landen nie unten"). Deshalb mehr Bubbles
-              // sofort — aber der Batch bleibt klein: Build 132 starb an zu vielen
-              // gleichzeitig gerenderten DIL-WebViews, das ist nicht widerlegt.
+              // Invertiert: die ersten 24 Eintraege sind die NEUESTEN — sie stehen sofort
+              // unten, ohne dass gescrollt werden muss. Aeltere ruecken oben nach (unsichtbar).
+              // Der Batch bleibt klein: Build 132 starb an zu vielen gleichzeitig
+              // gerenderten DIL-WebViews, das ist nicht widerlegt.
               initialNumToRender={24}
               maxToRenderPerBatch={10}
               updateCellsBatchingPeriod={60}
               windowSize={11}
               style={styles.list}
-              contentContainerStyle={styles.listContent}
+              contentContainerStyle={styles.listContentInverted}
               // Cleaner Look (wie ChatGPT/Claude): der Balken blitzte bei jedem Öffnen auf,
               // weil der Initial-Sprung ihn einblendet — in der Unterhaltung stört er nur.
               showsVerticalScrollIndicator={false}
               onScroll={(e) => {
                 const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+                // inverted: contentOffset.y = 0 ist das Ende. Der Pilot denkt in normalen
+                // Listen-Koordinaten (0 = oben) — deshalb spiegeln, sonst meldet jede
+                // Messung „unten" als „oben" und der Auto-Nachlade-Pfad feuert falsch.
+                const max = Math.max(0, contentSize.height - layoutMeasurement.height);
+                maxScrollRef.current = max;
+                const logical = mirrorOffset(max, contentOffset.y);
                 // Messwerte während eines Sprungs/Stick-Modus verwirft der Pilot selbst.
                 pilot.onScroll(activeChat.id, {
-                  offsetY: contentOffset.y,
+                  offsetY: logical,
                   height: contentSize.height,
                   viewport: layoutMeasurement.height,
                 });
@@ -4793,7 +4813,7 @@ export default function App() {
                   !pilot.isSticking(activeChat.id) &&
                   pilot.hasUserScrolled(activeChat.id) &&
                   shouldAutoLoadOlder({
-                    offsetY: contentOffset.y,
+                    offsetY: logical,
                     hidden: hiddenMessages,
                     now: nowMs,
                     last: autoOlderRef.current,
@@ -4824,6 +4844,10 @@ export default function App() {
               onContentSizeChange={(_w, h) => {
                 // Höhe geändert (Batch nachgerendert, Server-Verlauf, Bild/DIL-Layout):
                 // der Pilot entscheidet kleben / 40-ms-Sprung / Prepend-Offset / nichts.
+                // maxScrollRef mitfuehren: sonst rechnet die Offset-Uebersetzung der
+                // invertierten Liste (mirrorOffset) mit einem veralteten Maximum, sobald
+                // die Hoehe waechst (Nachladen, Bilder, DIL) — der Sprung landete daneben.
+                maxScrollRef.current = Math.max(0, h - viewportRef.current);
                 pilot.onContentSizeChange(activeChat.id, h);
                 // Erstes Layout nach dem Öffnen = fertig gezeichnet: echte Millisekunden
                 // melden (das alte scroll_settle-ms war ein fester 1,5-s-Timer und damit
@@ -4850,7 +4874,9 @@ export default function App() {
                   </View>
                 </View>
               }
-              ListFooterComponent={
+              // inverted: der Header steht visuell UNTEN — genau richtig fuer den
+              // Denk-/Statusblock unter der letzten Nachricht.
+              ListHeaderComponent={
                 isThisChatBusy ? (
                   thisThinking ? (
                     <ThinkingBlock text={thisThinking} />
@@ -5485,6 +5511,9 @@ const styles = StyleSheet.create({
   },
   loadOlderText: { fontSize: 13, color: colors.muted, textAlign: "center" },
   listContent: { padding: 12, paddingBottom: 16 },
+  // inverted-Liste: der Inhalt ist gespiegelt, deshalb liegt der Abstand unter der
+  // letzten Nachricht hier oben (paddingTop) statt unten.
+  listContentInverted: { padding: 12, paddingTop: 16 },
   // overflow:hidden ist der letzte Schutz: ein Kind mit zu großer intrinsischer Breite
   // (langer unbrechbarer String in einem Widget) darf nicht mehr aus der Blase malen.
   bubble: { maxWidth: "86%", padding: 12, borderRadius: 18, marginBottom: 8, overflow: "hidden" },

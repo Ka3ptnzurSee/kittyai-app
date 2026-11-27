@@ -1325,6 +1325,19 @@ export function chatWindowSlice<T>(messages: T[], window: number): T[] {
   return messages.slice(messages.length - n);
 }
 
+/**
+ * Spiegelung zwischen zwei Offset-Welten (Befund 27.11.2026, „letzte Nachricht nicht
+ * direkt da"): Die Chatliste rendert `inverted` — dort ist `contentOffset.y = 0` das
+ * ENDE (neueste Nachricht), und RN muss dafür gar nicht scrollen. Der ScrollPilot rechnet
+ * dagegen in einer normalen Liste (`0` = oberer Rand, `maxScroll` = unten).
+ * Die Abbildung ist selbstinvers: `mirrorOffset(max, 0) === max`, `mirrorOffset(max, max) === 0`.
+ */
+export function mirrorOffset(maxScroll: number, y: number): number {
+  const m = Number.isFinite(maxScroll) ? Math.max(0, maxScroll) : 0;
+  const v = Number.isFinite(y) ? y : 0;
+  return m - Math.max(0, Math.min(m, v));
+}
+
 /** Wie viele Nachrichten liegen oberhalb des Render-Fensters? */
 export function chatWindowHidden<T>(messages: T[], window: number): number {
   if (!Array.isArray(messages)) return 0;
