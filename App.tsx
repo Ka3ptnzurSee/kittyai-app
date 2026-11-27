@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { CHAT_WINDOW_INIT, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, shouldAutoLoadOlder } from "./lib";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, shouldAutoLoadOlder } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -974,7 +974,7 @@ export default function App() {
           source: "chat",
           phase: "open",
           appVersion: APP_VERSION,
-          detail: `ms=${Math.min(99999, Math.max(0, Math.round(ms)))};n=${visible};hidden=${hidden}`,
+          detail: `ms=${Math.min(99999, Math.max(0, Math.round(Number(ms) || 0)))};n=${Math.min(9999, Math.max(0, Math.round(Number(visible) || 0)))};hidden=${Math.min(9999, Math.max(0, Math.round(Number(hidden) || 0)))}`,
         }),
       }).catch(() => { /* Messung darf nie stören */ });
     } catch { /* ignorieren */ }
@@ -1107,6 +1107,9 @@ export default function App() {
     }
     const chatId = activeChatId;
     setChatWindow(CHAT_WINDOW_INIT);
+    // Cooldown des VORCHATS zurücksetzen: sonst blockte dessen letzter Auto-Load
+    // den ersten Nachlade-Schritt im neuen Chat bis zu 400 ms (Review 27.11.).
+    autoOlderRef.current = 0;
     paintStartRef.current = Date.now();
     // Stick-Modus: jede Höhenänderung zieht nach unten, bis eine echte Geste kommt
     // (oder der 8-s-Notanker greift). Ersetzt die drei festen Sprünge von vorher.
@@ -4743,14 +4746,24 @@ export default function App() {
                   height: contentSize.height,
                   viewport: layoutMeasurement.height,
                 });
-                // Oben angekommen? Dann den nächsten Verlaufsblock nachladen, statt auf den
-                // Knopf zu warten. beginPrepend merkt Höhe+Offset, damit der gelesene Text
-                // beim Einsetzen nicht springt (ScrollPilot.onContentSizeChange korrigiert).
+                // Oben angekommen und NICHT im Stick-Modus? Dann den nächsten Verlaufsblock
+                // nachladen, statt auf den Knopf zu warten. Der Stick-Guard ist Pflicht:
+                // direkt nach pilot.open() steht die Liste bei offsetY≈0 (erster Sprung kommt
+                // erst bei 0/120/500 ms) — ohne Guard lud das Öffnen selbst 1–2 Stufen nach,
+                // genau die Speicherspitze aus Build 132 (Review HIGH, 27.11.).
                 const nowMs = Date.now();
-                if (shouldAutoLoadOlder({ offsetY: contentOffset.y, hidden: hiddenMessages, now: nowMs, last: autoOlderRef.current })) {
+                if (
+                  !pilot.isSticking(activeChat.id) &&
+                  shouldAutoLoadOlder({ offsetY: contentOffset.y, hidden: hiddenMessages, now: nowMs, last: autoOlderRef.current })
+                ) {
                   autoOlderRef.current = nowMs;
+                  // beginPrepend merkt Höhe+Offset, damit der gelesene Text beim Einsetzen
+                  // nicht springt (ScrollPilot.onContentSizeChange korrigiert).
                   pilot.beginPrepend(activeChat.id);
-                  setChatWindow((w) => w + CHAT_WINDOW_STEP);
+                  // Deckel: automatisch höchstens bis CHAT_WINDOW_MAX laden. Alles darüber
+                  // nur per Knopf — sonst zieht ein einziger Wisch den ganzen Verlauf in die
+                  // FlatList (OOM-Risiko bei 1000+-Nachrichten, Review HIGH).
+                  setChatWindow((w) => Math.min(w + CHAT_WINDOW_STEP, CHAT_WINDOW_MAX));
                 }
               }}
               onScrollBeginDrag={() => {

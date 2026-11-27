@@ -1308,6 +1308,15 @@ export function firstFrame(componentStack?: string): string {
  */
 export const CHAT_WINDOW_INIT = 60;
 export const CHAT_WINDOW_STEP = 60;
+/**
+ * Obergrenze für das AUTOMATISCHE Nachladen beim Hochscrollen (4 Stufen à 60).
+ *
+ * Bewusst gedeckelt: Build 132 starb nativ beim Öffnen eines Verlaufs mit 114
+ * Nachrichten + 31 DIL-Blöcken. Ein einziger Wisch darf deshalb nicht den ganzen
+ * Verlauf in die FlatList ziehen (Review HIGH, 27.11.). Alles darüber bleibt eine
+ * bewusste Nutzeraktion über den Knopf „X ältere Nachrichten laden“.
+ */
+export const CHAT_WINDOW_MAX = 240;
 
 export function chatWindowSlice<T>(messages: T[], window: number): T[] {
   if (!Array.isArray(messages)) return [];
