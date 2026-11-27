@@ -1348,16 +1348,36 @@ export const AUTO_OLDER_COOLDOWN_MS = 400;
  *
  * Bewusst pur und ohne Timer: der Cooldown verhindert, dass ein einziger Wisch alle
  * Stufen auf einmal zieht (die FlatList feuert `onScroll` mit 32 ms Drosselung).
+ *
+ * `window` ist Pflicht (Review HIGH, Runde 2): ohne die aktuelle Fenstergröße feuerte der
+ * Pfad auch dann, wenn das Fenster schon am Deckel stand — alle 400 ms `beginPrepend`,
+ * dessen TTL (1000 ms) länger ist als der Cooldown. Der nächste echte Höhenzuwachs
+ * (Streaming/DIL) wurde dann als Prepend gedeutet und verschob den Offset falsch.
  */
 export function shouldAutoLoadOlder(s: {
   offsetY: number;
   hidden: number;
   now: number;
   last: number;
+  window: number;
 }): boolean {
   if (!Number.isFinite(s.offsetY) || s.offsetY >= AUTO_OLDER_TRIGGER_PX) return false;
   if (!Number.isFinite(s.hidden) || s.hidden <= 0) return false;
+  if (!Number.isFinite(s.window) || s.window >= CHAT_WINDOW_MAX) return false;
   const now = Number.isFinite(s.now) ? s.now : 0;
   const last = Number.isFinite(s.last) ? s.last : 0;
   return now - last >= AUTO_OLDER_COOLDOWN_MS;
+}
+
+/**
+ * Nächstes Fenster nach einem automatischen Nachlade-Schritt.
+ *
+ * Deckelt nach oben, senkt aber NIE (Review HIGH, Runde 2): nach manuellem Laden
+ * (z. B. 600 Nachrichten) hätte `Math.min(w+60, 240)` das Fenster auf 240 zurückgesetzt —
+ * 360 Bubbles wären beim Hochscrollen verschwunden, ein harter Sprung im Verlauf.
+ */
+export function nextAutoWindow(window: number): number {
+  const w = Number.isFinite(window) ? Math.max(0, Math.floor(window)) : CHAT_WINDOW_INIT;
+  if (w >= CHAT_WINDOW_MAX) return w;
+  return Math.min(w + CHAT_WINDOW_STEP, CHAT_WINDOW_MAX);
 }

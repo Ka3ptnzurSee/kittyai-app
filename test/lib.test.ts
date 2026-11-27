@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert";
 import { isGeneratedFileHref, fileExtOf, isFallbackReply } from "../lib.ts";
-import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts, shouldAutoLoadOlder } from "../lib.ts";
+import { joinTurnSegments, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, turnKeyOf, INCOMPLETE_TURN_HINT, TURN_TOOL_PREFIX, TURN_SEGMENT_SEP, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, shouldCollapseBubble, COLLAPSED_HINT, MAX_INLINE_TEXT_CHARS, LOCAL_TRUNC_MARKER, hasLocalTruncation, healTruncatedMessages, createOpenedRegistry, Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, formatTime, relativeTime, presetCron, cronLabel, toolMeta, toolLabel, safeImageUri, absoluteImageUri, compactChatsForStorage, trimChatsForStorage, mergeServerTail, MAX_STORAGE_CHARS, MAX_STORED_MESSAGES, sanitizeLoadedMessages, stripErrorFlags, rehaTagName, filterChatsBySource, chatSourceCounts, shouldAutoLoadOlder, nextAutoWindow, CHAT_WINDOW_MAX, CHAT_WINDOW_INIT } from "../lib.ts";
 
 test("Utf8Decoder dekodiert ASCII", () => {
   const d = new Utf8Decoder();
@@ -887,17 +887,36 @@ test("unvollständiger Turn wird markiert (incomplete:true) und bleibt EINE Blas
 
 test("shouldAutoLoadOlder: lädt nur oben, nur wenn Verlauf versteckt ist, mit Cooldown", () => {
   // oben angekommen, Verlauf versteckt, Cooldown abgelaufen → nachladen
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 120, now: 10_000, last: 9_000 }), true);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 120, now: 10_000, last: 9_000, window: 60 }), true);
   // 149 pt zählt als oben, 150 pt nicht mehr (Grenze gepinnt)
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 149, hidden: 120, now: 10_000, last: 0 }), true);
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 150, hidden: 120, now: 10_000, last: 0 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 149, hidden: 120, now: 10_000, last: 0, window: 60 }), true);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 150, hidden: 120, now: 10_000, last: 0, window: 60 }), false);
   // nichts mehr zu laden → kein Zuwachs, kein Re-Render
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 0, now: 10_000, last: 0 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 0, now: 10_000, last: 0, window: 60 }), false);
   // Cooldown: 399 ms nach dem letzten Schritt noch nicht, 400 ms ja
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: 10_399, last: 10_000 }), false);
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: 10_400, last: 10_000 }), true);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: 10_399, last: 10_000, window: 60 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: 10_400, last: 10_000, window: 60 }), true);
   // kaputte Werte (feindliche Eingaben) → kein Nachladen statt Endlosschleife
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: NaN, hidden: 60, now: 10_000, last: 0 }), false);
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: -5, hidden: NaN, now: 10_000, last: 0 }), false);
-  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: NaN, last: 0 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: NaN, hidden: 60, now: 10_000, last: 0, window: 60 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: -5, hidden: NaN, now: 10_000, last: 0, window: 60 }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 60, now: NaN, last: 0, window: 60 }), false);
+});
+
+test("shouldAutoLoadOlder: am Fenster-Deckel kein Nachladen (beginPrepend nicht armieren)", () => {
+  // window = 60 (< 240) → laden; window = 240 (= CHAT_WINDOW_MAX) → nicht
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 500, now: 10_000, last: 0, window: 60 }), true);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 500, now: 10_000, last: 0, window: CHAT_WINDOW_MAX }), false);
+  assert.strictEqual(shouldAutoLoadOlder({ offsetY: 0, hidden: 500, now: 10_000, last: 0, window: NaN }), false);
+});
+
+test("nextAutoWindow: deckelt nach oben, senkt aber nie ein groesseres Fenster", () => {
+  assert.strictEqual(nextAutoWindow(60), 120);
+  assert.strictEqual(nextAutoWindow(180), CHAT_WINDOW_MAX); // 180+60 = 240 exakt am Deckel
+  assert.strictEqual(nextAutoWindow(CHAT_WINDOW_MAX), CHAT_WINDOW_MAX);
+  // Review HIGH Runde 2: 600 (manuell geladen) darf NICHT auf 240 zurückfallen
+  assert.strictEqual(nextAutoWindow(600), 600);
+  assert.strictEqual(nextAutoWindow(1000), 1000);
+  // kaputte Werte: starten beim Initialfenster statt NaN zu produzieren
+  assert.strictEqual(nextAutoWindow(NaN), CHAT_WINDOW_INIT + 60);
+  assert.strictEqual(nextAutoWindow(-5), 60);
 });

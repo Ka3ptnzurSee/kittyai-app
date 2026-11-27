@@ -26,7 +26,7 @@ import {
 import * as Speech from "expo-speech";
 import { setAudioModeAsync, useAudioPlayer } from "expo-audio";
 import VoiceMode from "./VoiceMode";
-import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, shouldAutoLoadOlder } from "./lib";
+import { CHAT_WINDOW_INIT, CHAT_WINDOW_MAX, CHAT_WINDOW_STEP, chatWindowHidden, chatWindowSlice, nextAutoWindow, shouldAutoLoadOlder } from "./lib";
 import { SPEECH_LANG, SPEECH_RESTART_MS, speechErrorText, voiceHooks } from "./voice";
 import { File, Paths } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
@@ -4710,7 +4710,7 @@ export default function App() {
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={`${hiddenMessages} ältere Nachrichten laden`}
-                    onPress={() => setChatWindow((w) => w + CHAT_WINDOW_STEP)}
+                    onPress={() => setChatWindow((w) => Math.min(w + CHAT_WINDOW_STEP, activeChat.messages.length))}
                     style={styles.loadOlder}
                   >
                     <Text style={styles.loadOlderText}>
@@ -4754,16 +4754,23 @@ export default function App() {
                 const nowMs = Date.now();
                 if (
                   !pilot.isSticking(activeChat.id) &&
-                  shouldAutoLoadOlder({ offsetY: contentOffset.y, hidden: hiddenMessages, now: nowMs, last: autoOlderRef.current })
+                  shouldAutoLoadOlder({
+                    offsetY: contentOffset.y,
+                    hidden: hiddenMessages,
+                    now: nowMs,
+                    last: autoOlderRef.current,
+                    window: chatWindow,
+                  })
                 ) {
                   autoOlderRef.current = nowMs;
                   // beginPrepend merkt Höhe+Offset, damit der gelesene Text beim Einsetzen
                   // nicht springt (ScrollPilot.onContentSizeChange korrigiert).
                   pilot.beginPrepend(activeChat.id);
-                  // Deckel: automatisch höchstens bis CHAT_WINDOW_MAX laden. Alles darüber
-                  // nur per Knopf — sonst zieht ein einziger Wisch den ganzen Verlauf in die
-                  // FlatList (OOM-Risiko bei 1000+-Nachrichten, Review HIGH).
-                  setChatWindow((w) => Math.min(w + CHAT_WINDOW_STEP, CHAT_WINDOW_MAX));
+                  // Deckel: automatisch höchstens bis CHAT_WINDOW_MAX laden, nie zurück
+                  // unter ein bereits größeres Fenster (Review HIGH, Runde 2). Alles
+                  // darüber nur per Knopf — sonst zieht ein einziger Wisch den ganzen
+                  // Verlauf in die FlatList (OOM-Risiko, Build-132-Klasse).
+                  setChatWindow((w) => nextAutoWindow(w));
                 }
               }}
               onScrollBeginDrag={() => {
