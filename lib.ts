@@ -835,23 +835,34 @@ export function mergeServerTail<
   T extends { id?: string; role?: string; text?: string; images?: unknown[] },
 >(
   local: T[],
-  server: { id?: string; role?: string; text?: string; images?: unknown[] }[],
-  opts: { maxAppend?: number; maxPrepend?: number; resolveImages?: (imgs: unknown[]) => unknown[] | undefined } = {},
+  server: { id?: string; role?: string; text?: string; images?: unknown[]; attachments?: unknown[] }[],
+  opts: {
+    maxAppend?: number;
+    maxPrepend?: number;
+    resolveImages?: (imgs: unknown[]) => unknown[] | undefined;
+    // Anhänge (Bilder/Dokumente) je Bubble: der Server liefert sie mit URL, damit die
+    // Vorschau auch nach App-Neustart/Reload steht (26.11.2026).
+    resolveAttachments?: (list: unknown[]) => unknown[] | undefined;
+  } = {},
 ): T[] | null {
   const maxAppend = opts.maxAppend ?? 40;
   const maxPrepend = opts.maxPrepend ?? 320;
   const srv = Array.isArray(server) ? server : [];
   if (!srv.length) return null;
   const localMsgs = Array.isArray(local) ? local : [];
-  const toLocal = (m: { id?: string; role?: string; text?: string; images?: unknown[] }, i: number): T => {
+  const toLocal = (m: { id?: string; role?: string; text?: string; images?: unknown[]; attachments?: unknown[] }, i: number): T => {
     const images = Array.isArray(m.images) && m.images.length
       ? (opts.resolveImages ? opts.resolveImages(m.images) : m.images)
+      : undefined;
+    const attachments = Array.isArray(m.attachments) && m.attachments.length
+      ? (opts.resolveAttachments ? opts.resolveAttachments(m.attachments) : m.attachments)
       : undefined;
     return {
       id: String(m.id || `srv${i}`),
       role: m.role === "user" ? "user" : "assistant",
       text: String(m.text || "").slice(0, 500_000),
       ...(images ? { images } : {}),
+      ...(attachments ? { attachments } : {}),
     } as unknown as T;
   };
   const worthKeeping = (m: T) => {
@@ -1410,4 +1421,32 @@ export function nextManualWindow(window: number, total: number): number {
   if (len <= 0) return w;
   if (w >= len) return w;
   return Math.min(w + CHAT_WINDOW_STEP, len);
+}
+
+/**
+ * Bild-Vorschau nach Reload (26.11.2026): lokal haengt an der Bubble die Datei-URI des
+ * Pickers (file:///…/Caches/…), die nach Cache-Purge oder App-Neustart tot ist - der
+ * Server hat dieselbe Datei aber unter /generated/chat/… . Hier werden die Server-
+ * Anhaenge auf die passenden lokalen Nutzer-Blasen gezogen. Zuordnung: Reihenfolge der
+ * Blasen mit Bild-Anhang (beide Listen sind chronologisch), nicht Textvergleich —
+ * der Server-Text enthaelt zusaetzlich den Bild-Kontext.
+ */
+export function preferServerAttachments<
+  T extends { role?: string; attachments?: unknown[] },
+  S extends { role?: string; attachments?: unknown[] },
+>(local: T[], server: S[], resolve: (list: unknown[]) => unknown[] | undefined): T[] {
+  const localList = Array.isArray(local) ? local : [];
+  const srvList = Array.isArray(server) ? server : [];
+  const isImg = (m: { attachments?: unknown[] }) =>
+    Array.isArray(m.attachments) && m.attachments.some((a) => String((a as { kind?: string } | null)?.kind || "") === "image");
+  const srvImgs = srvList.filter((m) => m.role === "user" && isImg(m));
+  if (!srvImgs.length) return localList;
+  let k = 0;
+  return localList.map((m) => {
+    if (m.role !== "user" || !isImg(m) || k >= srvImgs.length) return m;
+    const resolved = resolve(srvImgs[k].attachments as unknown[]);
+    k += 1;
+    if (!resolved || !resolved.length) return m;
+    return { ...m, attachments: resolved };
+  });
 }

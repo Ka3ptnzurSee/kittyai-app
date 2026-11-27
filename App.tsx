@@ -44,7 +44,7 @@ import { Ionicons, preloadIcons } from "./icons";
 import { preloadFonts } from "./fonts";
 import { perfAdd, perfEnd, perfStart, takePerfSamples, moduleStartedAt } from "./perf";
 import { ScrollPilot } from "./scrollPilot";
-import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
+import { Utf8Decoder, SseParser, argSummary, breakLongLines, breakUnbreakable, relativeTime, uid, cronLabel, presetCron, WEEKDAYS_DE, toolMeta, applyPermission, classifyError, isRetryable, deriveTitle, absoluteImageUri, setImageBaseUrl, tooTall, normalizeBlankRuns, stripDilFences, isBlankAiMessage, compactChatsForStorage, preferServerAttachments, mergeServerTail, longestTurnText, turnTextOfLastTurn, collapseTurnBubbles, INCOMPLETE_TURN_HINT, TURN_SEGMENT_SEP, sanitizeLoadedMessages, stripErrorFlags, filterChatsBySource, chatSourceCounts, MAX_BUBBLE_PT, BUBBLE_PREVIEW_PT, COLLAPSED_HINT, shouldCollapseBubble, healTruncatedMessages, createOpenedRegistry, isRestartErrorKind, isRestartErrorText, RESTART_RELOAD_DELAYS_MS, type ChatSourceFilter, type CronPreset, type PermissionRequest } from "./lib";
 import { Dil, DilBereich, DilRichText } from "./Dil";
 import { SichererBlock } from "./SichererBlock";
 import { aiFontFamily, colors, monoFontFamily, oaicolors, uiFontFamily } from "./theme";
@@ -54,7 +54,7 @@ import { RehaTab } from "./RehaTab";
 import { installGlobalErrorHandlers } from "./crashHandler";
 
 type Activity = { id: string; tool: string; status: "running" | "ok" | "error"; args?: unknown; result?: string };
-type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; attachments?: { kind: string; name: string; sizeKB?: number }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[]; turnId?: string; incomplete?: boolean };
+type Msg = { id: string; role: "user" | "assistant"; text: string; activity?: Activity[]; permissions?: PermissionRequest[]; images?: { uri: string }[]; attachments?: { kind: string; name: string; sizeKB?: number; url?: string; mime?: string }[]; replyTo?: { text: string }; error?: { type: string; retryable: boolean }; dil?: unknown[]; turnId?: string; incomplete?: boolean };
 type ChatSource = "app" | "whatsapp" | "terminal";
 type Chat = {
   id: string;
@@ -405,6 +405,39 @@ function StreamingCursor() {
 // Bild in einer Nachricht: lädt es nicht (toter /generated-Link, gelöschte Datei),
 // bleibt KEIN 260pt hoher leerer Kasten stehen (das war ein „weißer Block"),
 // sondern nur eine schmale Hinweiszeile.
+/**
+ * Kleine Vorschau eines gesendeten Bildes (26.11.2026: Bilder standen im Chat nur als
+ * Text-Chip „Bild 1.jpg · 2512 KB" oder als 260 pt hoher Block — Per will eine kleine
+ * Vorschau). Antippen öffnet das Bild im Vollbild.
+ */
+function AttachThumb({ uri, label }: { uri: string; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+  if (!uri || failed) {
+    return (
+      <View style={styles.imgFailedRow}>
+        <Ionicons name="image-outline" size={14} color={colors.muted} />
+        <Text style={styles.imgFailedText}>Vorschau nicht verfügbar</Text>
+      </View>
+    );
+  }
+  return (
+    <>
+      <Pressable onPress={() => setOpen(true)} accessibilityRole="button" accessibilityLabel={label || "Bild in Vollbild öffnen"}>
+        <Image source={{ uri }} style={styles.attThumb} resizeMode="cover" onError={() => setFailed(true)} />
+      </Pressable>
+      {open ? (
+        <Modal visible transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+          <Pressable style={styles.imgViewer} onPress={() => setOpen(false)} accessibilityLabel="Bild schließen">
+            <Image source={{ uri }} style={styles.imgViewerImg} resizeMode="contain" />
+            <Text style={styles.imgViewerHint}>Tippen zum Schließen</Text>
+          </Pressable>
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
 function MessageImage({ uri }: { uri: string }) {
   const [failed, setFailed] = useState(false);
   if (!uri || failed) {
@@ -589,19 +622,23 @@ function MessageBubble({
       )}
       {item.attachments && item.attachments.length > 0 ? (
         <View style={styles.attRow}>
-          {item.attachments.map((at, i) => (
-            <View key={i} style={styles.attChip}>
-              <Ionicons
-                name={at.kind === "audio" ? "mic-outline" : at.kind === "image" ? "image-outline" : "document-text-outline"}
-                size={12}
-                color={colors.muted}
-              />
-              <Text numberOfLines={1} style={styles.attChipText}>
-                {at.name}
-                {at.sizeKB ? " · " + (at.sizeKB >= 1024 ? Math.round(at.sizeKB / 1024) + " MB" : at.sizeKB + " KB") : ""}
-              </Text>
-            </View>
-          ))}
+          {item.attachments.map((at, i) =>
+            at.kind === "image" && at.url ? (
+              <AttachThumb key={i} uri={at.url} label={`${at.name}${at.sizeKB ? ` (${at.sizeKB} KB)` : ""} in Vollbild öffnen`} />
+            ) : (
+              <View key={i} style={styles.attChip}>
+                <Ionicons
+                  name={at.kind === "audio" ? "mic-outline" : at.kind === "image" ? "image-outline" : "document-text-outline"}
+                  size={12}
+                  color={colors.muted}
+                />
+                <Text numberOfLines={1} style={styles.attChipText}>
+                  {at.name}
+                  {at.sizeKB ? " · " + (at.sizeKB >= 1024 ? Math.round(at.sizeKB / 1024) + " MB" : at.sizeKB + " KB") : ""}
+                </Text>
+              </View>
+            ),
+          )}
         </View>
       ) : null}
       {item.images && item.images.length > 0 ? (
@@ -653,6 +690,25 @@ function resolveImageList(list: unknown, base: string): { uri: string }[] | unde
     .map((im) => absoluteImageUri(String((im as { uri?: string } | null)?.uri || ""), base))
     .filter((u): u is string => !!u)
     .map((u) => ({ uri: u }));
+  return out.length ? out : undefined;
+}
+
+// Anhänge vom Server normalisieren: Bild-URLs absolut machen (Vorschau nach Reload),
+// Dokumente unverändert. Unbekannte Formen fliegen raus statt zu crashen.
+function resolveAttachments(list: unknown, base: string): { kind: string; name: string; sizeKB?: number; url?: string; mime?: string }[] | undefined {
+  if (!Array.isArray(list)) return undefined;
+  const out = list
+    .map((raw) => {
+      const a = (raw || {}) as { kind?: unknown; name?: unknown; sizeKB?: unknown; url?: unknown; mime?: unknown };
+      const kind = typeof a.kind === "string" ? a.kind : "document";
+      const name = String(a.name || "").slice(0, 120) || (kind === "image" ? "Bild" : "Datei");
+      const sizeKB = typeof a.sizeKB === "number" && a.sizeKB > 0 ? Math.round(a.sizeKB) : undefined;
+      const mime = typeof a.mime === "string" ? a.mime : undefined;
+      let url: string | undefined;
+      if (kind === "image" && typeof a.url === "string" && a.url) url = absoluteImageUri(a.url, base) || undefined;
+      return { kind, name, sizeKB, url, mime };
+    })
+    .filter((a) => a.name);
   return out.length ? out : undefined;
 }
 
@@ -1638,6 +1694,7 @@ export default function App() {
           if (serverMsgs.length > chat.messages.length) pilot.beginPrepend(chatId);
           const tail = mergeServerTail(chat.messages, serverMsgs, {
             resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
+            resolveAttachments: (list) => resolveAttachments(list, serverUrl),
           });
           if (!tail) return false;
           // Eine Blase pro Turn: die nachgezogenen Server-Segmente werden zusammengefasst.
@@ -2287,12 +2344,16 @@ export default function App() {
             // Server mehr Verlauf hat als der lokale Speicher (Deckel 500).
             const tail = mergeServerTail(base, data.messages, {
               resolveImages: (imgs) => resolveImageList(imgs as { uri: string }[], serverUrl),
+            resolveAttachments: (list) => resolveAttachments(list, serverUrl),
             });
             if (tail) {
               // Eine Blase pro Turn (Segmente zusammenfassen), sonst stünden die
               // nachgezogenen Segmente als eigene Bubbles nebeneinander.
               const collapsed = collapseTurnBubbles(tail, { includeTools: showTurnToolLines }) || tail;
-              return { ...c, messages: collapsed, bodyCompacted: false, updatedAt: Date.now() };
+              // Bild-Vorschau: Server-Anhänge (dauerhafte URL) statt der flüchtigen
+              // file://-URI des Pickers an die Nutzer-Blasen ziehen.
+              const withAtt = preferServerAttachments(collapsed, data.messages, (l) => resolveAttachments(l, serverUrl));
+              return { ...c, messages: withAtt, bodyCompacted: false, updatedAt: Date.now() };
             }
             if (healed) return { ...c, messages: healed, updatedAt: Date.now() };
             const lastAi = [...c.messages].reverse().find((m) => m.role === "assistant");
@@ -3324,7 +3385,16 @@ export default function App() {
     setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
     // Anhänge mit Namen/Größe an der Blase festhalten (Bilder zeigen schon die
     // Thumbnails): so ist nach Chatwechsel/Reload sichtbar, was mitgeschickt wurde.
-    const attList: { kind: string; name: string; sizeKB?: number }[] = [
+    // Bilder als Anhang mit LOKALER URI: die Blase zeigt sie sofort als kleine Vorschau
+    // (vorher: Riesenbild über die volle Breite bzw. nach Reload nur ein Text-Chip).
+    const attList: { kind: string; name: string; sizeKB?: number; url?: string; mime?: string }[] = [
+      ...pendingImages.map((im, i) => ({
+        kind: "image",
+        name: `Bild ${i + 1}`,
+        sizeKB: Math.round(((im.data || "").length * 0.75) / 1024),
+        url: im.uri,
+        mime: im.mediaType,
+      })),
       ...pendingDocuments.map((d) => ({
         kind: /^audio\//.test(d.mimeType || "") ? "audio" : "document",
         name: d.name,
@@ -3332,7 +3402,9 @@ export default function App() {
       })),
       ...pendingFiles.map((f) => ({ kind: "file", name: f.name })),
     ];
-    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "Bild" : documents.length ? "Dokument" : "Datei"), images: imageUris, attachments: attList.length ? attList : undefined, replyTo };
+    // `images` NICHT mehr setzen: die Vorschau kommt aus attList (klein), sonst stünde
+    // dasselbe Bild zweimal in der Blase (260 pt hoch + Thumbnail).
+    const userMsg: Msg = { id: uid("u"), role: "user", text: message || (imageUris.length ? "Bild" : documents.length ? "Dokument" : "Datei"), attachments: attList.length ? attList : undefined, replyTo };
     const aiId = uid("a");
     setPendingImages([]);
     setPendingFiles([]);
@@ -5446,6 +5518,10 @@ export default function App() {
 
 const styles = StyleSheet.create({
   attRow: { flexDirection: "row", flexWrap: "wrap", marginTop: 6, gap: 6 },
+  attThumb: { width: 64, height: 64, borderRadius: 10, backgroundColor: "rgba(127,127,127,0.12)" },
+  imgViewer: { flex: 1, backgroundColor: "rgba(0,0,0,0.93)", justifyContent: "center", alignItems: "center" },
+  imgViewerImg: { width: "100%", height: "82%" },
+  imgViewerHint: { color: "#fff", opacity: 0.7, fontSize: 12, marginTop: 10 },
   attChip: {
     flexDirection: "row",
     alignItems: "center",
