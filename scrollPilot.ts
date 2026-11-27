@@ -69,6 +69,12 @@ export const STICK_MAX_MS = 8000;
  * sich tot an. 24 pt liegt über dem iOS-Touch-Slop und unter einer halben Zeilenhöhe.
  */
 export const SCROLL_INTENT_MIN_PX = 24;
+/**
+ * So lange gilt ein Geste-Start als aktuell, wenn das Geste-Ende nicht gemeldet wird.
+ * Ohne diesen Verfall könnte ein reines Antippen später durch eine Layout-Änderung
+ * (Tastatur, Verlauf schrumpft) als Aufwärts-Scrollen gelten (Review Runde 6, HIGH).
+ */
+export const DRAG_INTENT_TTL_MS = 1500;
 /** So lange gelten onScroll-Messwerte nach einem programmatischen Sprung als Zwischenstand. */
 export const MEASURE_SUPPRESS_MS = 120;
 /** Sammel-Fenster für Höhenänderungen beim Streamen (nicht bei jedem Delta springen). */
@@ -109,8 +115,13 @@ export class ScrollPilot {
   private sticky = new Set<string>();
   /** Chats, in denen der Nutzer seit dem Öffnen selbst gescrollt hat (nur die dürfen nachladen). */
   private dragged = new Set<string>();
-  /** Offset beim Beginn der laufenden Geste (nur für die Intent-Erkennung). */
-  private dragStart = new Map<string, number>();
+  /**
+   * Beginn der laufenden Geste (nur für die Intent-Erkennung).
+   * `y === null` = die Liste war beim Drag-Start noch nicht vermessen; der erste
+   * onScroll-Wert wird dann als Startwert nachgezogen (sonst bliebe der Chat für den
+   * Auto-Pfad dauerhaft gesperrt).
+   */
+  private dragStart = new Map<string, { y: number | null; at: number }>();
   private near = new Map<string, boolean>();
   private autoScrollUntil = 0;
   private timers = new Set<number>();
@@ -210,8 +221,16 @@ export class ScrollPilot {
     // Ausgangspunkt merken — „gescrollt“ entscheidet erst die GEMESSENE Bewegung
     // (Review Runde 5: onScrollBeginDrag feuert schon bei der kleinsten Berührung).
     const g = this.geo.get(chatId);
-    if (g) this.dragStart.set(chatId, g.offsetY);
-    else this.dragStart.delete(chatId);
+    this.dragStart.set(chatId, { y: g ? g.offsetY : null, at: this.deps.now() });
+  }
+
+  /**
+   * Geste beendet (onScrollEndDrag): ohne Bewegung war es ein Antippen — der Startwert
+   * darf danach keine spätere, nicht-gestische Offset-Änderung mehr als „gescrollt“
+   * auslegen (Tastatur öffnet → Viewport schrumpft → RN clampt offsetY).
+   */
+  endDrag(chatId: string): void {
+    this.dragStart.delete(chatId);
   }
 
   /**
@@ -236,9 +255,16 @@ export class ScrollPilot {
     this.geo.set(chatId, g);
     // Gemessene Aufwärtsbewegung = der Nutzer will ältere Nachrichten sehen.
     const start = this.dragStart.get(chatId);
-    if (start !== undefined && g.offsetY <= start - SCROLL_INTENT_MIN_PX) {
-      this.dragged.add(chatId);
-      this.dragStart.delete(chatId);
+    if (start) {
+      if (this.deps.now() - start.at > DRAG_INTENT_TTL_MS) {
+        // Notanker, falls das Geste-Ende nicht gemeldet wurde.
+        this.dragStart.delete(chatId);
+      } else if (start.y === null) {
+        start.y = g.offsetY; // erster Messwert nach dem Drag-Start
+      } else if (g.offsetY <= start.y - SCROLL_INTENT_MIN_PX) {
+        this.dragged.add(chatId);
+        this.dragStart.delete(chatId);
+      }
     }
     const plan = this.plan(chatId, g);
     if (!plan.measure) return false;
@@ -266,6 +292,10 @@ export class ScrollPilot {
       if (this.deps.now() - pending.at <= PREPEND_TTL_MS && delta > 0) {
         this.deps.scrollToOffset(pending.offsetY + delta);
         this.geo.set(chatId, { ...g, offsetY: pending.offsetY + delta });
+        // Eine laufende Geste wird um dieselbe Höhe mitverschoben, sonst erreicht der
+        // echte Aufwärts-Wisch die 24-pt-Schwelle nicht (Review Runde 6, LOW).
+        const drag = this.dragStart.get(chatId);
+        if (drag && drag.y !== null) drag.y += delta;
         return; // Nutzer liest oben → NICHT ans Ende springen
       }
     }

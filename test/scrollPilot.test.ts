@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert";
-import { ScrollPilot, chatScrollPlan, SETTLE_JUMP_DELAYS_MS, STICK_MAX_MS, MEASURE_SUPPRESS_MS, CONTENT_DEBOUNCE_MS, PREPEND_TTL_MS, BOTTOM_TOLERANCE_PX } from "../scrollPilot.ts";
+import { DRAG_INTENT_TTL_MS, ScrollPilot, chatScrollPlan, SETTLE_JUMP_DELAYS_MS, STICK_MAX_MS, MEASURE_SUPPRESS_MS, CONTENT_DEBOUNCE_MS, PREPEND_TTL_MS, BOTTOM_TOLERANCE_PX } from "../scrollPilot.ts";
 
 /** Deterministische Uhr: Timer und Frames laufen in echtem Zeitverhältnis, aber ohne Wall-Clock. */
 class FakeClock {
@@ -382,4 +382,48 @@ test("hasUserScrolled: close() raeumt das Flag auf", () => {
   assert.strictEqual(pilot.hasUserScrolled("c1"), true);
   pilot.close("c1");
   assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+});
+
+test("hasUserScrolled: Antippen + spaetere Layout-Aenderung gibt NICHT frei (1,5-s-Verfall)", () => {
+  const { clock, pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(500, 4000));
+  pilot.drag("c1"); // Antippen, keine Bewegung
+  clock.advance(DRAG_INTENT_TTL_MS + 1);
+  // Tastatur oeffnet / Verlauf schrumpft -> offsetY faellt um 200 pt, ohne Geste
+  pilot.onScroll("c1", GEO(300, 3200));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false, "Layout-Aenderung ist kein Scrollen");
+});
+
+test("hasUserScrolled: endDrag() nach Antippen entschaerft den Startwert sofort", () => {
+  const { pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(500, 4000));
+  pilot.drag("c1");
+  pilot.endDrag("c1");
+  pilot.onScroll("c1", GEO(300, 4000));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+});
+
+test("hasUserScrolled: fehlende Geometrie beim Drag sperrt den Chat nicht dauerhaft", () => {
+  const { pilot } = makePilot();
+  pilot.open("c1");
+  pilot.drag("c1"); // Liste noch nicht vermessen -> y = null
+  pilot.onScroll("c1", GEO(600, 4000)); // erster Messwert wird Startwert
+  assert.strictEqual(pilot.hasUserScrolled("c1"), false);
+  pilot.onScroll("c1", GEO(575, 4000)); // 25 pt nach oben
+  assert.strictEqual(pilot.hasUserScrolled("c1"), true);
+});
+
+test("hasUserScrolled: Prepend waehrend der Geste verschiebt den Startwert mit", () => {
+  const { clock, pilot } = makePilot();
+  pilot.open("c1");
+  pilot.onScroll("c1", GEO(400, 4000));
+  pilot.drag("c1");
+  // 60 aeltere Nachrichten kommen dazu: Inhalt waechst um 600 pt, Pilot korrigiert den Offset
+  pilot.beginPrepend("c1");
+  pilot.onContentSizeChange("c1", 4600);
+  // echte Fingerbewegung um 25 pt nach oben (relativ zur korrigierten Lage)
+  pilot.onScroll("c1", GEO(400 + 600 - 25, 4600));
+  assert.strictEqual(pilot.hasUserScrolled("c1"), true);
 });

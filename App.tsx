@@ -4784,6 +4784,11 @@ export default function App() {
                 // Sprünge abbrechen (sonst reißt ein offener Timer zurück).
                 pilot.drag(activeChat.id);
               }}
+              onScrollEndDrag={() => {
+                // Ohne Bewegung war es nur ein Antippen: der gemerkte Startwert darf danach
+                // keine Layout-Änderung mehr als „gescrollt“ auslegen.
+                pilot.endDrag(activeChat.id);
+              }}
               onContentSizeChange={(_w, h) => {
                 // Höhe geändert (Batch nachgerendert, Server-Verlauf, Bild/DIL-Layout):
                 // der Pilot entscheidet kleben / 40-ms-Sprung / Prepend-Offset / nichts.
