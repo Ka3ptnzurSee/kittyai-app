@@ -450,3 +450,37 @@ test("grosser Chat: hat der Nutzer selbst gescrollt, gibt es KEINEN letzten Spru
   clock.advance(STICK_MAX_MS);
   assert.strictEqual(ends(), before, "Nutzer-Position wird respektiert");
 });
+
+test("setViewport: macht viewport bekannt, ohne Höhe/Offset zu verlieren", () => {
+  const { clock, pilot, offsets, ends } = makePilot();
+  pilot.setViewport("c1", 800);
+  // Noch keine Höhe → kein exakter Sprung möglich, scrollToEnd bleibt der Startpunkt.
+  pilot.open("c1");
+  clock.advance(600);
+  assert.ok(ends() >= 1, "ohne Höhe bleibt scrollToEnd der Startpunkt");
+  assert.strictEqual(offsets().length, 0, "ohne Höhe darf nicht gerechnet werden");
+});
+
+test("setViewport: grosser Chat ohne onScroll landet unten (scrollToOffset statt scrollToEnd)", () => {
+  const { clock, pilot, offsets, ends } = makePilot();
+  pilot.setViewport("big", 800);            // onLayout der FlatList, kein Scroll-Event noetig
+  pilot.open("big");                        // Sticky-Modus, 0/120/500 ms geplant
+  pilot.onContentSizeChange("big", 20000);  // 138 Nachrichten, Ende hoeher als der Viewport
+  clock.advance(600);
+  const last = offsets().at(-1);
+  assert.strictEqual(last?.y, 20000 - 800, "Sprung muss exakt auf height - viewport gehen");
+  assert.ok(last!.y > 0);
+  assert.strictEqual(pilot.distanceToBottom("big"), 0);
+  assert.strictEqual(ends(), 0, "bekannte Geometrie: kein unzuverlässiges scrollToEnd mehr");
+});
+
+test("setViewport: unplausible Werte werden ignoriert", () => {
+  const { clock, pilot, offsets } = makePilot();
+  pilot.setViewport("c1", 0);
+  pilot.setViewport("c1", Number.NaN);
+  pilot.setViewport("c1", -5);
+  pilot.open("c1");
+  pilot.onContentSizeChange("c1", 20000);
+  clock.advance(600);
+  assert.strictEqual(offsets().length, 0, "ohne viewport darf nicht gerechnet werden");
+});

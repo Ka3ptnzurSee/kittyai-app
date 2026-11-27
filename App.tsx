@@ -4726,6 +4726,7 @@ export default function App() {
             {/* Kein maintainVisibleContentPosition mehr: es hielt den Offset beim Nachrendern
                 fest und arbeitete damit gegen das „ans Ende springen" (Befund 26.11.2026). */}
             <FlatList ref={listRef}
+              onLayout={(e) => pilot.setViewport(activeChat.id, e.nativeEvent.layout.height)}
               data={visibleMessages}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"

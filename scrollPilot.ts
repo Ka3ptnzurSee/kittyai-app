@@ -315,6 +315,23 @@ export class ScrollPilot {
   }
 
   /**
+   * Höhe des sichtbaren Ausschnitts (FlatList-onLayout). Ohne diesen Wert bleibt
+   * `viewport` 0, solange kein onScroll gefeuert hat — und dann kann `jump()` den
+   * exakten Sprung nicht rechnen und fällt auf das unzuverlässige `scrollToEnd()`
+   * zurück. Genau das traf große Chats beim Öffnen (kein Scroll-Event, weil die
+   * Liste sofort ans Ende springen soll): sie landeten nie unten.
+   */
+  setViewport(chatId: string, viewport: number): void {
+    if (!Number.isFinite(viewport) || viewport <= 0) return;
+    const prev = this.geo.get(chatId);
+    this.geo.set(chatId, {
+      offsetY: prev?.offsetY ?? 0,
+      height: prev?.height ?? 0,
+      viewport,
+    });
+  }
+
+  /**
    * Steht unmittelbar bevor, dass ältere Nachrichten VORNE angehängt werden
    * (`mergeServerTail` beim Session-Sync / Pull-to-Refresh)? Dann die aktuelle
    * Geometrie merken, damit onContentSizeChange den Offset korrigieren kann.
