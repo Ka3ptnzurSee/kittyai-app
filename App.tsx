@@ -1588,6 +1588,21 @@ export default function App() {
     return () => task.cancel();
   }, [activeChatId]);
 
+  // Einmal-Marker pro App-Start: WELCHES JS-Bundle läuft (OTA-Update-ID oder eingebettet)?
+  // Ohne diesen Wert ist „ist das Update angekommen?" nicht messbar (logs/perf.jsonl).
+  const bootMarkiertRef = useRef(false);
+  useEffect(() => {
+    if (bootMarkiertRef.current) return;
+    bootMarkiertRef.current = true;
+    const id = (() => {
+      try {
+        const u = Updates as unknown as { updateId?: string | null; isEmbeddedLaunch?: boolean };
+        return u.isEmbeddedLaunch ? "embedded" : String(u.updateId || "unknown");
+      } catch { return "unknown"; }
+    })();
+    perfAdd("boot", 0, id.slice(0, 40));
+  }, []);
+
   useEffect(() => {
     const flush = () => {
       const samples = takePerfSamples();
@@ -1629,7 +1644,7 @@ export default function App() {
   // Live-Sync/Reload: finale Antwort aus der Server-Session-Datei holen (überlebt die
   // turnRegistry-TTL) und eine leere/fehlerhafte KI-Bubble damit auffüllen.
   /** Billiger Turn-Status (~100 B) statt voller Session (21-26 KB) beim Busy-Polling. */
-  async function fetchTurnState(chatId: string): Promise<{ running: boolean; idleMs?: number } | null> {
+  async function fetchTurnState(chatId: string): Promise<{ running: boolean; idleMs?: number; turnId?: string } | null> {
     try {
       const base = serverUrl.replace(/\/+$/, "");
       const res = await fetch(base + "/api/turn-state?chatId=" + encodeURIComponent(chatId), { headers: authHeaders() });
@@ -1642,7 +1657,7 @@ export default function App() {
       // verloren). Rückfall nur noch, wenn GENAU EIN Chat in der Antwort steht (alter Server).
       const treffer = chats[chatId];
       if (treffer) return treffer;
-      const werte = Object.values(chats) as { running: boolean; idleMs?: number }[];
+      const werte = Object.values(chats) as { running: boolean; idleMs?: number; turnId?: string }[];
       return werte.length === 1 ? werte[0] : { running: false };
     } catch {
       return null;
@@ -1775,25 +1790,43 @@ export default function App() {
    * (turnId + lastSeq) setzt der SSE-Stream an der letzten Sequenznummer fort: Text,
    * Werkzeug-Zeilen und Status kommen direkt, ohne Lade-Meldungen.
    */
-  async function resumeLiveTurn(chatId: string): Promise<boolean> {
+  async function resumeLiveTurn(chatId: string, opts?: { turnId?: string }): Promise<boolean> {
     const st = streamStateRef.current[chatId];
+    // Anker darf auch vom Server kommen (turn-state.turnId): nach einem App-Neustart
+    // oder wenn der Turn von einem anderen Gerät stammt, gibt es lokal keinen.
+    const ankerTurnId = String(opts?.turnId || st?.turnId || "");
     const chat = chatsRef.current.find((c) => c.id === chatId);
     if (!chat || chat.readOnly || chat.remote) return false;
     const aiMsg = [...chat.messages].reverse().find((m) => m.role === "assistant" && m.turnId && !m.error);
     const userMsg = [...chat.messages].reverse().find((m) => m.role === "user");
     const erlaubt = shouldResumeLive({
-      hasAnchorTurnId: st?.turnId,
+      hasAnchorTurnId: ankerTurnId,
       hasActiveStream: abortControllersRef.current.has(chatId),
       hasAssistantBubble: !!aiMsg,
       hasUserMessage: !!userMsg,
       alreadyResuming: liveResumeRef.current.has(chatId),
       readOnly: !!chat.readOnly,
     });
-    if (!erlaubt || !st || !aiMsg || !userMsg) return false;
+    if (!erlaubt || !aiMsg || !userMsg) return false;
+    // Sequenz nur übernehmen, wenn der Anker zu DIESEM Turn gehört. Sonst ab 0
+    // (Server puffert den ganzen Turn) — und die Bubble vorher leeren, weil der
+    // Replay den Text von vorn aufbaut (sonst Doppeltext).
+    const gleicherTurn = !!st && ankerTurnId === st.turnId;
+    const lastSeq = gleicherTurn ? st.lastSeq || 0 : 0;
+    if (!gleicherTurn) {
+      patchMsg(chatId, aiMsg.id, (m) => ({ ...m, text: "", activity: [], dil: undefined }));
+      setThinkingByChat((p) => ({ ...p, [chatId]: "" }));
+    }
+    streamStateRef.current[chatId] = {
+      turnId: ankerTurnId,
+      lastSeq,
+      clientMessageId: st?.clientMessageId || "",
+    };
+    persistStreamState(chatId);
     liveResumeRef.current.add(chatId);
     setStatusByChat((prev) => ({ ...prev, [chatId]: "" }));
     try {
-      await streamChat(userMsg.text, chatId, aiMsg.id, [], [], { turnId: st.turnId, lastSeq: st.lastSeq || 0 }, st.clientMessageId);
+      await streamChat(userMsg.text, chatId, aiMsg.id, [], [], { turnId: ankerTurnId, lastSeq, canReset: true }, st?.clientMessageId);
       markBusy(chatId, false);
       return true;
     } catch {
@@ -2459,6 +2492,8 @@ export default function App() {
       for (const id of ids) {
         if (cancelled) return;
         if (!busyChatIds.has(id)) continue; // inzwischen fertig
+        // Stream läuft schon live (Resume oder eigener Send): nicht zusätzlich pollen.
+        if (abortControllersRef.current.has(id) || liveResumeRef.current.has(id)) { stillBusy = true; continue; }
         // ERST der billige Status (~100 B): die volle Session (21-26 KB) nur holen, wenn
         // der Turn wirklich fertig ist. Vorher: 3 s x 24 KB pro Chat (Poll-Sturm).
         const state = await fetchTurnState(id);
@@ -2471,6 +2506,10 @@ export default function App() {
         }
         if (state.running && (state.idleMs ?? 0) < 300000) {
           leerRunden.delete(id);
+          // HIER lag der Dauer-"Antwort wird geladen …"-Zustand: der Poller sah
+          // running:true und wartete einfach weiter, statt den Stream anzuschließen.
+          // Befund 27.11.2026 (nginx-Log: 13x turn-state in 45 s, kein chat/stream).
+          void resumeLiveTurn(id, { turnId: state.turnId });
           stillBusy = true;
           continue;
         }
